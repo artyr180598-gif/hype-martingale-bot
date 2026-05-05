@@ -1,6 +1,8 @@
 import time
 import logging
 import sys
+import requests
+import threading
 from config import (
     SYMBOL, LEVERAGE, MARGINS,
     ENTRY_DROP_PCT, AVERAGING_STEP_PCT,
@@ -23,6 +25,7 @@ class MartingaleBot:
     def __init__(self):
         self.bybit    = BybitClient()
         self.notifier = TelegramNotifier()
+        self.running  = True
         self._reset()
 
     def _reset(self):
@@ -107,21 +110,160 @@ class MartingaleBot:
         self.bybit.cancel_all_orders(SYMBOL)
         self.bybit.market_close_all(SYMBOL, self.total_qty)
 
+    # ─── СТАТУС ──────────────────────────────────────────────────
+    def get_status_text(self):
+        price = self.bybit.get_price(SYMBOL)
+        if not price:
+            return "⚠️ Не могу получить цену"
+
+        if not self.in_trade:
+            drop = 0.0
+            if self.recent_high:
+                drop = round((self.recent_high - price) / self.recent_high * 100, 2)
+            need = round(ENTRY_DROP_PCT - drop, 2)
+            return (
+                f"📊 СТАТУС БОТА\n\n"
+                f"💲 Цена HYPE: ${price}\n"
+                f"📈 Максимум: ${self.recent_high or '—'}\n"
+                f"📉 Откат сейчас: -{drop}%\n"
+                f"🎯 Нужно для входа: -{ENTRY_DROP_PCT}%\n"
+                f"⏳ Осталось: -{max(need, 0)}%\n\n"
+                f"🔍 Жду сигнала входа..."
+            )
+        else:
+            drop  = round(self._drop_pct(price), 2)
+            tp    = self._round_price(self.average_price * (1 + TAKE_PROFIT_PCT / 100))
+            stop  = self._round_price(
+                self.first_entry_price * (1 - STOP_LOSS_PCT / 100)
+            )
+            return (
+                f"📊 СТАТУС БОТА\n\n"
+                f"🟢 АКТИВНАЯ СДЕЛКА\n"
+                f"💲 Цена HYPE: ${price}\n"
+                f"📦 Количество: {self.total_qty} HYPE\n"
+                f"📈 Средняя цена: ${self.average_price}\n"
+                f"📉 Падение: -{drop}%\n"
+                f"💵 Вложено: ${self._total_invested()}\n"
+                f"🎯 Тейк-профит: ${tp}\n"
+                f"🔴 Стоп-лосс: ${stop}\n"
+                f"📊 Уровень: {len(self.entries)} из {len(MARGINS)}"
+            )
+
+    # ─── TELEGRAM КОМАНДЫ ────────────────────────────────────────
+    def send_keyboard(self, chat_id, text):
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "📊 Статус", "callback_data": "status"},
+                    {"text": "💲 Цена", "callback_data": "price"}
+                ],
+                [
+                    {"text": "⏹ Стоп бот", "callback_data": "stop"}
+                ]
+            ]
+        }
+        try:
+            from config import TELEGRAM_TOKEN
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "reply_markup": keyboard
+                },
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"send_keyboard: {e}")
+
+    def answer_callback(self, callback_id):
+        try:
+            from config import TELEGRAM_TOKEN
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                json={"callback_query_id": callback_id},
+                timeout=5
+            )
+        except:
+            pass
+
+    def poll_telegram(self):
+        from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+        url    = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+        offset = 0
+        while self.running:
+            try:
+                resp = requests.get(
+                    url,
+                    params={"timeout": 20, "offset": offset},
+                    timeout=25
+                ).json()
+
+                for update in resp.get("result", []):
+                    offset = update["update_id"] + 1
+
+                    # Обычные команды
+                    msg = update.get("message", {})
+                    if msg.get("text") in ["/start", "/status", "/price", "/stop"]:
+                        cmd     = msg["text"]
+                        chat_id = msg["chat"]["id"]
+                        self._handle_command(cmd, chat_id)
+
+                    # Нажатие кнопок
+                    cb = update.get("callback_query")
+                    if cb:
+                        self.answer_callback(cb["id"])
+                        cmd     = "/" + cb["data"]
+                        chat_id = cb["message"]["chat"]["id"]
+                        self._handle_command(cmd, chat_id)
+
+            except Exception as e:
+                logger.error(f"poll_telegram: {e}")
+                time.sleep(5)
+
+    def _handle_command(self, cmd, chat_id):
+        if cmd in ["/start", "/status"]:
+            text = self.get_status_text()
+            self.send_keyboard(chat_id, text)
+
+        elif cmd == "/price":
+            price = self.bybit.get_price(SYMBOL)
+            self.send_keyboard(
+                chat_id,
+                f"💲 HYPE сейчас: ${price}"
+            )
+
+        elif cmd == "/stop":
+            self.running = False
+            self.send_keyboard(
+                chat_id,
+                "⏹ Бот остановлен!\n\nЧтобы запустить снова — перезапусти на Railway"
+            )
+
+    # ─── ГЛАВНЫЙ ЦИКЛ ────────────────────────────────────────────
     def run(self):
         logger.info("HYPE Мартингейл Бот запущен")
-        self.notifier.send(
-            "🤖 HYPE Мартингейл Бот запущен!\n\n"
+
+        # Запускаем Telegram polling в отдельном потоке
+        tg_thread = threading.Thread(target=self.poll_telegram, daemon=True)
+        tg_thread.start()
+
+        from config import TELEGRAM_CHAT_ID
+        self.send_keyboard(
+            TELEGRAM_CHAT_ID,
+            f"🤖 HYPE Мартингейл Бот запущен!\n\n"
             f"📊 Монета: {SYMBOL}\n"
             f"⚡ Плечо: {LEVERAGE}x\n"
             f"📈 Уровней: {len(MARGINS)}\n"
             f"💰 Маржи: {MARGINS}\n"
             f"🎯 ТП: +{TAKE_PROFIT_PCT}%\n"
             f"🔴 Стоп: -{STOP_LOSS_PCT}%\n\n"
-            "👀 Слежу за ценой HYPE..."
+            f"👀 Слежу за ценой HYPE..."
         )
+
         self.bybit.set_leverage(SYMBOL, LEVERAGE)
 
-        while True:
+        while self.running:
             try:
                 price = self.bybit.get_price(SYMBOL)
                 if price is None:
@@ -133,15 +275,15 @@ class MartingaleBot:
                         self.recent_high = price
 
                     if self._should_enter(price):
-                        logger.info(f"ВХОД @ ${price}")
                         if self._open_level(price):
                             self.first_entry_price = price
                             self.in_trade = True
-                            tp = self._update_tp()
+                            tp   = self._update_tp()
                             drop = round(
                                 (self.recent_high - price) / self.recent_high * 100, 2
                             )
-                            self.notifier.send(
+                            self.send_keyboard(
+                                TELEGRAM_CHAT_ID,
                                 f"🟢 ВХОД 1 открыт\n\n"
                                 f"💲 Цена: ${price}\n"
                                 f"📉 Откат: -{drop}%\n"
@@ -153,14 +295,13 @@ class MartingaleBot:
                     drop = round(self._drop_pct(price), 2)
 
                     if self._should_stop(price):
-                        logger.warning(f"СТОП-ЛОСС @ ${price}")
                         self._close_all_stop()
-                        self.notifier.send(
+                        self.send_keyboard(
+                            TELEGRAM_CHAT_ID,
                             f"🔴 СТОП-ЛОСС!\n\n"
                             f"💲 Цена: ${price}\n"
                             f"📉 Падение: -{drop}%\n"
                             f"💸 Вложено: ${self._total_invested()}\n"
-                            f"📊 Уровней: {len(self.entries)}\n"
                             f"⏳ Пауза 2 минуты..."
                         )
                         self._reset()
@@ -173,7 +314,8 @@ class MartingaleBot:
                         profit   = round(
                             invested * LEVERAGE * TAKE_PROFIT_PCT / 100, 2
                         )
-                        self.notifier.send(
+                        self.send_keyboard(
+                            TELEGRAM_CHAT_ID,
                             f"✅ ТЕЙК-ПРОФИТ!\n\n"
                             f"📊 Уровней: {len(self.entries)}\n"
                             f"💵 Вложено: ${invested}\n"
@@ -193,25 +335,29 @@ class MartingaleBot:
 
                     if averaged:
                         tp = self._update_tp()
-                        self.notifier.send(
+                        self.send_keyboard(
+                            TELEGRAM_CHAT_ID,
                             f"📉 УСРЕДНЕНИЕ — Уровень {len(self.entries)}\n\n"
                             f"💲 Цена: ${price} (-{drop}%)\n"
                             f"💵 Добавлено: ${MARGINS[self.current_level-1]}\n"
                             f"📊 Вложено: ${self._total_invested()}\n"
                             f"📈 Средняя: ${self.average_price}\n"
                             f"🎯 Новый ТП: ${tp}\n"
-                            f"📦 Всего HYPE: {self.total_qty}\n"
+                            f"📦 HYPE: {self.total_qty}\n"
                             f"⚠️ Осталось уровней: {len(MARGINS) - self.current_level}"
                         )
 
                 time.sleep(CHECK_INTERVAL)
 
             except KeyboardInterrupt:
-                self.notifier.send("⏹ Бот остановлен")
+                self.send_keyboard(TELEGRAM_CHAT_ID, "⏹ Бот остановлен")
                 sys.exit(0)
             except Exception as e:
                 logger.error(f"Ошибка: {e}")
-                self.notifier.send(f"⚠️ Ошибка:\n{e}\n\nПродолжаю через 30 сек...")
+                self.send_keyboard(
+                    TELEGRAM_CHAT_ID,
+                    f"⚠️ Ошибка:\n{e}\n\nПродолжаю через 30 сек..."
+                )
                 time.sleep(30)
 
 
