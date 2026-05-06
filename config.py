@@ -11,10 +11,13 @@ CATEGORY = "linear"
 
 MARGINS = [150, 225, 338, 506, 759, 1139, 1709]
 
-ENTRY_DROP_PCT     = 0.5
+ENTRY_DROP_PCT     = 0.6
 AVERAGING_STEP_PCT = 3.0
 TAKE_PROFIT_PCT    = 1.0
 STOP_LOSS_PCT      = 22.0
+
+# Умный ТП по уровням
+SMART_TP = [0.7, 1.0, 1.2, 1.0, 1.0, 1.0, 1.0]
 
 CHECK_INTERVAL  = 10
 QTY_PRECISION   = 2
