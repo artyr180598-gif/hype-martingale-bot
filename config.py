@@ -19,3 +19,11 @@ STOP_LOSS_PCT      = 22.0
 CHECK_INTERVAL  = 10
 QTY_PRECISION   = 2
 PRICE_PRECISION = 3
+
+# ═══════════════════════════════
+# ДЕМО РЕЖИМ
+# True  = виртуальная торговля
+# False = реальная торговля
+DEMO_MODE    = True
+DEMO_BALANCE = 5500.0
+# ═══════════════════════════════
