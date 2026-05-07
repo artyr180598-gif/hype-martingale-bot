@@ -134,8 +134,7 @@ tp_price = self._round_price(
     self.average_price * (1 + tp_pct / 100)
 )
 
-     result =
-     self.bybit.place_limit_sell(SYMBOL, self.total_qty, tp_price)
+     result = self.bybit.place_limit_sell(SYMBOL, self.total_qty, tp_price)
         if result:
             self.tp_order_id = result.get("orderId")
             return tp_price)
