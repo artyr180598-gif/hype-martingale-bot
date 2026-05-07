@@ -129,12 +129,10 @@ class MartingaleBot:
         if self.tp_order_id:
             self.bybit.cancel_order(SYMBOL, self.tp_order_id)
             self.tp_order_id = None
-        tp_pct = SMART_TP[min(self.current_level - 1, len(SMART_TP) - 1)]
-tp_price = self._round_price(
-    self.average_price * (1 + tp_pct / 100)
-)
-
-     result = self.bybit.place_limit_sell(SYMBOL, self.total_qty, tp_price)
+        tp_price = self._round_price(
+            self.average_price * (1 + TAKE_PROFIT_PCT / 100)
+        )
+        result = self.bybit.place_limit_sell(SYMBOL, self.total_qty, tp_price)
         if result:
             self.tp_order_id = result.get("orderId")
             return tp_price
