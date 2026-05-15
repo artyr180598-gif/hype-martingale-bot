@@ -31,10 +31,9 @@ API_MAX_RETRIES = 3
 API_RETRY_DELAY = 1   # секунды
 
 # === Режим работы ===
-# USE_TESTNET = True  → торгуем на testnet.bybit.com (реальные ордера, тестовые деньги)
-# USE_TESTNET = False → смотрим на DEMO_MODE:
-#   DEMO_MODE = True  → симуляция без биржи (DemoClient)
-#   DEMO_MODE = False → реальный счёт Bybit
-USE_TESTNET = True
+# Теперь управляется переменной окружения USE_TESTNET в Railway
+# True  → testnet.bybit.com (реальные ордера, тестовые деньги)
+# False → реальный счёт Bybit (или DEMO_MODE, если включён)
+USE_TESTNET = os.getenv("USE_TESTNET", "False").lower() in ("true", "1", "yes")
 DEMO_MODE   = False
 DEMO_BALANCE = 5500.0   # используется только при DEMO_MODE=True и USE_TESTNET=False
