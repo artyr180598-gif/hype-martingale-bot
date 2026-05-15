@@ -1,84 +1,59 @@
-import time
 import logging
 from pybit.unified_trading import HTTP
 from config import (
-    BYBIT_API_KEY, BYBIT_API_SECRET, CATEGORY,
-    API_MAX_RETRIES, API_RETRY_DELAY,
-    MAX_SLIPPAGE_PCT, PRICE_PRECISION,
+    BYBIT_API_KEY, BYBIT_API_SECRET,
+    CATEGORY, COMMISSION_PCT, LEVERAGE,
     USE_TESTNET
 )
 
 logger = logging.getLogger(__name__)
 
 
-class BybitClient:
-    def __init__(self):
+class DemoClient:
+    def __init__(self, balance: float):
         self.client = HTTP(
             testnet=USE_TESTNET,
             api_key=BYBIT_API_KEY,
-            api_secret=BYBIT_API_SECRET,
-            recv_window=10000
+            api_secret=BYBIT_API_SECRET
         )
-        self.min_qty  = 0.1
-        self.qty_step = 0.01
-        logger.info(f"Bybit клиент подключён (testnet={USE_TESTNET})")
+        self.balance          = balance
+        self.initial_balance  = balance
+        self.position_size    = 0.0
+        self.avg_entry_price  = 0.0
+        self.total_invested   = 0.0
+        self.tp_price         = None
+        self.total_commission = 0.0
+        self._last_close_pnl  = None
+        self._order_counter   = 0
+        logger.info(f"🎮 ДЕМО клиент | Баланс: ${balance}")
 
-    # ── RETRY ─────────────────────────────────────────────────────
-    def _retry(self, func, *args, **kwargs):
-        for attempt in range(API_MAX_RETRIES):
-            try:
-                r = func(*args, **kwargs)
-                if isinstance(r, dict) and r.get("retCode") not in (0, None):
-                    raise Exception(f"[{r['retCode']}] {r.get('retMsg', '?')}")
-                return r
-            except Exception as e:
-                wait = API_RETRY_DELAY * (2 ** attempt)
-                logger.warning(f"Попытка {attempt+1}/{API_MAX_RETRIES}: {e} → ждём {wait}с")
-                if attempt < API_MAX_RETRIES - 1:
-                    time.sleep(wait)
-        logger.error("Все попытки исчерпаны")
-        return None
-
-    # ── AUTO SETUP ────────────────────────────────────────────────
+    # ── SETUP ─────────────────────────────────────────────────────
     def auto_setup(self, symbol: str, leverage: int) -> dict:
-        out = {}
-        try:
-            self.client.switch_position_mode(
-                category=CATEGORY, coin="USDT", mode=0
-            )
-            out["mode"] = "One-Way ✅"
-        except Exception:
-            out["mode"] = "One-Way (уже установлен)"
-        logger.info(out["mode"])
+        logger.info(f"[ДЕМО] auto_setup {symbol} {leverage}x")
+        return {
+            "mode":     "One-Way ✅ (ДЕМО)",
+            "leverage": f"{leverage}x ✅ (ДЕМО)",
+            "min_qty":  0.1,
+            "qty_step": 0.01,
+            "ok":       True
+        }
 
-        try:
-            self.client.set_leverage(
-                category=CATEGORY, symbol=symbol,
-                buyLeverage=str(leverage), sellLeverage=str(leverage)
-            )
-            out["leverage"] = f"{leverage}x ✅"
-        except Exception:
-            out["leverage"] = f"{leverage}x (уже установлено)"
-        logger.info(out["leverage"])
+    def set_take_profit(self, symbol: str, tp_price: float) -> bool:
+        self.tp_price = tp_price
+        logger.info(f"[ДЕМО] TP @ ${tp_price:.3f}")
+        return True
 
-        try:
-            resp = self.client.get_instruments_info(
-                category=CATEGORY, symbol=symbol
-            )
-            lot = resp["result"]["list"][0]["lotSizeFilter"]
-            self.min_qty  = float(lot["minOrderQty"])
-            self.qty_step = float(lot["qtyStep"])
-            out["min_qty"]  = self.min_qty
-            out["qty_step"] = self.qty_step
-            logger.info(f"{symbol}: min_qty={self.min_qty}, qty_step={self.qty_step} ✅")
-        except Exception as e:
-            logger.error(f"Instrument info: {e}")
-            out["error"] = str(e)
+    def set_stop_loss_backup(self, symbol: str, sl_price: float) -> bool:
+        logger.info(f"[ДЕМО] Backup SL @ ${sl_price:.3f} (no-op)")
+        return True
 
-        out["ok"] = "error" not in out
-        return out
+    def clear_tp_sl(self, symbol: str):
+        self.tp_price = None
 
-    # ── ЦЕНА ──────────────────────────────────────────────────────
+    def cancel_all_orders(self, symbol: str):
+        self.tp_price = None
+
+    # ── РЕАЛЬНАЯ ЦЕНА ─────────────────────────────────────────────
     def get_price(self, symbol: str) -> float | None:
         try:
             r = self.client.get_tickers(category=CATEGORY, symbol=symbol)
@@ -87,154 +62,115 @@ class BybitClient:
             logger.error(f"get_price: {e}")
             return None
 
-    # ── БАЛАНС ────────────────────────────────────────────────────
-    def get_wallet_balance(self) -> dict:
-        try:
-            r = self.client.get_wallet_balance(accountType="UNIFIED")
-            coins = r["result"]["list"][0]["coin"]
-            usdt  = next((c for c in coins if c["coin"] == "USDT"), None)
-            if usdt:
-                return {
-                    "balance":    round(float(usdt["walletBalance"]), 2),
-                    "available":  round(float(usdt.get("availableToTrade", 0)), 2),
-                    "unrealised": round(float(usdt.get("unrealisedPnl", 0)), 2)
-                }
-        except Exception as e:
-            logger.error(f"get_wallet_balance: {e}")
-        return {"balance": 0, "available": 0, "unrealised": 0}
-
     # ── ПОЗИЦИЯ ───────────────────────────────────────────────────
     def get_position_size(self, symbol: str) -> float:
-        try:
-            r = self.client.get_positions(category=CATEGORY, symbol=symbol)
-            pos = r["result"]["list"]
-            return float(pos[0]["size"]) if pos else 0.0
-        except Exception as e:
-            logger.error(f"get_position_size: {e}")
-            return 0.0
+        return self.position_size
 
     # ── ПОКУПКА ───────────────────────────────────────────────────
     def place_market_buy(self, symbol: str, qty: float) -> dict | None:
-        qty = self._round_qty(qty)
-        if qty < self.min_qty:
-            logger.warning(f"qty {qty} < min {self.min_qty}")
+        price = self.get_price(symbol)
+        if not price:
             return None
 
-        r = self._retry(
-            self.client.place_order,
-            category=CATEGORY, symbol=symbol,
-            side="Buy", orderType="Market",
-            qty=str(qty), positionIdx=0
-        )
-        if not r:
+        margin     = (qty * price) / LEVERAGE
+        commission = qty * price * COMMISSION_PCT / 100
+        total_cost = margin + commission
+
+        if total_cost > self.balance:
+            logger.warning(
+                f"[ДЕМО] Недостаточно: нужно ${total_cost:.2f}, "
+                f"есть ${self.balance:.2f}"
+            )
             return None
 
-        order_id = r["result"]["orderId"]
-        time.sleep(0.5)
-        avg_price, filled_qty = self._get_fill(symbol, order_id, qty)
+        if self.position_size > 0 and self.avg_entry_price > 0:
+            old_val              = self.position_size * self.avg_entry_price
+            new_val              = qty * price
+            new_size             = self.position_size + qty
+            self.avg_entry_price = (old_val + new_val) / new_size
+        else:
+            self.avg_entry_price = price
 
-        cur  = self.get_price(symbol) or avg_price
-        slip = abs(avg_price - cur) / cur * 100 if cur else 0
-        if slip > MAX_SLIPPAGE_PCT:
-            logger.warning(f"⚠️ Проскальзывание {slip:.2f}%: ~${cur:.3f} → ${avg_price:.3f}")
+        self.position_size    += qty
+        self.total_invested   += margin
+        self.balance          -= total_cost
+        self.total_commission += commission
+        self._order_counter   += 1
 
-        logger.info(f"✅ BUY {filled_qty} HYPE @ ${avg_price:.3f}")
-        return {"orderId": order_id, "avg_price": avg_price, "qty": filled_qty}
-
-    def _get_fill(self, symbol: str, order_id: str, fallback_qty: float) -> tuple[float, float]:
-        try:
-            r = self.client.get_order_history(
-                category=CATEGORY, symbol=symbol, orderId=order_id
-            )
-            orders = r["result"]["list"]
-            if orders and orders[0]["orderStatus"] == "Filled":
-                return float(orders[0]["avgPrice"]), float(orders[0]["cumExecQty"])
-        except Exception as e:
-            logger.warning(f"_get_fill: {e}")
-        return self.get_price(symbol) or 0.0, fallback_qty
-
-    def _round_qty(self, qty: float) -> float:
-        steps = round(qty / self.qty_step)
-        dec = len(str(self.qty_step).rstrip("0").split(".")[-1]) if "." in str(self.qty_step) else 0
-        return round(steps * self.qty_step, dec)
-
-    # ── ТЕЙК-ПРОФИТ ───────────────────────────────────────────────
-    def set_take_profit(self, symbol: str, tp_price: float) -> bool:
-        r = self._retry(
-            self.client.set_trading_stop,
-            category=CATEGORY, symbol=symbol,
-            takeProfit=str(round(tp_price, PRICE_PRECISION)),
-            tpTriggerBy="MarkPrice",
-            tpslMode="Full",
-            positionIdx=0
+        logger.info(
+            f"[ДЕМО] BUY {qty:.2f} @ ${price:.3f} | "
+            f"Ср.цена: ${self.avg_entry_price:.3f} | "
+            f"Баланс: ${self.balance:.2f}"
         )
-        ok = r is not None and r.get("retCode") == 0
-        logger.info(f"{'✅' if ok else '❌'} TP @ ${tp_price:.3f} MarkPrice")
-        return ok
+        return {
+            "orderId":   f"demo_{self._order_counter}",
+            "avg_price": price,
+            "qty":       qty
+        }
 
-    # ── СТРАХОВОЧНЫЙ СТОП ─────────────────────────────────────────
-    def set_stop_loss_backup(self, symbol: str, sl_price: float) -> bool:
-        r = self._retry(
-            self.client.set_trading_stop,
-            category=CATEGORY, symbol=symbol,
-            stopLoss=str(round(sl_price, PRICE_PRECISION)),
-            slTriggerBy="MarkPrice",
-            tpslMode="Full",
-            positionIdx=0
-        )
-        ok = r is not None and r.get("retCode") == 0
-        logger.info(f"{'✅' if ok else '❌'} Backup SL @ ${sl_price:.3f}")
-        return ok
-
-    def clear_tp_sl(self, symbol: str):
-        try:
-            self.client.set_trading_stop(
-                category=CATEGORY, symbol=symbol,
-                takeProfit="0", stopLoss="0", positionIdx=0
-            )
-        except Exception as e:
-            logger.warning(f"clear_tp_sl: {e}")
+    # ── ПРОВЕРКА TP ───────────────────────────────────────────────
+    def check_tp_triggered(self, current_price: float) -> tuple[bool, float]:
+        if self.tp_price is None:
+            return False, 0.0
+        if current_price >= self.tp_price:
+            tp = self.tp_price
+            self._do_close(tp)
+            return True, tp
+        return False, 0.0
 
     # ── ЗАКРЫТИЕ ──────────────────────────────────────────────────
     def market_close_all(self, symbol: str, qty: float) -> bool:
-        qty = self._round_qty(qty)
-        r = self._retry(
-            self.client.place_order,
-            category=CATEGORY, symbol=symbol,
-            side="Sell", orderType="Market",
-            qty=str(qty), reduceOnly=True, positionIdx=0
+        price = self.get_price(symbol)
+        if not price:
+            return False
+        self._do_close(price)
+        return True
+
+    def _do_close(self, close_price: float):
+        qty        = self.position_size
+        commission = qty * close_price * COMMISSION_PCT / 100
+        gross_pnl  = qty * (close_price - self.avg_entry_price)
+        net_pnl    = gross_pnl - commission
+
+        self.balance          += self.total_invested + net_pnl
+        self.total_commission += commission
+
+        self._last_close_pnl = {
+            "pnl":        round(net_pnl, 2),
+            "exit_price": close_price,
+            "qty":        qty
+        }
+        logger.info(
+            f"[ДЕМО] Закрытие @ ${close_price:.3f} | "
+            f"PnL: ${net_pnl:.2f} | "
+            f"Баланс: ${self.balance:.2f}"
         )
-        ok = r is not None
-        logger.info(f"{'✅' if ok else '❌'} Закрытие {qty} HYPE")
-        return ok
+        self.position_size   = 0.0
+        self.avg_entry_price = 0.0
+        self.total_invested  = 0.0
+        self.tp_price        = None
 
-    def cancel_all_orders(self, symbol: str):
-        try:
-            self.client.cancel_all_orders(category=CATEGORY, symbol=symbol)
-            logger.info("✅ Все ордера отменены")
-        except Exception as e:
-            logger.warning(f"cancel_all_orders: {e}")
-
-    # ── РЕАЛЬНЫЙ P&L ──────────────────────────────────────────────
+    # ── CLOSED P&L ────────────────────────────────────────────────
     def get_closed_pnl(self, symbol: str) -> dict | None:
-        try:
-            r = self.client.get_closed_pnl(
-                category=CATEGORY, symbol=symbol, limit=1
-            )
-            lst = r["result"]["list"]
-            if lst:
-                p = lst[0]
-                return {
-                    "pnl":        float(p["closedPnl"]),
-                    "exit_price": float(p.get("avgExitPrice", 0)),
-                    "qty":        float(p.get("qty", 0))
-                }
-        except Exception as e:
-            logger.error(f"get_closed_pnl: {e}")
-        return None
+        p = self._last_close_pnl
+        self._last_close_pnl = None
+        return p
 
-    # ── ДОСТУПНАЯ МАРЖА (для проверки перед усреднением) ─────────
+    # ── БАЛАНС ────────────────────────────────────────────────────
+    def get_wallet_balance(self) -> dict:
+        return self.get_balance_info()
+
+    def get_balance_info(self) -> dict:
+        pnl = round(self.balance - self.initial_balance, 2)
+        return {
+            "balance":    round(self.balance, 2),
+            "available":  round(self.balance - self.total_invested, 2),
+            "initial":    self.initial_balance,
+            "pnl":        pnl,
+            "pnl_pct":    round(pnl / self.initial_balance * 100, 2),
+            "commission": round(self.total_commission, 2)
+        }
+
     def get_available_margin(self) -> float:
-        """Возвращает availableToTrade (USDT), который можно использовать как маржу"""
-        bal = self.get_wallet_balance()
-        return bal["available"]
+        """В демке считаем свободный баланс как available"""
+        return self.balance - self.total_invested
