@@ -31,7 +31,6 @@ API_MAX_RETRIES = 3
 API_RETRY_DELAY = 1
 
 # === Режим работы ===
-# Жёстко тестнет — поменяй на False когда нужно будет на реал
 USE_TESTNET = True
 DEMO_MODE   = False
 DEMO_BALANCE = 5500.0
