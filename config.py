@@ -15,9 +15,9 @@ ENTRY_DROP_PCT       = 0.6
 AVERAGING_STEP_PCT   = 3.0
 TAKE_PROFIT_PCT      = 1.0
 STOP_LOSS_PCT        = 22.0
-STOP_LOSS_BACKUP_PCT = 24.0
+STOP_LOSS_BACKUP_PCT = 24.0   # Bybit SL страховка если бот упал
 COMMISSION_PCT       = 0.1
-MAX_SLIPPAGE_PCT     = 0.5
+MAX_SLIPPAGE_PCT     = 0.5    # Алерт при проскальзывании выше %
 
 SMART_TP = [0.7, 1.0, 1.2, 1.0, 1.0, 1.0, 1.0]
 
@@ -27,8 +27,7 @@ QTY_PRECISION     = 2
 PRICE_PRECISION   = 3
 
 API_MAX_RETRIES = 3
-API_RETRY_DELAY = 1
+API_RETRY_DELAY = 1   # секунды
 
-USE_TESTNET = True
-DEMO_MODE   = False
+DEMO_MODE    = True
 DEMO_BALANCE = 5500.0
