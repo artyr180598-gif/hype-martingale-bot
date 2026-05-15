@@ -5,24 +5,36 @@ BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
+# === Торговые настройки ===
 SYMBOL   = "HYPEUSDT"
 LEVERAGE = 20
 CATEGORY = "linear"
 
 MARGINS = [150, 225, 338, 506, 759, 1139, 1709]
 
-ENTRY_DROP_PCT     = 0.6
-AVERAGING_STEP_PCT = 3.0
-TAKE_PROFIT_PCT    = 1.0
-STOP_LOSS_PCT      = 22.0
-COMMISSION_PCT     = 0.1
+ENTRY_DROP_PCT       = 0.6
+AVERAGING_STEP_PCT   = 3.0
+TAKE_PROFIT_PCT      = 1.0
+STOP_LOSS_PCT        = 22.0
+STOP_LOSS_BACKUP_PCT = 24.0   # Bybit SL страховка если бот упал
+COMMISSION_PCT       = 0.1
+MAX_SLIPPAGE_PCT     = 0.5    # Алерт при проскальзывании выше %
 
 SMART_TP = [0.7, 1.0, 1.2, 1.0, 1.0, 1.0, 1.0]
 
 CHECK_INTERVAL    = 10
 HEARTBEAT_MINUTES = 120
-QTY_PRECISION     = 2
+QTY_PRECISION     = 2   # используется только для логов, не для ордеров
 PRICE_PRECISION   = 3
 
-DEMO_MODE    = True
-DEMO_BALANCE = 5500.0
+API_MAX_RETRIES = 3
+API_RETRY_DELAY = 1   # секунды
+
+# === Режим работы ===
+# USE_TESTNET = True  → торгуем на testnet.bybit.com (реальные ордера, тестовые деньги)
+# USE_TESTNET = False → смотрим на DEMO_MODE:
+#   DEMO_MODE = True  → симуляция без биржи (DemoClient)
+#   DEMO_MODE = False → реальный счёт Bybit
+USE_TESTNET = True
+DEMO_MODE   = False
+DEMO_BALANCE = 5500.0   # используется только при DEMO_MODE=True и USE_TESTNET=False
