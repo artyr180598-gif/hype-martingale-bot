@@ -5,7 +5,6 @@ BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# === Торговые настройки ===
 SYMBOL   = "HYPEUSDT"
 LEVERAGE = 20
 CATEGORY = "linear"
@@ -30,7 +29,6 @@ PRICE_PRECISION   = 3
 API_MAX_RETRIES = 3
 API_RETRY_DELAY = 1
 
-# === Режим работы ===
 USE_TESTNET = True
 DEMO_MODE   = False
 DEMO_BALANCE = 5500.0
