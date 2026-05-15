@@ -16,24 +16,22 @@ ENTRY_DROP_PCT       = 0.6
 AVERAGING_STEP_PCT   = 3.0
 TAKE_PROFIT_PCT      = 1.0
 STOP_LOSS_PCT        = 22.0
-STOP_LOSS_BACKUP_PCT = 24.0   # Bybit SL страховка если бот упал
+STOP_LOSS_BACKUP_PCT = 24.0
 COMMISSION_PCT       = 0.1
-MAX_SLIPPAGE_PCT     = 0.5    # Алерт при проскальзывании выше %
+MAX_SLIPPAGE_PCT     = 0.5
 
 SMART_TP = [0.7, 1.0, 1.2, 1.0, 1.0, 1.0, 1.0]
 
 CHECK_INTERVAL    = 10
 HEARTBEAT_MINUTES = 120
-QTY_PRECISION     = 2   # используется только для логов, не для ордеров
+QTY_PRECISION     = 2
 PRICE_PRECISION   = 3
 
 API_MAX_RETRIES = 3
-API_RETRY_DELAY = 1   # секунды
+API_RETRY_DELAY = 1
 
 # === Режим работы ===
-# Теперь управляется переменной окружения USE_TESTNET в Railway
-# True  → testnet.bybit.com (реальные ордера, тестовые деньги)
-# False → реальный счёт Bybit (или DEMO_MODE, если включён)
-USE_TESTNET = os.getenv("USE_TESTNET", "False").lower() in ("true", "1", "yes")
+# Жёстко тестнет — поменяй на False когда нужно будет на реал
+USE_TESTNET = True
 DEMO_MODE   = False
-DEMO_BALANCE = 5500.0   # используется только при DEMO_MODE=True и USE_TESTNET=False
+DEMO_BALANCE = 5500.0
