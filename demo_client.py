@@ -15,20 +15,23 @@ class DemoClient:
             api_key=BYBIT_API_KEY,
             api_secret=BYBIT_API_SECRET
         )
-        self.balance          = balance
-        self.initial_balance  = balance
-        self.position_size    = 0.0
-        self.avg_entry_price  = 0.0
-        self.total_invested   = 0.0   # сумма маржи в позиции
-        self.tp_price         = None  # активный TP
-        self.total_commission = 0.0
-        self._last_close_pnl  = None  # для get_closed_pnl()
-        self._order_counter   = 0
-        logger.info(f"🎮 ДЕМО клиент | Баланс: ${balance}")
+        self.balance         = balance
+        self.initial_balance = balance
+        self.position_size   = 0.0
+        self.avg_entry_price = 0.0
+        self.total_invested  = 0.0
+        self.tp_price        = None
 
-    # ── SETUP (имитация) ──────────────────────────────────────────
+        # Комиссии считаются ТОЛЬКО здесь — один раз
+        self.total_commission = 0.0
+
+        self._last_close_pnl = None
+        self._order_counter  = 0
+
+        logger.info(f"🎮 ДЕМО клиент | Баланс: ${balance:,.2f}")
+
+    # ── SETUP ─────────────────────────────────────────────────────
     def auto_setup(self, symbol: str, leverage: int) -> dict:
-        logger.info(f"[ДЕМО] auto_setup {symbol} {leverage}x")
         return {
             "mode":     "One-Way ✅ (ДЕМО)",
             "leverage": f"{leverage}x ✅ (ДЕМО)",
@@ -43,7 +46,6 @@ class DemoClient:
         return True
 
     def set_stop_loss_backup(self, symbol: str, sl_price: float) -> bool:
-        logger.info(f"[ДЕМО] Backup SL @ ${sl_price:.3f} (no-op)")
         return True
 
     def clear_tp_sl(self, symbol: str):
@@ -52,7 +54,7 @@ class DemoClient:
     def cancel_all_orders(self, symbol: str):
         self.tp_price = None
 
-    # ── РЕАЛЬНАЯ ЦЕНА ─────────────────────────────────────────────
+    # ── ЦЕНА ──────────────────────────────────────────────────────
     def get_price(self, symbol: str) -> float | None:
         try:
             r = self.client.get_tickers(category=CATEGORY, symbol=symbol)
@@ -61,7 +63,6 @@ class DemoClient:
             logger.error(f"get_price: {e}")
             return None
 
-    # ── ПОЗИЦИЯ ───────────────────────────────────────────────────
     def get_position_size(self, symbol: str) -> float:
         return self.position_size
 
@@ -73,35 +74,40 @@ class DemoClient:
 
         margin     = (qty * price) / LEVERAGE
         commission = qty * price * COMMISSION_PCT / 100
-        total_cost = margin + commission
 
-        if total_cost > self.balance:
+        # Проверяем что хватает на маржу + комиссию
+        if (margin + commission) > self.balance:
             logger.warning(
-                f"[ДЕМО] Недостаточно: нужно ${total_cost:.2f}, "
+                f"[ДЕМО] Недостаточно: нужно ${margin+commission:.2f}, "
                 f"есть ${self.balance:.2f}"
             )
             return None
 
-        # Средневзвешенная цена ✅
+        # Средневзвешенная цена
         if self.position_size > 0 and self.avg_entry_price > 0:
             old_val              = self.position_size * self.avg_entry_price
             new_val              = qty * price
-            new_size             = self.position_size + qty
-            self.avg_entry_price = (old_val + new_val) / new_size
+            self.avg_entry_price = (old_val + new_val) / (self.position_size + qty)
         else:
             self.avg_entry_price = price
 
-        self.position_size    += qty
-        self.total_invested   += margin
-        self.balance          -= total_cost
+        self.position_size   += qty
+        self.total_invested  += margin
+
+        # Из баланса списываем только комиссию
+        # Маржа вернётся при закрытии
+        self.balance         -= commission
         self.total_commission += commission
-        self._order_counter   += 1
+
+        self._order_counter += 1
 
         logger.info(
             f"[ДЕМО] BUY {qty:.2f} @ ${price:.3f} | "
-            f"Ср.цена: ${self.avg_entry_price:.3f} | "
+            f"Ср: ${self.avg_entry_price:.3f} | "
+            f"Комиссия: ${commission:.3f} | "
             f"Баланс: ${self.balance:.2f}"
         )
+
         return {
             "orderId":   f"demo_{self._order_counter}",
             "avg_price": price,
@@ -110,7 +116,6 @@ class DemoClient:
 
     # ── ПРОВЕРКА TP ───────────────────────────────────────────────
     def check_tp_triggered(self, current_price: float) -> tuple[bool, float]:
-        """Проверяет сработал ли TP по рыночной цене"""
         if self.tp_price is None:
             return False, 0.0
         if current_price >= self.tp_price:
@@ -128,33 +133,47 @@ class DemoClient:
         return True
 
     def _do_close(self, close_price: float):
-        """Закрыть позицию по цене — рассчитать P&L и обновить баланс"""
-        qty        = self.position_size
-        commission = qty * close_price * COMMISSION_PCT / 100
-        gross_pnl  = qty * (close_price - self.avg_entry_price)
-        net_pnl    = gross_pnl - commission
+        """Закрыть позицию — расчёт PnL без двойного учёта комиссий."""
+        qty = self.position_size
 
-        # Возвращаем маржу + прибыль/убыток
-        self.balance          += self.total_invested + net_pnl
-        self.total_commission += commission
+        # Gross PnL = разница цен × кол-во
+        gross_pnl = qty * (close_price - self.avg_entry_price)
+
+        # Комиссия при закрытии
+        close_commission = qty * close_price * COMMISSION_PCT / 100
+
+        # Net PnL
+        net_pnl = gross_pnl - close_commission
+
+        # Возвращаем маржу + net PnL
+        self.balance += self.total_invested + net_pnl
+
+        # Учёт комиссии закрытия
+        self.total_commission += close_commission
 
         self._last_close_pnl = {
             "pnl":        round(net_pnl, 2),
             "exit_price": close_price,
-            "qty":        qty
+            "qty":        qty,
+            "gross_pnl":  round(gross_pnl, 2),
+            "commission": round(close_commission, 2)
         }
+
         logger.info(
             f"[ДЕМО] Закрытие @ ${close_price:.3f} | "
-            f"PnL: ${net_pnl:.2f} | "
+            f"Gross: ${gross_pnl:.2f} | "
+            f"Комиссия: ${close_commission:.3f} | "
+            f"Net PnL: ${net_pnl:.2f} | "
             f"Баланс: ${self.balance:.2f}"
         )
-        # Сброс позиции
+
+        # Сброс
         self.position_size   = 0.0
         self.avg_entry_price = 0.0
         self.total_invested  = 0.0
         self.tp_price        = None
 
-    # ── CLOSED P&L ────────────────────────────────────────────────
+    # ── CLOSED PNL ────────────────────────────────────────────────
     def get_closed_pnl(self, symbol: str) -> dict | None:
         p = self._last_close_pnl
         self._last_close_pnl = None
@@ -165,12 +184,14 @@ class DemoClient:
         return self.get_balance_info()
 
     def get_balance_info(self) -> dict:
-        pnl = round(self.balance - self.initial_balance, 2)
+        pnl     = round(self.balance - self.initial_balance, 2)
+        pnl_pct = round(pnl / self.initial_balance * 100, 2)
         return {
             "balance":    round(self.balance, 2),
             "available":  round(self.balance - self.total_invested, 2),
             "initial":    self.initial_balance,
+            "invested":   round(self.total_invested, 2),
             "pnl":        pnl,
-            "pnl_pct":    round(pnl / self.initial_balance * 100, 2),
+            "pnl_pct":    pnl_pct,
             "commission": round(self.total_commission, 2)
         }
