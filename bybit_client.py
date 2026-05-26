@@ -4,7 +4,8 @@ from pybit.unified_trading import HTTP
 from config import (
     BYBIT_API_KEY, BYBIT_API_SECRET, CATEGORY,
     API_MAX_RETRIES, API_RETRY_DELAY,
-    MAX_SLIPPAGE_PCT, PRICE_PRECISION, COMMISSION_PCT
+    MAX_SLIPPAGE_PCT, PRICE_PRECISION, COMMISSION_PCT,
+    FUNDING_HOURS, DEFAULT_FUNDING_RATE
 )
 
 logger = logging.getLogger(__name__)
@@ -18,8 +19,9 @@ class BybitClient:
             api_secret=BYBIT_API_SECRET,
             recv_window=10000
         )
-        self.min_qty  = 0.1
-        self.qty_step = 0.01
+        self.min_qty          = 0.1
+        self.qty_step         = 0.01
+        self._last_funding_hr = -1
         logger.info("✅ Bybit клиент подключён")
 
     def _retry(self, func, *args, **kwargs):
@@ -34,7 +36,6 @@ class BybitClient:
                 logger.warning(f"Попытка {attempt+1}/{API_MAX_RETRIES}: {e} → {wait}с")
                 if attempt < API_MAX_RETRIES - 1:
                     time.sleep(wait)
-        logger.error("❌ Все попытки исчерпаны")
         return None
 
     def auto_setup(self, symbol: str, leverage: int) -> dict:
@@ -80,6 +81,26 @@ class BybitClient:
             logger.error(f"get_price: {e}")
             return None
 
+    def get_funding_rate(self, symbol: str) -> float:
+        try:
+            r = self.client.get_tickers(category=CATEGORY, symbol=symbol)
+            return float(
+                r["result"]["list"][0].get("fundingRate", DEFAULT_FUNDING_RATE)
+            )
+        except:
+            return DEFAULT_FUNDING_RATE
+
+    def apply_funding(self, symbol: str) -> dict | None:
+        """Проверить и вернуть инфо о фандинге (реальный счёт)."""
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc)
+        hour    = now_utc.hour
+        if hour not in FUNDING_HOURS or self._last_funding_hr == hour:
+            return None
+        self._last_funding_hr = hour
+        rate = self.get_funding_rate(symbol)
+        return {"rate": rate, "hour": hour, "payment": None}
+
     def get_wallet_balance(self) -> dict:
         try:
             r    = self.client.get_wallet_balance(accountType="UNIFIED")
@@ -107,7 +128,6 @@ class BybitClient:
     def place_market_buy(self, symbol: str, qty: float) -> dict | None:
         qty = self._round_qty(qty)
         if qty < self.min_qty:
-            logger.warning(f"qty {qty} < min {self.min_qty}")
             return None
 
         r = self._retry(
@@ -128,12 +148,11 @@ class BybitClient:
         if slip > MAX_SLIPPAGE_PCT:
             logger.warning(f"⚠️ Проскальзывание {slip:.2f}%")
 
-        logger.info(f"✅ BUY {filled_qty} @ ${avg_price:.3f}")
         return {"orderId": order_id, "avg_price": avg_price, "qty": filled_qty}
 
     def _get_fill(self, symbol, order_id, fallback_qty):
         try:
-            r      = self.client.get_order_history(
+            r = self.client.get_order_history(
                 category=CATEGORY, symbol=symbol, orderId=order_id
             )
             orders = r["result"]["list"]
@@ -152,7 +171,7 @@ class BybitClient:
         return round(steps * self.qty_step, dec)
 
     def set_take_profit(self, symbol: str, tp_price: float) -> bool:
-        r  = self._retry(
+        r = self._retry(
             self.client.set_trading_stop,
             category=CATEGORY, symbol=symbol,
             takeProfit=str(round(tp_price, PRICE_PRECISION)),
@@ -165,7 +184,7 @@ class BybitClient:
         return ok
 
     def set_stop_loss_backup(self, symbol: str, sl_price: float) -> bool:
-        r  = self._retry(
+        r = self._retry(
             self.client.set_trading_stop,
             category=CATEGORY, symbol=symbol,
             stopLoss=str(round(sl_price, PRICE_PRECISION)),
@@ -194,9 +213,7 @@ class BybitClient:
             side="Sell", orderType="Market",
             qty=str(qty), reduceOnly=True, positionIdx=0
         )
-        ok = r is not None
-        logger.info(f"{'✅' if ok else '❌'} Закрытие {qty} HYPE")
-        return ok
+        return r is not None
 
     def cancel_all_orders(self, symbol: str):
         try:
