@@ -29,7 +29,20 @@ PRICE_PRECISION   = 3
 API_MAX_RETRIES = 3
 API_RETRY_DELAY = 1
 
+# Фандинг платится каждые 8 часов
+FUNDING_HOURS = [0, 8, 16]
+DEFAULT_FUNDING_RATE = 0.0001  # 0.01% по умолчанию
+
 DEMO_MODE    = True
 DEMO_BALANCE = 5500.0
 
-BOT_VERSION = "2.0.0"
+BOT_VERSION = "3.0.0"
+
+# Файлы
+STATS_FILE       = "stats.json"
+STATE_FILE       = "state.json"
+HISTORY_FILE     = "history.json"
+DEMO_STATE_FILE  = "demo_state.json"  # сохранение демо-баланса
+
+# Пагинация истории
+HISTORY_PAGE_SIZE = 8  # сделок на страницу
