@@ -21,7 +21,6 @@ from config import (
 from bybit_client import BybitClient
 from demo_client import DemoClient
 
-# ── ЛОГИРОВАНИЕ ───────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -33,8 +32,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# ── ФАЙЛОВЫЕ ОПЕРАЦИИ ─────────────────────────────────────────────
 
 def _atomic_write(filepath: str, data: dict):
     tmp = filepath + ".tmp"
@@ -66,16 +63,9 @@ def load_stats() -> dict:
     })
 
 
-def save_stats(s):
-    _atomic_write(STATS_FILE, s)
-
-
-def load_state() -> dict:
-    return _load_json(STATE_FILE, {})
-
-
-def save_state(s):
-    _atomic_write(STATE_FILE, s)
+def save_stats(s): _atomic_write(STATS_FILE, s)
+def load_state() -> dict: return _load_json(STATE_FILE, {})
+def save_state(s): _atomic_write(STATE_FILE, s)
 
 
 def load_history() -> dict:
@@ -93,11 +83,8 @@ def load_history() -> dict:
     })
 
 
-def save_history(h):
-    _atomic_write(HISTORY_FILE, h)
+def save_history(h): _atomic_write(HISTORY_FILE, h)
 
-
-# ── ГЛАВНЫЙ КЛАСС ─────────────────────────────────────────────────
 
 class MartingaleBot:
 
@@ -109,48 +96,33 @@ class MartingaleBot:
         self.history        = load_history()
         self.start_time     = datetime.now()
         self.last_heartbeat = datetime.now()
-        self.history_page   = {}  # chat_id → текущая страница
+        self.history_page   = {}
 
-        # Синхронизируем stats с реальным балансом демо
+        self._init_session()
+
         if DEMO_MODE:
             self._sync_stats_with_balance()
 
-        self._init_session()
         self._reset()
         self._restore_state()
 
-    # ── СИНХРОНИЗАЦИЯ БАЛАНСА ─────────────────────────────────────
-
     def _sync_stats_with_balance(self):
-        """
-        Синхронизирует stats.total_profit с реальным балансом.
-        Исправляет расхождение когда stats.json сбрасывался
-        но demo_state.json остался.
-        """
-        b        = self.bybit.get_balance_info()
-        real_pnl = b["pnl"]
-
-        if abs(real_pnl - self.stats["total_profit"]) > 1.0:
-            logger.warning(
-                f"⚠️ Расхождение PnL: "
-                f"реальный=${real_pnl:.2f}, "
-                f"stats=${self.stats['total_profit']:.2f} → синхронизирую"
-            )
-            self.stats["total_profit"] = real_pnl
-            save_stats(self.stats)
-
-        if abs(real_pnl - self.history["summary"]["total_profit"]) > 1.0:
-            self.history["summary"]["total_profit"]     = real_pnl
-            self.history["summary"]["total_commission"] = b["commission"]
-            self.history["summary"]["total_funding"]    = b["funding"]
-            save_history(self.history)
-
-    # ── СЕССИИ ────────────────────────────────────────────────────
+        b = self.bybit.get_balance_info()
+        logger.info(
+            f"🔄 Синхронизация: PnL=${b['pnl']:.2f} | "
+            f"комиссии=${b['commission']:.2f} | "
+            f"фандинг=${b['funding']:.4f}"
+        )
+        self.stats["total_profit"] = b["pnl"]
+        save_stats(self.stats)
+        self.history["summary"]["total_profit"]     = b["pnl"]
+        self.history["summary"]["total_commission"] = b["commission"]
+        self.history["summary"]["total_funding"]    = b["funding"]
+        save_history(self.history)
 
     def _init_session(self):
         if not self.history["summary"]["first_start"]:
             self.history["summary"]["first_start"] = datetime.now().isoformat()
-
         session_num = len(self.history["sessions"]) + 1
         self.current_session = {
             "session_id":   session_num,
@@ -191,34 +163,28 @@ class MartingaleBot:
             "invested":    round(invested, 2),
             "commission":  round(commission, 3),
             "funding":     round(funding, 4),
-            "profit":      round(
-                profit if not is_stop else -abs(profit), 2
-            ),
-            "mode": "DEMO" if self.demo_mode else "REAL"
+            "profit":      round(profit if not is_stop else -abs(profit), 2),
+            "mode":        "DEMO" if self.demo_mode else "REAL"
         }
-
         self.history["all_trades"].append(trade)
         self.current_session["trades"].append(trade)
         self.current_session["commission"] += commission
         self.current_session["funding"]    += funding
 
         if is_stop:
-            self.current_session["stops_count"]         += 1
-            self.current_session["profit"]              -= abs(profit)
-            self.history["summary"]["total_stops"]      += 1
-            self.history["summary"]["total_profit"]     -= abs(profit)
+            self.current_session["stops_count"]     += 1
+            self.current_session["profit"]          -= abs(profit)
+            self.history["summary"]["total_stops"]  += 1
+            self.history["summary"]["total_profit"] -= abs(profit)
         else:
-            self.current_session["trades_count"]        += 1
-            self.current_session["profit"]              += profit
-            self.history["summary"]["total_profit"]     += profit
+            self.current_session["trades_count"]    += 1
+            self.current_session["profit"]          += profit
+            self.history["summary"]["total_profit"] += profit
 
         self.history["summary"]["total_trades"]     += 1
         self.history["summary"]["total_commission"] += commission
         self.history["summary"]["total_funding"]    += funding
-
         save_history(self.history)
-
-    # ── СОСТОЯНИЕ ─────────────────────────────────────────────────
 
     def _reset(self):
         self.in_trade          = False
@@ -232,11 +198,6 @@ class MartingaleBot:
         logger.info("🔄 Сброс — ожидание входа")
 
     def _restore_state(self):
-        """
-        Восстановление после перезапуска.
-        ИСПРАВЛЕНО: восстанавливаем tp_price в демо-клиенте
-        чтобы бот мог закрыть позицию после рестарта.
-        """
         state = load_state()
         if not state or not state.get("in_trade"):
             return
@@ -255,14 +216,10 @@ class MartingaleBot:
         self.total_qty         = state.get("total_qty", 0.0)
         self.recent_high       = state.get("recent_high")
 
-        # ── ВОССТАНОВЛЕНИЕ ДЕМО ПОЗИЦИИ ───────────────────────────
         if self.demo_mode and self.in_trade and self.entries:
             self.bybit.position_size   = self.total_qty
             self.bybit.avg_entry_price = self.average_price or 0.0
             self.bybit.total_invested  = self._total_invested()
-
-            # ✅ ИСПРАВЛЕНИЕ БАГА: восстанавливаем tp_price
-            # Без этого бот не закрывал позицию после рестарта!
             if self.average_price:
                 tp_pct   = self._get_tp_pct()
                 tp_price = self._round_price(
@@ -271,7 +228,6 @@ class MartingaleBot:
                 self.bybit.tp_price = tp_price
                 logger.info(f"♻️ Демо TP восстановлен @ ${tp_price}")
 
-        # ── ВОССТАНОВЛЕНИЕ РЕАЛЬНОГО TP ───────────────────────────
         if not self.demo_mode and self.in_trade and self.average_price:
             tp_pct   = self._get_tp_pct()
             tp_price = self._round_price(
@@ -281,10 +237,8 @@ class MartingaleBot:
             logger.info(f"♻️ Реальный TP переустановлен @ ${tp_price}")
 
         logger.info(
-            f"♻️ Состояние восстановлено | "
-            f"Уровень {self.current_level} | "
-            f"Средняя ${self.average_price} | "
-            f"Кол-во: {self.total_qty}"
+            f"♻️ Восстановлено | Ур.{self.current_level} | "
+            f"Ср.${self.average_price} | {self.total_qty} HYPE"
         )
 
     def _save_state(self):
@@ -298,11 +252,9 @@ class MartingaleBot:
             "recent_high":       self.recent_high
         })
 
-    # ── HELPERS ───────────────────────────────────────────────────
-
-    def _round_qty(self, q):    return round(q, QTY_PRECISION)
-    def _round_price(self, p):  return round(p, PRICE_PRECISION)
-    def _total_invested(self):  return sum(m for _, _, m in self.entries)
+    def _round_qty(self, q):   return round(q, QTY_PRECISION)
+    def _round_price(self, p): return round(p, PRICE_PRECISION)
+    def _total_invested(self): return sum(m for _, _, m in self.entries)
 
     def _get_tp_pct(self):
         idx = min(max(self.current_level - 1, 0), len(SMART_TP) - 1)
@@ -316,10 +268,7 @@ class MartingaleBot:
     def _drop_pct(self, price):
         if not self.first_entry_price:
             return 0.0
-        return (
-            (self.first_entry_price - price)
-            / self.first_entry_price * 100
-        )
+        return (self.first_entry_price - price) / self.first_entry_price * 100
 
     def _calc_commission(self, qty, price):
         return round(qty * price * COMMISSION_PCT / 100, 3)
@@ -346,15 +295,10 @@ class MartingaleBot:
         from config import TELEGRAM_CHAT_ID
         return TELEGRAM_CHAT_ID
 
-    # ── УСЛОВИЯ ТОРГОВЛИ ──────────────────────────────────────────
-
     def _should_enter(self, price):
         if self.recent_high is None:
             return False
-        return (
-            (self.recent_high - price) / self.recent_high * 100
-            >= ENTRY_DROP_PCT
-        )
+        return (self.recent_high - price) / self.recent_high * 100 >= ENTRY_DROP_PCT
 
     def _should_average(self, price):
         if not self.in_trade or self.current_level >= len(MARGINS):
@@ -364,48 +308,32 @@ class MartingaleBot:
     def _should_stop(self, price):
         return self.in_trade and self._drop_pct(price) >= STOP_LOSS_PCT
 
-    # ── ТОРГОВЛЯ ──────────────────────────────────────────────────
-
     def _open_level(self, price) -> tuple[bool, float]:
         if self.current_level >= len(MARGINS):
-            logger.warning("❌ Все уровни исчерпаны!")
             return False, 0.0
-
         margin       = MARGINS[self.current_level]
         expected_qty = self._round_qty((margin * LEVERAGE) / price)
-
-        result = self.bybit.place_market_buy(SYMBOL, expected_qty)
+        result       = self.bybit.place_market_buy(SYMBOL, expected_qty)
         if not result:
-            logger.error(
-                f"❌ Ордер не прошёл на уровне {self.current_level + 1}"
-            )
             return False, 0.0
-
         actual_price = result.get("avg_price", price)
         actual_qty   = result.get("qty", expected_qty)
-
         self.entries.append((actual_price, actual_qty, margin))
-        self.total_qty     = self._round_qty(
-            sum(q for _, q, _ in self.entries)
-        )
+        self.total_qty     = self._round_qty(sum(q for _, q, _ in self.entries))
         self.average_price = self._round_price(self._calc_average())
         self.current_level += 1
         self._save_state()
-
         logger.info(
-            f"📊 Уровень {self.current_level}: "
+            f"📊 Ур.{self.current_level}: "
             f"{actual_qty} HYPE @ ${actual_price:.3f} | "
-            f"Средняя: ${self.average_price:.3f}"
+            f"Ср: ${self.average_price:.3f}"
         )
         return True, actual_price
 
     def _update_tp(self) -> tuple[float | None, float]:
         tp_pct   = self._get_tp_pct()
-        tp_price = self._round_price(
-            self.average_price * (1 + tp_pct / 100)
-        )
+        tp_price = self._round_price(self.average_price * (1 + tp_pct / 100))
         if not self.bybit.set_take_profit(SYMBOL, tp_price):
-            logger.error("❌ Ошибка установки TP!")
             return None, tp_pct
         self._save_state()
         return tp_price, tp_pct
@@ -413,7 +341,6 @@ class MartingaleBot:
     def _check_tp_hit(self, price) -> tuple[bool, float, float]:
         if not self.in_trade:
             return False, 0.0, 0.0
-
         if self.demo_mode:
             hit, tp_price = self.bybit.check_tp_triggered(price)
             if hit:
@@ -430,8 +357,7 @@ class MartingaleBot:
                 if pnl_data:
                     return True, pnl_data["exit_price"], pnl_data["pnl"]
                 return True, price, round(
-                    self._total_invested() * LEVERAGE
-                    * self._get_tp_pct() / 100, 2
+                    self._total_invested() * LEVERAGE * self._get_tp_pct() / 100, 2
                 )
             return False, 0.0, 0.0
 
@@ -443,10 +369,7 @@ class MartingaleBot:
         if pnl_data:
             return round(abs(pnl_data["pnl"]), 2)
         commission = self._calc_commission(self.total_qty, stop_price)
-        loss       = (
-            self.total_qty * (self.average_price - stop_price)
-            + commission
-        )
+        loss = self.total_qty * (self.average_price - stop_price) + commission
         return round(max(loss, 0), 2)
 
     def _record_trade(
@@ -456,7 +379,6 @@ class MartingaleBot:
         self.stats["total_trades"]   += 1
         self.stats["today_trades"]   += 1
         self.stats["session_trades"] += 1
-
         if is_stop:
             self.stats["total_stops"]    += 1
             self.stats["total_profit"]   -= abs(profit)
@@ -466,9 +388,7 @@ class MartingaleBot:
             self.stats["total_profit"]   += profit
             self.stats["today_profit"]   += profit
             self.stats["session_profit"] += profit
-
         save_stats(self.stats)
-
         self._add_trade_to_history(
             profit      = profit,
             is_stop     = is_stop,
@@ -480,21 +400,18 @@ class MartingaleBot:
             funding     = funding
         )
 
-    # ── ДАШБОРД ───────────────────────────────────────────────────
-
     def _balance_block(self) -> str:
         if self.demo_mode:
             b = self.bybit.get_balance_info()
-            funding_str = (
+            fs = (
                 f"║ 🌊 Фандинг:  -${b['funding']:,.4f}\n"
                 if b["funding"] > 0 else ""
             )
             return (
                 f"║ 💳 Баланс:   ${b['balance']:>12,.2f}\n"
-                f"║ 📊 PnL:      ${b['pnl']:>+12,.2f}"
-                f" ({b['pnl_pct']:+.2f}%)\n"
+                f"║ 📊 PnL:      ${b['pnl']:>+12,.2f} ({b['pnl_pct']:+.2f}%)\n"
                 f"║ 💸 Комиссии:${b['commission']:>12,.2f}\n"
-                f"{funding_str}"
+                f"{fs}"
             )
         else:
             wb = self.bybit.get_wallet_balance()
@@ -507,7 +424,6 @@ class MartingaleBot:
         price = self.bybit.get_price(SYMBOL)
         if not price:
             return "⚠️ Ошибка получения цены"
-
         self._check_new_day()
         total = self.stats["total_trades"]
         wins  = total - self.stats["total_stops"]
@@ -518,7 +434,6 @@ class MartingaleBot:
                 (self.recent_high - price) / self.recent_high * 100, 2
             ) if self.recent_high else 0.0
             need = round(max(ENTRY_DROP_PCT - drop, 0), 2)
-
             return (
                 f"╔══════════════════════════════╗\n"
                 f"║  🚀 HYPE BOT {self._mode_label()}\n"
@@ -531,32 +446,21 @@ class MartingaleBot:
                 f"{self._balance_block()}"
                 f"╠══════════════════════════════╣\n"
                 f"║ 📊 СТАТИСТИКА\n"
-                f"║ ✅ Сегодня:  {self.stats['today_trades']} сд"
-                f" | +${self.stats['today_profit']:,.2f}\n"
-                f"║ 📈 Сессия:   {self.stats['session_trades']} сд"
-                f" | +${self.stats['session_profit']:,.2f}\n"
-                f"║ 💰 Всего:   +${self.stats['total_profit']:,.2f}\n"
+                f"║ ✅ Сегодня:  {self.stats['today_trades']} сд | +${self.stats['today_profit']:,.2f}\n"
+                f"║ 📈 Сессия:   {self.stats['session_trades']} сд | +${self.stats['session_profit']:,.2f}\n"
                 f"║ ❌ Стопов:   {self.stats['total_stops']}\n"
                 f"║ 🏆 Винрейт:  {wr}%\n"
                 f"╠══════════════════════════════╣\n"
-                f"║ ⚡ {LEVERAGE}x | 🔄 {CHECK_INTERVAL}с"
-                f" | ⏱ {self._uptime()}\n"
+                f"║ ⚡ {LEVERAGE}x | 🔄 {CHECK_INTERVAL}с | ⏱ {self._uptime()}\n"
                 f"╚══════════════════════════════╝"
             )
         else:
             drop     = round(self._drop_pct(price), 2)
             tp_pct   = self._get_tp_pct()
-            tp_price = self._round_price(
-                self.average_price * (1 + tp_pct / 100)
-            )
-            sl_price = self._round_price(
-                self.first_entry_price * (1 - STOP_LOSS_PCT / 100)
-            )
-            pnl   = round(
-                (price - self.average_price) * self.total_qty, 2
-            )
-            emoji = "📈" if pnl >= 0 else "📉"
-
+            tp_price = self._round_price(self.average_price * (1 + tp_pct / 100))
+            sl_price = self._round_price(self.first_entry_price * (1 - STOP_LOSS_PCT / 100))
+            pnl      = round((price - self.average_price) * self.total_qty, 2)
+            emoji    = "📈" if pnl >= 0 else "📉"
             return (
                 f"╔══════════════════════════════╗\n"
                 f"║  🚀 HYPE BOT {self._mode_label()}\n"
@@ -578,29 +482,34 @@ class MartingaleBot:
                 f"╚══════════════════════════════╝"
             )
 
-    # ── ИСТОРИЯ С ПАГИНАЦИЕЙ ──────────────────────────────────────
-
     def get_history_page(self, chat_id: str, page: int) -> tuple[str, dict]:
         all_trades  = self.history.get("all_trades", [])
         total       = len(all_trades)
         total_pages = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
         page        = max(0, min(page, total_pages - 1))
-
         self.history_page[chat_id] = page
 
-        s = self.history["summary"]
+        if self.demo_mode:
+            b            = self.bybit.get_balance_info()
+            real_profit  = b["pnl"]
+            real_comm    = b["commission"]
+            real_funding = b["funding"]
+        else:
+            s            = self.history["summary"]
+            real_profit  = s["total_profit"]
+            real_comm    = s["total_commission"]
+            real_funding = s["total_funding"]
 
+        s    = self.history["summary"]
         text = (
             f"📋 ИСТОРИЯ СДЕЛОК {self._mode_label()}\n"
             f"{'═'*34}\n"
-            f"💰 Прибыль всего: +${s['total_profit']:,.2f}\n"
-            f"✅ Сделок: {s['total_trades']}"
-            f" | ❌ Стопов: {s['total_stops']}\n"
-            f"💸 Комиссий: ${s['total_commission']:,.2f}"
-            f" | 🌊 Фандинг: ${s['total_funding']:,.4f}\n"
+            f"💰 PnL всего:  +${real_profit:,.2f}\n"
+            f"💸 Комиссии:   ${real_comm:,.2f}\n"
+            f"🌊 Фандинг:   -${real_funding:,.4f}\n"
+            f"✅ Сделок: {s['total_trades']} | ❌ Стопов: {s['total_stops']}\n"
             f"{'─'*34}\n"
-            f"📄 Стр. {page+1}/{total_pages}"
-            f" ({total} сделок всего)\n"
+            f"📄 Стр. {page+1}/{total_pages} ({total} сделок)\n"
             f"{'─'*34}\n\n"
         )
 
@@ -608,46 +517,33 @@ class MartingaleBot:
             text += "Сделок пока нет 👀"
         else:
             reversed_trades = list(reversed(all_trades))
-            start       = page * HISTORY_PAGE_SIZE
-            end         = min(start + HISTORY_PAGE_SIZE, total)
-            page_trades = reversed_trades[start:end]
-
-            for t in page_trades:
+            start           = page * HISTORY_PAGE_SIZE
+            end             = min(start + HISTORY_PAGE_SIZE, total)
+            for t in reversed_trades[start:end]:
                 emoji = "✅" if t["profit"] >= 0 else "❌"
-                funding_str = (
+                fs    = (
                     f" | 🌊${t['funding']:.4f}"
                     if t.get("funding", 0) > 0 else ""
                 )
                 text += (
                     f"{emoji} {t['date']} {t['time']}\n"
-                    f"   Ур:{t['levels']}"
-                    f" | ${t['entry_price']:.3f}"
-                    f"→${t['exit_price']:.3f}\n"
-                    f"   💵${t['invested']:.0f}"
-                    f" | 💸${t['commission']:.3f}"
-                    f"{funding_str}\n"
-                    f"   💰 {'+' if t['profit'] >= 0 else ''}"
-                    f"${t['profit']:,.2f}\n\n"
+                    f"   Ур:{t['levels']} | "
+                    f"${t['entry_price']:.3f}→${t['exit_price']:.3f}\n"
+                    f"   💵${t['invested']:.0f} | "
+                    f"💸${t['commission']:.3f}{fs}\n"
+                    f"   💰 {'+' if t['profit']>=0 else ''}${t['profit']:,.2f}\n\n"
                 )
 
-        # Навигационная клавиатура
-        nav_buttons = []
+        nav = []
         if page > 0:
-            nav_buttons.append(
-                {"text": "◀️ Назад", "callback_data": f"hist_{page-1}"}
-            )
-        nav_buttons.append(
-            {"text": f"📄 {page+1}/{total_pages}",
-             "callback_data": "hist_noop"}
-        )
+            nav.append({"text": "◀️ Назад", "callback_data": f"hist_{page-1}"})
+        nav.append({"text": f"📄 {page+1}/{total_pages}", "callback_data": "hist_noop"})
         if page < total_pages - 1:
-            nav_buttons.append(
-                {"text": "Вперёд ▶️", "callback_data": f"hist_{page+1}"}
-            )
+            nav.append({"text": "Вперёд ▶️", "callback_data": f"hist_{page+1}"})
 
         keyboard = {
             "inline_keyboard": [
-                nav_buttons,
+                nav,
                 [
                     {"text": "📊 Статус", "callback_data": "status"},
                     {"text": "📈 Итоги",  "callback_data": "report"}
@@ -662,44 +558,39 @@ class MartingaleBot:
         total = self.stats["total_trades"]
         wins  = total - self.stats["total_stops"]
         wr    = round(wins / total * 100) if total else 0
-        s     = self.history["summary"]
 
-        bal = ""
         if self.demo_mode:
             b   = self.bybit.get_balance_info()
             bal = (
                 f"💳 Баланс: ${b['balance']:,.2f}\n"
                 f"📊 PnL: ${b['pnl']:+,.2f} ({b['pnl_pct']:+.2f}%)\n"
                 f"💸 Комиссий: ${b['commission']:,.2f}\n"
-                f"🌊 Фандинг: ${b['funding']:,.4f}\n\n"
+                f"🌊 Фандинг: -${b['funding']:,.4f}\n\n"
+            )
+        else:
+            wb  = self.bybit.get_wallet_balance()
+            bal = (
+                f"💳 Баланс: ${wb['balance']:,.2f}\n"
+                f"💵 Доступно: ${wb['available']:,.2f}\n\n"
             )
 
         return (
             f"📊 ИТОГИ ДНЯ {self._mode_label()}\n"
             f"{datetime.now().strftime('%d.%m.%Y')}\n\n"
             f"{bal}"
-            f"✅ Сегодня: {self.stats['today_trades']} сделок"
-            f" | +${self.stats['today_profit']:,.2f}\n\n"
-            f"📈 ЗА ВСЁ ВРЕМЯ:\n"
-            f"💰 Прибыль: +${s['total_profit']:,.2f}\n"
-            f"✅ Сделок: {s['total_trades']}"
-            f" | ❌ Стопов: {s['total_stops']}\n"
-            f"💸 Комиссий: ${s['total_commission']:,.2f}\n"
-            f"🌊 Фандинг: ${s['total_funding']:,.4f}\n"
+            f"✅ Сегодня: {self.stats['today_trades']} сд | +${self.stats['today_profit']:,.2f}\n"
+            f"📈 Сессия:  {self.stats['session_trades']} сд | +${self.stats['session_profit']:,.2f}\n\n"
+            f"✅ Сделок в журнале: {total} | ❌ Стопов: {self.stats['total_stops']}\n"
             f"🏆 Винрейт: {wr}%\n"
             f"⚡ Плечо: {LEVERAGE}x\n"
             f"⏱ Аптайм: {self._uptime()}"
         )
 
-    # ── TELEGRAM ──────────────────────────────────────────────────
-
     def _tg_url(self, method: str) -> str:
         from config import TELEGRAM_TOKEN
         return f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
 
-    def send_keyboard(
-        self, chat_id: str, text: str, keyboard: dict = None
-    ):
+    def send_keyboard(self, chat_id: str, text: str, keyboard: dict = None):
         if keyboard is None:
             keyboard = {
                 "inline_keyboard": [
@@ -717,11 +608,7 @@ class MartingaleBot:
         try:
             requests.post(
                 self._tg_url("sendMessage"),
-                json={
-                    "chat_id":      chat_id,
-                    "text":         text,
-                    "reply_markup": keyboard
-                },
+                json={"chat_id": chat_id, "text": text, "reply_markup": keyboard},
                 timeout=10
             )
         except Exception as e:
@@ -753,7 +640,6 @@ class MartingaleBot:
             pass
 
         url, offset = self._tg_url("getUpdates"), 0
-
         while self.running:
             try:
                 resp = requests.get(
@@ -761,17 +647,11 @@ class MartingaleBot:
                     params={"timeout": 20, "offset": offset},
                     timeout=25
                 ).json()
-
                 for upd in resp.get("result", []):
                     offset = upd["update_id"] + 1
-
-                    msg = upd.get("message", {})
+                    msg    = upd.get("message", {})
                     if msg.get("text"):
-                        self._handle_cmd(
-                            msg["text"],
-                            str(msg["chat"]["id"])
-                        )
-
+                        self._handle_cmd(msg["text"], str(msg["chat"]["id"]))
                     cb = upd.get("callback_query")
                     if cb:
                         self._answer_cb(cb["id"])
@@ -786,70 +666,62 @@ class MartingaleBot:
     def _handle_cmd(self, cmd: str, chat_id: str):
         if cmd in ("/start", "/status"):
             self.send_keyboard(chat_id, self.get_dashboard())
-
         elif cmd == "/price":
             p = self.bybit.get_price(SYMBOL)
-            self.send_keyboard(
-                chat_id, f"💲 HYPE: ${p:,.3f}"
-            )
-
+            self.send_keyboard(chat_id, f"💲 HYPE: ${p:,.3f}")
         elif cmd == "/history":
             self.send_history_page(chat_id, 0)
-
         elif cmd.startswith("/hist_"):
             try:
-                page = int(cmd.split("_")[1])
-                self.send_history_page(chat_id, page)
+                self.send_history_page(chat_id, int(cmd.split("_")[1]))
             except:
                 self.send_history_page(chat_id, 0)
-
         elif cmd == "/hist_noop":
             pass
-
         elif cmd == "/report":
             self.send_keyboard(chat_id, self.get_daily_report())
-
         elif cmd == "/stop":
             self.running = False
             self.send_keyboard(chat_id, "⏹ Бот остановлен")
 
-    # ── HEARTBEAT ─────────────────────────────────────────────────
-
     def _heartbeat(self):
-        diff = (
-            datetime.now() - self.last_heartbeat
-        ).total_seconds() / 60
+        diff = (datetime.now() - self.last_heartbeat).total_seconds() / 60
         if diff < HEARTBEAT_MINUTES:
             return
         self.last_heartbeat = datetime.now()
-        price  = self.bybit.get_price(SYMBOL)
-        status = "🟢 В позиции" if self.in_trade else "👀 Жду входа"
+        price   = self.bybit.get_price(SYMBOL)
+        status  = "🟢 В позиции" if self.in_trade else "👀 Жду входа"
+        bal_str = ""
+        if self.demo_mode:
+            b       = self.bybit.get_balance_info()
+            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f} | PnL: ${b['pnl']:+,.2f}"
         self.send_keyboard(
             self._get_chat_id(),
             f"💓 БОТ АКТИВЕН\n\n"
             f"⚡ Статус: {status}\n"
             f"💲 HYPE: ${price:,.3f}\n"
-            f"⏱ Аптайм: {self._uptime()}\n"
-            f"💰 Прибыль: +${self.stats['total_profit']:,.2f}\n"
-            f"✅ {self.stats['total_trades']} сделок"
-            f" | ❌ {self.stats['total_stops']} стопов"
+            f"⏱ Аптайм: {self._uptime()}"
+            f"{bal_str}\n"
+            f"✅ {self.stats['total_trades']} сд | ❌ {self.stats['total_stops']} стопов"
         )
 
-    # ── ФАНДИНГ ───────────────────────────────────────────────────
-
     def _check_funding(self):
-        """Проверить и применить фандинг каждые 8 часов."""
         if not self.in_trade:
             return
-
         result = self.bybit.apply_funding(SYMBOL)
         if not result:
             return
+        payment = result.get("payment", 0)
+        rate    = result.get("rate", 0)
+        if not payment or payment <= 0.0001:
+            return
 
-        if self.demo_mode and result.get("payment", 0) > 0.001:
-            payment = result["payment"]
-            rate    = result["rate"]
-            b       = self.bybit.get_balance_info()
+        self.history["summary"]["total_funding"] += payment
+        save_history(self.history)
+        logger.info(f"🌊 Фандинг: ${payment:.4f} | ставка: {rate*100:.4f}%")
+
+        if self.demo_mode:
+            b = self.bybit.get_balance_info()
             self.send_keyboard(
                 self._get_chat_id(),
                 f"🌊 ФАНДИНГ СПИСАН\n\n"
@@ -857,10 +729,9 @@ class MartingaleBot:
                 f"📊 Ставка: {rate*100:.4f}%\n"
                 f"💸 Списано: -${payment:.4f}\n"
                 f"📦 Позиция: {self.total_qty:,.2f} HYPE\n"
-                f"💳 Баланс: ${b['balance']:,.2f}"
+                f"💳 Баланс: ${b['balance']:,.2f}\n"
+                f"📊 PnL: ${b['pnl']:+,.2f}"
             )
-
-    # ── ГЛАВНЫЙ ЦИКЛ ──────────────────────────────────────────────
 
     def run(self):
         logger.info(
@@ -869,39 +740,31 @@ class MartingaleBot:
             f"Плечо {LEVERAGE}x | Интервал {CHECK_INTERVAL}с"
         )
 
-        threading.Thread(
-            target=self.poll_telegram, daemon=True
-        ).start()
-
+        threading.Thread(target=self.poll_telegram, daemon=True).start()
         chat_id  = self._get_chat_id()
         setup    = self.bybit.auto_setup(SYMBOL, LEVERAGE)
         sess_num = self.current_session["session_id"]
 
         demo_note = ""
         if self.demo_mode:
-            b = self.bybit.get_balance_info()
+            b         = self.bybit.get_balance_info()
             demo_note = (
-                f"\n\n🎮 ДЕМО | "
-                f"Баланс: ${b['balance']:,.2f} | "
-                f"PnL: ${b['pnl']:+,.2f}"
+                f"\n\n🎮 ДЕМО\n"
+                f"💳 Баланс: ${b['balance']:,.2f}\n"
+                f"📊 PnL: ${b['pnl']:+,.2f} ({b['pnl_pct']:+.2f}%)"
             )
 
-        restored = (
-            "\n♻️ Состояние восстановлено!"
-            if self.in_trade else ""
-        )
+        restored = "\n♻️ Состояние восстановлено!" if self.in_trade else ""
 
         self.send_keyboard(
             chat_id,
             f"🚀 BlackHorn Capital v{BOT_VERSION}\n"
             f"📂 Сессия #{sess_num}\n\n"
-            f"⚙️ {setup.get('mode','?')}"
-            f" | {setup.get('leverage','?')}\n"
+            f"⚙️ {setup.get('mode','?')} | {setup.get('leverage','?')}\n"
             f"📊 {SYMBOL} | ⚡ {LEVERAGE}x\n"
             f"📈 Уровней: {len(MARGINS)}\n"
             f"🎯 SmartTP: {SMART_TP}\n"
-            f"📉 Вход: -{ENTRY_DROP_PCT}%"
-            f" | Стоп: -{STOP_LOSS_PCT}%\n"
+            f"📉 Вход: -{ENTRY_DROP_PCT}% | Стоп: -{STOP_LOSS_PCT}%\n"
             f"🔄 Проверка: каждые {CHECK_INTERVAL}с"
             f"{demo_note}{restored}\n\n"
             "👀 Слежу за HYPE..."
@@ -919,22 +782,15 @@ class MartingaleBot:
                 now   = datetime.now()
                 today = str(now.date())
 
-                # Ежедневный отчёт в 23:00
-                if (now.hour == 23
-                        and now.minute == 0
-                        and last_report != today):
+                if now.hour == 23 and now.minute == 0 and last_report != today:
                     last_report = today
-                    self.send_keyboard(
-                        chat_id, self.get_daily_report()
-                    )
+                    self.send_keyboard(chat_id, self.get_daily_report())
 
                 self._heartbeat()
                 self._check_funding()
 
-                # ── НЕТ ПОЗИЦИИ ──────────────────────────────────
                 if not self.in_trade:
-                    if (self.recent_high is None
-                            or price > self.recent_high):
+                    if self.recent_high is None or price > self.recent_high:
                         self.recent_high = price
 
                     if self._should_enter(price):
@@ -945,109 +801,66 @@ class MartingaleBot:
                             tp, tp_pct             = self._update_tp()
 
                             if not self.demo_mode:
-                                sl_backup = self._round_price(
-                                    actual_price
-                                    * (1 - STOP_LOSS_BACKUP_PCT / 100)
-                                )
                                 self.bybit.set_stop_loss_backup(
-                                    SYMBOL, sl_backup
+                                    SYMBOL,
+                                    self._round_price(
+                                        actual_price * (1 - STOP_LOSS_BACKUP_PCT / 100)
+                                    )
                                 )
 
-                            drop = round(
-                                (self.recent_high - actual_price)
-                                / self.recent_high * 100, 2
-                            )
-                            sl_price   = self._round_price(
-                                actual_price * (1 - STOP_LOSS_PCT / 100)
-                            )
-                            commission = self._calc_commission(
-                                self.entries[-1][1], actual_price
-                            )
-                            bal_str = ""
+                            drop       = round((self.recent_high - actual_price) / self.recent_high * 100, 2)
+                            sl_price   = self._round_price(actual_price * (1 - STOP_LOSS_PCT / 100))
+                            commission = self._calc_commission(self.entries[-1][1], actual_price)
+                            bal_str    = ""
                             if self.demo_mode:
-                                b = self.bybit.get_balance_info()
-                                bal_str = (
-                                    f"\n💳 Баланс: "
-                                    f"${b['balance']:,.2f}"
-                                )
+                                b       = self.bybit.get_balance_info()
+                                bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}"
 
                             self.send_keyboard(
                                 chat_id,
                                 f"🟢 ВХОД 1 {self._mode_label()}\n\n"
-                                f"💲 Цена входа:  "
-                                f"${actual_price:,.3f}\n"
+                                f"💲 Цена входа:  ${actual_price:,.3f}\n"
                                 f"📉 Откат:       -{drop}%\n"
                                 f"⚡ Плечо:       {LEVERAGE}x\n"
-                                f"💵 Маржа:       "
-                                f"${MARGINS[0]:,.0f}\n"
-                                f"📦 Куплено:     "
-                                f"{self.entries[-1][1]:,.2f} HYPE\n"
-                                f"🎯 ТП:          "
-                                f"${tp:,.3f} (+{tp_pct}%)\n"
-                                f"🔴 СЛ:          "
-                                f"${sl_price:,.3f} (-{STOP_LOSS_PCT}%)\n"
+                                f"💵 Маржа:       ${MARGINS[0]:,.0f}\n"
+                                f"📦 Куплено:     {self.entries[-1][1]:,.2f} HYPE\n"
+                                f"🎯 ТП:          ${tp:,.3f} (+{tp_pct}%)\n"
+                                f"🔴 СЛ:          ${sl_price:,.3f} (-{STOP_LOSS_PCT}%)\n"
                                 f"💸 Комиссия:    ${commission:,.3f}"
                                 f"{bal_str}"
                             )
 
-                # ── ЕСТЬ ПОЗИЦИЯ ──────────────────────────────────
                 else:
                     drop = round(self._drop_pct(price), 2)
 
-                    # 1. Защита зависшей позиции (реал)
                     if not self.demo_mode:
                         if self.bybit.get_position_size(SYMBOL) == 0.0:
-                            pnl_data = self.bybit.get_closed_pnl(SYMBOL)
-                            profit   = (
-                                pnl_data["pnl"] if pnl_data else 0
-                            )
+                            pnl_data   = self.bybit.get_closed_pnl(SYMBOL)
+                            profit     = pnl_data["pnl"] if pnl_data else 0
                             levels     = len(self.entries)
                             is_stop    = profit < 0
-                            commission = self._calc_commission(
-                                self.total_qty,
-                                pnl_data.get("exit_price", price)
-                                if pnl_data else price
-                            )
-                            self._record_trade(
-                                abs(profit), is_stop, levels, now,
-                                exit_price=(
-                                    pnl_data.get("exit_price", price)
-                                    if pnl_data else price
-                                ),
-                                commission=commission
-                            )
+                            ep         = pnl_data.get("exit_price", price) if pnl_data else price
+                            commission = self._calc_commission(self.total_qty, ep)
+                            self._record_trade(abs(profit), is_stop, levels, now, exit_price=ep, commission=commission)
                             self.send_keyboard(
                                 chat_id,
-                                f"{'❌' if is_stop else '✅'} "
-                                f"Позиция закрыта биржей\n\n"
-                                f"PnL: ${profit:,.2f}"
-                                f" | Уровней: {levels}"
+                                f"{'❌' if is_stop else '✅'} Позиция закрыта биржей\n\n"
+                                f"PnL: ${profit:,.2f} | Уровней: {levels}"
                             )
                             self._reset()
                             self.recent_high = price
                             continue
 
-                    # 2. Программный стоп-лосс
                     if self._should_stop(price):
                         levels     = len(self.entries)
-                        commission = self._calc_commission(
-                            self.total_qty, price
-                        )
+                        commission = self._calc_commission(self.total_qty, price)
                         loss       = self._close_all_stop(price)
-
-                        self._record_trade(
-                            loss, True, levels, now,
-                            exit_price=price,
-                            commission=commission
-                        )
+                        self._record_trade(loss, True, levels, now, exit_price=price, commission=commission)
 
                         bal_str = ""
                         if self.demo_mode:
-                            b = self.bybit.get_balance_info()
-                            bal_str = (
-                                f"\n💳 Баланс: "
-                                f"${b['balance']:,.2f}"
-                            )
+                            b       = self.bybit.get_balance_info()
+                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}"
 
                         self.send_keyboard(
                             chat_id,
@@ -1056,8 +869,7 @@ class MartingaleBot:
                             f"📉 Падение:     -{drop}%\n"
                             f"💸 Убыток:      -${loss:,.2f}\n"
                             f"📊 Уровней:     {levels}\n"
-                            f"❌ Стопов:      "
-                            f"{self.stats['total_stops']}\n"
+                            f"❌ Стопов:      {self.stats['total_stops']}\n"
                             f"⏳ Пауза 2 мин..."
                             f"{bal_str}"
                         )
@@ -1066,27 +878,16 @@ class MartingaleBot:
                         time.sleep(120)
                         continue
 
-                    # 3. Тейк-профит
                     tp_hit, tp_price, profit = self._check_tp_hit(price)
                     if tp_hit:
                         levels     = len(self.entries)
-                        commission = self._calc_commission(
-                            self.total_qty, tp_price
-                        )
-
-                        self._record_trade(
-                            profit, False, levels, now,
-                            exit_price=tp_price,
-                            commission=commission
-                        )
+                        commission = self._calc_commission(self.total_qty, tp_price)
+                        self._record_trade(profit, False, levels, now, exit_price=tp_price, commission=commission)
 
                         bal_str = ""
                         if self.demo_mode:
-                            b = self.bybit.get_balance_info()
-                            bal_str = (
-                                f"\n💳 Баланс: "
-                                f"${b['balance']:,.2f}"
-                            )
+                            b       = self.bybit.get_balance_info()
+                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}\n📊 PnL: ${b['pnl']:+,.2f}"
 
                         self.send_keyboard(
                             chat_id,
@@ -1094,15 +895,10 @@ class MartingaleBot:
                             f"💲 Выход:       ${tp_price:,.3f}\n"
                             f"📊 Уровней:     {levels}\n"
                             f"⚡ Плечо:       {LEVERAGE}x\n"
-                            f"💵 Вложено:     "
-                            f"${self._total_invested():,.2f}\n"
+                            f"💵 Вложено:     ${self._total_invested():,.2f}\n"
                             f"💸 Комиссия:    ${commission:,.3f}\n"
                             f"💰 Прибыль:     +${profit:,.2f}\n\n"
-                            f"✅ Сегодня: "
-                            f"{self.stats['today_trades']} сд"
-                            f" | +${self.stats['today_profit']:,.2f}\n"
-                            f"💰 Всего: "
-                            f"+${self.stats['total_profit']:,.2f}"
+                            f"✅ Сегодня: {self.stats['today_trades']} сд | +${self.stats['today_profit']:,.2f}"
                             f"{bal_str}\n\n"
                             "👀 Ищу следующий вход..."
                         )
@@ -1110,12 +906,8 @@ class MartingaleBot:
                         self.recent_high = price
                         continue
 
-                    # 4. Усреднение
                     averaged = False
-                    while (
-                        self._should_average(price)
-                        and self.current_level < len(MARGINS)
-                    ):
+                    while self._should_average(price) and self.current_level < len(MARGINS):
                         ok, _ = self._open_level(price)
                         if ok:
                             averaged = True
@@ -1124,49 +916,34 @@ class MartingaleBot:
 
                     if averaged:
                         tp, tp_pct = self._update_tp()
-                        commission = self._calc_commission(
-                            self.total_qty, price
-                        )
-                        bal_str = ""
+                        bal_str    = ""
                         if self.demo_mode:
-                            b = self.bybit.get_balance_info()
-                            bal_str = (
-                                f"\n💳 Баланс: "
-                                f"${b['balance']:,.2f}"
-                            )
+                            b       = self.bybit.get_balance_info()
+                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}"
 
                         self.send_keyboard(
                             chat_id,
-                            f"📉 УСРЕДНЕНИЕ {self._mode_label()}"
-                            f" | Уровень {len(self.entries)}\n\n"
+                            f"📉 УСРЕДНЕНИЕ {self._mode_label()} | Уровень {len(self.entries)}\n\n"
                             f"💲 Цена:        ${price:,.3f} (-{drop}%)\n"
-                            f"💵 Добавлено:   "
-                            f"${MARGINS[self.current_level-1]:,.0f}\n"
-                            f"💵 Всего:       "
-                            f"${self._total_invested():,.2f}\n"
-                            f"📈 Средняя:     "
-                            f"${self.average_price:,.3f}\n"
-                            f"🎯 Новый ТП:    "
-                            f"${tp:,.3f} (+{tp_pct}%)\n"
+                            f"💵 Добавлено:   ${MARGINS[self.current_level-1]:,.0f}\n"
+                            f"💵 Всего:       ${self._total_invested():,.2f}\n"
+                            f"📈 Средняя:     ${self.average_price:,.3f}\n"
+                            f"🎯 Новый ТП:    ${tp:,.3f} (+{tp_pct}%)\n"
                             f"📦 HYPE:        {self.total_qty:,.2f}\n"
-                            f"⚠️ Ур. осталось:"
-                            f" {len(MARGINS) - self.current_level}"
+                            f"⚠️ Ур. осталось: {len(MARGINS) - self.current_level}"
                             f"{bal_str}"
                         )
 
                 time.sleep(CHECK_INTERVAL)
 
             except KeyboardInterrupt:
-                self.send_keyboard(
-                    self._get_chat_id(), "⏹ Бот остановлен"
-                )
+                self.send_keyboard(self._get_chat_id(), "⏹ Бот остановлен")
                 sys.exit(0)
             except Exception as e:
                 logger.error(f"❌ Ошибка: {e}", exc_info=True)
                 self.send_keyboard(
                     self._get_chat_id(),
-                    f"⚠️ Ошибка:\n{str(e)[:150]}\n\n"
-                    f"Продолжаю через 30с..."
+                    f"⚠️ Ошибка:\n{str(e)[:150]}\n\nПродолжаю через 30с..."
                 )
                 time.sleep(30)
 
