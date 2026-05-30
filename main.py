@@ -92,6 +92,7 @@ class MartingaleBot:
         self.demo_mode      = DEMO_MODE
         self.bybit          = DemoClient(DEMO_BALANCE) if DEMO_MODE else BybitClient()
         self.running        = True
+        self.paused         = False
         self.stats          = load_stats()
         self.history        = load_history()
         self.start_time     = datetime.now()
@@ -409,6 +410,7 @@ class MartingaleBot:
             )
             return (
                 f"║ 💳 Баланс:   ${b['balance']:>12,.2f}\n"
+                f"║ 💵 Доступно: ${b['available']:>12,.2f}\n"
                 f"║ 📊 PnL:      ${b['pnl']:>+12,.2f} ({b['pnl_pct']:+.2f}%)\n"
                 f"║ 💸 Комиссии:${b['commission']:>12,.2f}\n"
                 f"{fs}"
@@ -602,7 +604,7 @@ class MartingaleBot:
                         {"text": "📋 История", "callback_data": "history"},
                         {"text": "📈 Итоги",   "callback_data": "report"}
                     ],
-                    [{"text": "⏹ Стоп бот", "callback_data": "stop"}]
+                    [{"text": "⏸ Пауза", "callback_data": "stop"}]
                 ]
             }
         try:
@@ -665,24 +667,90 @@ class MartingaleBot:
 
     def _handle_cmd(self, cmd: str, chat_id: str):
         if cmd in ("/start", "/status"):
-            self.send_keyboard(chat_id, self.get_dashboard())
+            if self.paused:
+                status_text = (
+                    f"⏸ БОТ НА ПАУЗЕ\n\n"
+                    f"Позиция сохранена:\n"
+                    f"Уровень: {len(self.entries)}\n"
+                    f"Средняя: ${self.average_price or '—'}\n"
+                    f"Баланс: ${self.bybit.balance:,.2f}\n\n"
+                    f"Нажми кнопку ниже чтобы продолжить"
+                )
+                keyboard = {
+                    "inline_keyboard": [
+                        [{"text": "▶️ Возобновить", "callback_data": "resume"}],
+                        [
+                            {"text": "📊 Статус", "callback_data": "status"},
+                            {"text": "📈 Итоги", "callback_data": "report"}
+                        ],
+                        [{"text": "📋 История", "callback_data": "history"}]
+                    ]
+                }
+                self.send_keyboard(chat_id, status_text, keyboard)
+            else:
+                self.send_keyboard(chat_id, self.get_dashboard())
+
         elif cmd == "/price":
             p = self.bybit.get_price(SYMBOL)
             self.send_keyboard(chat_id, f"💲 HYPE: ${p:,.3f}")
+
         elif cmd == "/history":
             self.send_history_page(chat_id, 0)
+
         elif cmd.startswith("/hist_"):
             try:
                 self.send_history_page(chat_id, int(cmd.split("_")[1]))
             except:
                 self.send_history_page(chat_id, 0)
+
         elif cmd == "/hist_noop":
             pass
+
         elif cmd == "/report":
             self.send_keyboard(chat_id, self.get_daily_report())
+
         elif cmd == "/stop":
-            self.running = False
-            self.send_keyboard(chat_id, "⏹ Бот остановлен")
+            self.paused = True
+            b = self.bybit.get_balance_info()
+            self.send_keyboard(
+                chat_id,
+                f"⏸ БОТ НА ПАУЗЕ\n\n"
+                f"Позиция сохранена ✅\n"
+                f"Баланс: ${b['balance']:,.2f}\n"
+                f"PnL: ${b['pnl']:+,.2f}\n"
+                f"Уровень: {len(self.entries)}/{len(MARGINS)}\n\n"
+                f"Нажми кнопку чтобы продолжить",
+                {
+                    "inline_keyboard": [
+                        [
+                            {
+                                "text": "▶️ Возобновить бота",
+                                "callback_data": "resume"
+                            }
+                        ],
+                        [
+                            {"text": "📊 Статус", "callback_data": "status"},
+                            {"text": "📈 Итоги", "callback_data": "report"}
+                        ],
+                        [
+                            {"text": "📋 История", "callback_data": "history"}
+                        ]
+                    ]
+                }
+            )
+            logger.info("⏸ Бот на паузе")
+
+        elif cmd == "/resume":
+            if self.paused:
+                self.paused = False
+                self.send_keyboard(
+                    chat_id,
+                    "▶️ БОТ ВОЗОБНОВЛЁН\n\n"
+                    "Продолжаю торговлю... 👀"
+                )
+                logger.info("▶️ Бот возобновлён")
+            else:
+                self.send_keyboard(chat_id, "✅ Бот уже работает")
 
     def _heartbeat(self):
         diff = (datetime.now() - self.last_heartbeat).total_seconds() / 60
@@ -691,6 +759,8 @@ class MartingaleBot:
         self.last_heartbeat = datetime.now()
         price   = self.bybit.get_price(SYMBOL)
         status  = "🟢 В позиции" if self.in_trade else "👀 Жду входа"
+        if self.paused:
+            status = "⏸ НА ПАУЗЕ"
         bal_str = ""
         if self.demo_mode:
             b       = self.bybit.get_balance_info()
@@ -706,7 +776,7 @@ class MartingaleBot:
         )
 
     def _check_funding(self):
-        if not self.in_trade:
+        if not self.in_trade or self.paused:
             return
         result = self.bybit.apply_funding(SYMBOL)
         if not result:
@@ -774,6 +844,11 @@ class MartingaleBot:
 
         while self.running:
             try:
+                # ← ПАУЗУ ПРОВЕРЯЕМ ЗДЕСЬ
+                if self.paused:
+                    time.sleep(2)
+                    continue
+
                 price = self.bybit.get_price(SYMBOL)
                 if price is None:
                     time.sleep(CHECK_INTERVAL)
@@ -814,7 +889,7 @@ class MartingaleBot:
                             bal_str    = ""
                             if self.demo_mode:
                                 b       = self.bybit.get_balance_info()
-                                bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}"
+                                bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}\n💵 Доступно: ${b['available']:,.2f}"
 
                             self.send_keyboard(
                                 chat_id,
@@ -860,7 +935,7 @@ class MartingaleBot:
                         bal_str = ""
                         if self.demo_mode:
                             b       = self.bybit.get_balance_info()
-                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}"
+                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}\n💵 Доступно: ${b['available']:,.2f}"
 
                         self.send_keyboard(
                             chat_id,
@@ -887,7 +962,7 @@ class MartingaleBot:
                         bal_str = ""
                         if self.demo_mode:
                             b       = self.bybit.get_balance_info()
-                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}\n📊 PnL: ${b['pnl']:+,.2f}"
+                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}\n💵 Доступно: ${b['available']:,.2f}\n📊 PnL: ${b['pnl']:+,.2f}"
 
                         self.send_keyboard(
                             chat_id,
@@ -919,7 +994,7 @@ class MartingaleBot:
                         bal_str    = ""
                         if self.demo_mode:
                             b       = self.bybit.get_balance_info()
-                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}"
+                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}\n💵 Доступно: ${b['available']:,.2f}"
 
                         self.send_keyboard(
                             chat_id,
