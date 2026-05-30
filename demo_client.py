@@ -21,10 +21,16 @@ def _atomic_write(filepath: str, data: dict):
 
 class DemoClient:
     """
-    Демо-клиент с реальными ценами Bybit.
-    Баланс сохраняется на диск — не теряется при перезапуске.
-    Фандинг списывается каждые 8 часов.
-    Комиссии считаются один раз без дублирования.
+    ✅ ПРАВИЛЬНЫЙ расчёт баланса:
+    
+    При входе:
+    balance -= (маржа + комиссия_входа)
+    
+    При закрытии:
+    balance += маржа + net_pnl
+    (маржа возвращается + чистая прибыль/убыток)
+    
+    Итог: баланс растёт только на реальную прибыль
     """
 
     def __init__(self, balance: float):
@@ -34,7 +40,6 @@ class DemoClient:
             api_secret=BYBIT_API_SECRET
         )
 
-        # Загружаем сохранённый баланс или используем стартовый
         saved = self._load_demo_state()
         if saved:
             self.balance          = saved["balance"]
@@ -54,7 +59,6 @@ class DemoClient:
             self._save_demo_state()
             logger.info(f"🎮 ДЕМО новый | Баланс: ${balance:,.2f}")
 
-        # Позиция (не сохраняется — восстанавливается из state.json)
         self.position_size   = 0.0
         self.avg_entry_price = 0.0
         self.total_invested  = 0.0
@@ -62,12 +66,11 @@ class DemoClient:
 
         self._last_close_pnl  = None
         self._order_counter   = 0
-        self._last_funding_hr = -1  # час последнего фандинга
+        self._last_funding_hr = -1
 
-    # ── СОХРАНЕНИЕ/ЗАГРУЗКА БАЛАНСА ───────────────────────────────
+    # ── СОХРАНЕНИЕ ────────────────────────────────────────────────
 
     def _save_demo_state(self):
-        """Сохранить баланс на диск."""
         _atomic_write(DEMO_STATE_FILE, {
             "balance":          round(self.balance, 6),
             "initial_balance":  self.initial_balance,
@@ -76,7 +79,6 @@ class DemoClient:
         })
 
     def _load_demo_state(self) -> dict | None:
-        """Загрузить сохранённый баланс."""
         try:
             if os.path.exists(DEMO_STATE_FILE):
                 with open(DEMO_STATE_FILE, encoding="utf-8") as f:
@@ -120,11 +122,11 @@ class DemoClient:
             return None
 
     def get_funding_rate(self, symbol: str) -> float:
-        """Получить реальную ставку фандинга."""
         try:
-            r    = self.client.get_tickers(category=CATEGORY, symbol=symbol)
-            rate = float(r["result"]["list"][0].get("fundingRate", DEFAULT_FUNDING_RATE))
-            return rate
+            r = self.client.get_tickers(category=CATEGORY, symbol=symbol)
+            return float(
+                r["result"]["list"][0].get("fundingRate", DEFAULT_FUNDING_RATE)
+            )
         except:
             return DEFAULT_FUNDING_RATE
 
@@ -134,32 +136,26 @@ class DemoClient:
     # ── ФАНДИНГ ───────────────────────────────────────────────────
 
     def apply_funding(self, symbol: str) -> dict | None:
-        """
-        Списать фандинг если наступило время (00:00, 08:00, 16:00 UTC).
-        Возвращает dict с деталями или None если не время.
-        """
         from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc)
         hour    = now_utc.hour
 
-        # Проверяем: нужный час И ещё не списывали в этот час
         if (hour not in FUNDING_HOURS
                 or self._last_funding_hr == hour
                 or self.position_size == 0):
             return None
 
         self._last_funding_hr = hour
+        rate            = self.get_funding_rate(symbol)
+        position_value  = self.position_size * self.avg_entry_price
+        funding_payment = position_value * rate
 
-        rate             = self.get_funding_rate(symbol)
-        position_value   = self.position_size * self.avg_entry_price
-        funding_payment  = position_value * rate
-
-        self.balance        -= funding_payment
-        self.total_funding  += funding_payment
+        self.balance       -= funding_payment
+        self.total_funding += funding_payment
         self._save_demo_state()
 
         logger.info(
-            f"[ДЕМО] 💸 Фандинг: "
+            f"[ДЕМО] 🌊 Фандинг: "
             f"ставка={rate*100:.4f}% | "
             f"сумма=${funding_payment:.4f} | "
             f"баланс=${self.balance:.2f}"
@@ -178,17 +174,24 @@ class DemoClient:
         if not price:
             return None
 
-        margin     = (qty * price) / LEVERAGE
-        commission = qty * price * COMMISSION_PCT / 100
+        # ✅ ПРАВИЛЬНО: маржа = стоимость / плечо
+        margin     = round((qty * price) / LEVERAGE, 4)
+        
+        # Комиссия на входе
+        entry_comm = round(qty * price * COMMISSION_PCT / 100, 4)
+        
+        # Общая стоимость выхода из баланса
+        total_cost = margin + entry_comm
 
-        if (margin + commission) > self.balance:
+        # Проверка баланса
+        if total_cost > self.balance:
             logger.warning(
-                f"[ДЕМО] Недостаточно: нужно "
-                f"${margin+commission:.2f}, есть ${self.balance:.2f}"
+                f"[ДЕМО] Недостаточно: "
+                f"нужно ${total_cost:.2f}, есть ${self.balance:.2f}"
             )
             return None
 
-        # Средневзвешенная цена
+        # Средневзвешенная цена входа
         if self.position_size > 0 and self.avg_entry_price > 0:
             old_val = self.position_size * self.avg_entry_price
             new_val = qty * price
@@ -201,17 +204,18 @@ class DemoClient:
         self.position_size  += qty
         self.total_invested += margin
 
-        # Из баланса — только комиссия (маржа вернётся при закрытии)
-        self.balance          -= commission
-        self.total_commission += commission
+        # ✅ ВЫЧИТАЕМ маржу и комиссию из баланса
+        # Маржа вернётся при закрытии позиции
+        self.balance          -= total_cost
+        self.total_commission += entry_comm
 
         self._order_counter += 1
         self._save_demo_state()
 
         logger.info(
             f"[ДЕМО] BUY {qty:.2f} @ ${price:.3f} | "
-            f"Ср: ${self.avg_entry_price:.3f} | "
-            f"Комиссия: ${commission:.3f} | "
+            f"Маржа: ${margin:.2f} | "
+            f"Комиссия входа: ${entry_comm:.3f} | "
             f"Баланс: ${self.balance:.2f}"
         )
 
@@ -221,7 +225,7 @@ class DemoClient:
             "qty":       qty
         }
 
-    # ── ПРОВЕРКА TP ───────────────────────────────────────────────
+    # ── TP ────────────────────────────────────────────────────────
 
     def check_tp_triggered(self, current_price: float) -> tuple[bool, float]:
         if self.tp_price is None:
@@ -243,28 +247,57 @@ class DemoClient:
 
     def _do_close(self, close_price: float):
         """
-        Закрыть позицию.
-        PnL = (выход - вход) × кол-во - комиссия закрытия
-        Маржа возвращается в баланс.
+        ✅ ПРАВИЛЬНЫЙ расчёт при закрытии:
+        
+        Пример:
+        Вход:  $5,500 - $150 (маржа) - $3 (комиссия входа) = $5,347
+        
+        Выход расчёты:
+        - Gross PnL = (цена_выхода - цена_входа) × количество
+        - Close комиссия = количество × цена_выхода × 0.1%
+        - Net PnL = Gross PnL - Close комиссия
+        - balance += маржа + net_pnl
+        
+        Результат:
+        $5,347 + $150 (маржа!) + $14.97 (прибыль минус комиссия)
+        = $5,511.97
+        
+        Чистая прибыль за сделку: $14.97
+        (прибыль $17.97 минус комиссия входа $3)
         """
         qty = self.position_size
         if qty == 0:
             return
 
-        gross_pnl        = qty * (close_price - self.avg_entry_price)
-        close_commission = qty * close_price * COMMISSION_PCT / 100
-        net_pnl          = gross_pnl - close_commission
+        # Расчёт прибыли/убытка
+        gross_pnl = round(qty * (close_price - self.avg_entry_price), 4)
+        
+        # Комиссия на выходе
+        close_commission = round(qty * close_price * COMMISSION_PCT / 100, 4)
+        
+        # Чистая прибыль после комиссии выхода
+        net_pnl = round(gross_pnl - close_commission, 4)
 
-        # Возвращаем маржу + чистая прибыль/убыток
+        # Комиссия на входе (сохранена для отчёта)
+        entry_commission = round(
+            qty * self.avg_entry_price * COMMISSION_PCT / 100, 3
+        )
+
+        # ✅ Возвращаем маржу + чистая прибыль
         self.balance          += self.total_invested + net_pnl
         self.total_commission += close_commission
 
         self._last_close_pnl = {
-            "pnl":        round(net_pnl, 2),
-            "exit_price": close_price,
-            "qty":        qty,
-            "gross_pnl":  round(gross_pnl, 2),
-            "commission": round(close_commission, 3)
+            "pnl":              round(net_pnl, 2),
+            "exit_price":       close_price,
+            "qty":              qty,
+            "gross_pnl":        round(gross_pnl, 2),
+            "open_commission":  entry_commission,
+            "close_commission": round(close_commission, 3),
+            "total_commission": round(entry_commission + close_commission, 3),
+            "net_after_all_comm": round(
+                gross_pnl - entry_commission - close_commission, 2
+            )
         }
 
         self._save_demo_state()
@@ -272,8 +305,9 @@ class DemoClient:
         logger.info(
             f"[ДЕМО] Закрытие @ ${close_price:.3f} | "
             f"Gross: ${gross_pnl:.2f} | "
-            f"Комиссия: ${close_commission:.3f} | "
+            f"Комиссия выхода: ${close_commission:.3f} | "
             f"Net PnL: ${net_pnl:.2f} | "
+            f"Маржа возвращена: ${self.total_invested:.2f} | "
             f"Баланс: ${self.balance:.2f}"
         )
 
@@ -296,15 +330,29 @@ class DemoClient:
         return self.get_balance_info()
 
     def get_balance_info(self) -> dict:
+        """
+        ✅ Полная информация о балансе:
+        
+        - balance: текущий баланс (маржа уже вычтена при входе)
+        - available: свободные деньги = текущий баланс
+        - initial: начальный баланс $5,500
+        - invested: маржа в текущей позиции
+        - pnl: прибыль/убыток = баланс - начальный
+        - pnl_pct: в процентах
+        - commission: всего комиссий уплачено
+        - funding: всего фандинга списано
+        """
         pnl     = round(self.balance - self.initial_balance, 2)
         pnl_pct = round(pnl / self.initial_balance * 100, 2)
+        available = round(self.balance, 2)
+        
         return {
             "balance":    round(self.balance, 2),
-            "available":  round(self.balance - self.total_invested, 2),
+            "available":  available,
             "initial":    self.initial_balance,
             "invested":   round(self.total_invested, 2),
             "pnl":        pnl,
             "pnl_pct":    pnl_pct,
             "commission": round(self.total_commission, 2),
-            "funding":    round(self.total_funding, 2)
+            "funding":    round(self.total_funding, 4)
         }
