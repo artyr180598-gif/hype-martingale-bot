@@ -8,6 +8,7 @@ from config import (
     DEMO_BALANCE, DEMO_STATE_FILE,
     FUNDING_HOURS, DEFAULT_FUNDING_RATE
 )
+from storage import redis_set, redis_get, redis_available
 
 logger = logging.getLogger(__name__)
 
@@ -21,16 +22,10 @@ def _atomic_write(filepath: str, data: dict):
 
 class DemoClient:
     """
-    ✅ ПРАВИЛЬНЫЙ расчёт баланса:
-    
-    При входе:
-    balance -= (маржа + комиссия_входа)
-    
-    При закрытии:
-    balance += маржа + net_pnl
-    (маржа возвращается + чистая прибыль/убыток)
-    
-    Итог: баланс растёт только на реальную прибыль
+    Правильный расчёт баланса:
+    Вход:  balance -= маржа + комиссия_входа
+    Выход: balance += маржа + net_pnl
+    Прибыль = только реальная разница цен
     """
 
     def __init__(self, balance: float):
@@ -59,11 +54,10 @@ class DemoClient:
             self._save_demo_state()
             logger.info(f"🎮 ДЕМО новый | Баланс: ${balance:,.2f}")
 
-        self.position_size   = 0.0
-        self.avg_entry_price = 0.0
-        self.total_invested  = 0.0
-        self.tp_price        = None
-
+        self.position_size    = 0.0
+        self.avg_entry_price  = 0.0
+        self.total_invested   = 0.0
+        self.tp_price         = None
         self._last_close_pnl  = None
         self._order_counter   = 0
         self._last_funding_hr = -1
@@ -71,18 +65,36 @@ class DemoClient:
     # ── СОХРАНЕНИЕ ────────────────────────────────────────────────
 
     def _save_demo_state(self):
-        _atomic_write(DEMO_STATE_FILE, {
+        data = {
             "balance":          round(self.balance, 6),
             "initial_balance":  self.initial_balance,
             "total_commission": round(self.total_commission, 6),
             "total_funding":    round(self.total_funding, 6)
-        })
+        }
+        # Сохраняем в Redis (главный)
+        if redis_available():
+            redis_set("demo_state", data)
+        # Дублируем в файл (запасной)
+        _atomic_write(DEMO_STATE_FILE, data)
 
     def _load_demo_state(self) -> dict | None:
+        # Сначала Redis
+        if redis_available():
+            data = redis_get("demo_state")
+            if data:
+                logger.info(
+                    f"☁️ Баланс из Redis: ${data['balance']:,.2f}"
+                )
+                return data
+        # Потом файл
         try:
             if os.path.exists(DEMO_STATE_FILE):
                 with open(DEMO_STATE_FILE, encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    logger.info(
+                        f"📁 Баланс из файла: ${data['balance']:,.2f}"
+                    )
+                    return data
         except Exception as e:
             logger.warning(f"Загрузка demo_state: {e}")
         return None
@@ -174,20 +186,15 @@ class DemoClient:
         if not price:
             return None
 
-        # ✅ ПРАВИЛЬНО: маржа = стоимость / плечо
         margin     = round((qty * price) / LEVERAGE, 4)
-        
-        # Комиссия на входе
         entry_comm = round(qty * price * COMMISSION_PCT / 100, 4)
-        
-        # Общая стоимость выхода из баланса
         total_cost = margin + entry_comm
 
-        # Проверка баланса
         if total_cost > self.balance:
             logger.warning(
                 f"[ДЕМО] Недостаточно: "
-                f"нужно ${total_cost:.2f}, есть ${self.balance:.2f}"
+                f"нужно ${total_cost:.2f}, "
+                f"есть ${self.balance:.2f}"
             )
             return None
 
@@ -204,8 +211,7 @@ class DemoClient:
         self.position_size  += qty
         self.total_invested += margin
 
-        # ✅ ВЫЧИТАЕМ маржу и комиссию из баланса
-        # Маржа вернётся при закрытии позиции
+        # Вычитаем маржу + комиссию
         self.balance          -= total_cost
         self.total_commission += entry_comm
 
@@ -215,7 +221,7 @@ class DemoClient:
         logger.info(
             f"[ДЕМО] BUY {qty:.2f} @ ${price:.3f} | "
             f"Маржа: ${margin:.2f} | "
-            f"Комиссия входа: ${entry_comm:.3f} | "
+            f"Комиссия: ${entry_comm:.3f} | "
             f"Баланс: ${self.balance:.2f}"
         )
 
@@ -247,43 +253,24 @@ class DemoClient:
 
     def _do_close(self, close_price: float):
         """
-        ✅ ПРАВИЛЬНЫЙ расчёт при закрытии:
-        
-        Пример:
-        Вход:  $5,500 - $150 (маржа) - $3 (комиссия входа) = $5,347
-        
-        Выход расчёты:
-        - Gross PnL = (цена_выхода - цена_входа) × количество
-        - Close комиссия = количество × цена_выхода × 0.1%
-        - Net PnL = Gross PnL - Close комиссия
-        - balance += маржа + net_pnl
-        
-        Результат:
-        $5,347 + $150 (маржа!) + $14.97 (прибыль минус комиссия)
-        = $5,511.97
-        
-        Чистая прибыль за сделку: $14.97
-        (прибыль $17.97 минус комиссия входа $3)
+        Правильный расчёт:
+        gross_pnl = (выход - вход) × количество
+        close_comm = количество × цена_выхода × 0.1%
+        net_pnl = gross_pnl - close_comm
+        balance += маржа + net_pnl
         """
         qty = self.position_size
         if qty == 0:
             return
 
-        # Расчёт прибыли/убытка
-        gross_pnl = round(qty * (close_price - self.avg_entry_price), 4)
-        
-        # Комиссия на выходе
+        gross_pnl        = round(qty * (close_price - self.avg_entry_price), 4)
         close_commission = round(qty * close_price * COMMISSION_PCT / 100, 4)
-        
-        # Чистая прибыль после комиссии выхода
-        net_pnl = round(gross_pnl - close_commission, 4)
-
-        # Комиссия на входе (сохранена для отчёта)
+        net_pnl          = round(gross_pnl - close_commission, 4)
         entry_commission = round(
             qty * self.avg_entry_price * COMMISSION_PCT / 100, 3
         )
 
-        # ✅ Возвращаем маржу + чистая прибыль
+        # Возвращаем маржу + чистая прибыль
         self.balance          += self.total_invested + net_pnl
         self.total_commission += close_commission
 
@@ -305,13 +292,11 @@ class DemoClient:
         logger.info(
             f"[ДЕМО] Закрытие @ ${close_price:.3f} | "
             f"Gross: ${gross_pnl:.2f} | "
-            f"Комиссия выхода: ${close_commission:.3f} | "
+            f"Комиссия: ${close_commission:.3f} | "
             f"Net PnL: ${net_pnl:.2f} | "
-            f"Маржа возвращена: ${self.total_invested:.2f} | "
             f"Баланс: ${self.balance:.2f}"
         )
 
-        # Сброс позиции
         self.position_size   = 0.0
         self.avg_entry_price = 0.0
         self.total_invested  = 0.0
@@ -330,25 +315,11 @@ class DemoClient:
         return self.get_balance_info()
 
     def get_balance_info(self) -> dict:
-        """
-        ✅ Полная информация о балансе:
-        
-        - balance: текущий баланс (маржа уже вычтена при входе)
-        - available: свободные деньги = текущий баланс
-        - initial: начальный баланс $5,500
-        - invested: маржа в текущей позиции
-        - pnl: прибыль/убыток = баланс - начальный
-        - pnl_pct: в процентах
-        - commission: всего комиссий уплачено
-        - funding: всего фандинга списано
-        """
         pnl     = round(self.balance - self.initial_balance, 2)
         pnl_pct = round(pnl / self.initial_balance * 100, 2)
-        available = round(self.balance, 2)
-        
         return {
             "balance":    round(self.balance, 2),
-            "available":  available,
+            "available":  round(self.balance, 2),
             "initial":    self.initial_balance,
             "invested":   round(self.total_invested, 2),
             "pnl":        pnl,
