@@ -20,6 +20,7 @@ from config import (
 )
 from bybit_client import BybitClient
 from demo_client import DemoClient
+from storage import redis_set, redis_get, redis_available
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +52,7 @@ def _load_json(filepath: str, default: dict) -> dict:
 
 
 def load_stats() -> dict:
-    return _load_json(STATS_FILE, {
+    default = {
         "total_profit":   0.0,
         "total_trades":   0,
         "total_stops":    0,
@@ -60,16 +61,36 @@ def load_stats() -> dict:
         "today_date":     str(datetime.now().date()),
         "session_profit": 0.0,
         "session_trades": 0,
-    })
+    }
+    if redis_available():
+        data = redis_get("stats")
+        if data:
+            return data
+    return _load_json(STATS_FILE, default)
 
 
-def save_stats(s): _atomic_write(STATS_FILE, s)
-def load_state() -> dict: return _load_json(STATE_FILE, {})
-def save_state(s): _atomic_write(STATE_FILE, s)
+def save_stats(s):
+    _atomic_write(STATS_FILE, s)
+    if redis_available():
+        redis_set("stats", s)
+
+
+def load_state() -> dict:
+    if redis_available():
+        data = redis_get("state")
+        if data:
+            return data
+    return _load_json(STATE_FILE, {})
+
+
+def save_state(s):
+    _atomic_write(STATE_FILE, s)
+    if redis_available():
+        redis_set("state", s)
 
 
 def load_history() -> dict:
-    return _load_json(HISTORY_FILE, {
+    default = {
         "sessions":   [],
         "all_trades": [],
         "summary": {
@@ -80,10 +101,18 @@ def load_history() -> dict:
             "total_funding":    0.0,
             "first_start":      None
         }
-    })
+    }
+    if redis_available():
+        data = redis_get("history")
+        if data:
+            return data
+    return _load_json(HISTORY_FILE, default)
 
 
-def save_history(h): _atomic_write(HISTORY_FILE, h)
+def save_history(h):
+    _atomic_write(HISTORY_FILE, h)
+    if redis_available():
+        redis_set("history", h)
 
 
 class MartingaleBot:
@@ -403,7 +432,7 @@ class MartingaleBot:
 
     def _balance_block(self) -> str:
         if self.demo_mode:
-            b = self.bybit.get_balance_info()
+            b  = self.bybit.get_balance_info()
             fs = (
                 f"║ 🌊 Фандинг:  -${b['funding']:,.4f}\n"
                 if b["funding"] > 0 else ""
@@ -550,7 +579,7 @@ class MartingaleBot:
                     {"text": "📊 Статус", "callback_data": "status"},
                     {"text": "📈 Итоги",  "callback_data": "report"}
                 ],
-                [{"text": "⏹ Стоп бот", "callback_data": "stop"}]
+                [{"text": "⏸ Пауза", "callback_data": "stop"}]
             ]
         }
         return text, keyboard
@@ -576,16 +605,19 @@ class MartingaleBot:
                 f"💵 Доступно: ${wb['available']:,.2f}\n\n"
             )
 
+        storage = "☁️ Redis" if redis_available() else "📁 Файл"
+
         return (
             f"📊 ИТОГИ ДНЯ {self._mode_label()}\n"
             f"{datetime.now().strftime('%d.%m.%Y')}\n\n"
             f"{bal}"
             f"✅ Сегодня: {self.stats['today_trades']} сд | +${self.stats['today_profit']:,.2f}\n"
             f"📈 Сессия:  {self.stats['session_trades']} сд | +${self.stats['session_profit']:,.2f}\n\n"
-            f"✅ Сделок в журнале: {total} | ❌ Стопов: {self.stats['total_stops']}\n"
+            f"✅ Сделок: {total} | ❌ Стопов: {self.stats['total_stops']}\n"
             f"🏆 Винрейт: {wr}%\n"
             f"⚡ Плечо: {LEVERAGE}x\n"
-            f"⏱ Аптайм: {self._uptime()}"
+            f"⏱ Аптайм: {self._uptime()}\n"
+            f"💾 Хранилище: {storage}"
         )
 
     def _tg_url(self, method: str) -> str:
@@ -668,25 +700,26 @@ class MartingaleBot:
     def _handle_cmd(self, cmd: str, chat_id: str):
         if cmd in ("/start", "/status"):
             if self.paused:
-                status_text = (
+                b = self.bybit.get_balance_info()
+                self.send_keyboard(
+                    chat_id,
                     f"⏸ БОТ НА ПАУЗЕ\n\n"
-                    f"Позиция сохранена:\n"
-                    f"Уровень: {len(self.entries)}\n"
+                    f"Позиция сохранена ✅\n"
+                    f"Уровень: {len(self.entries)}/{len(MARGINS)}\n"
                     f"Средняя: ${self.average_price or '—'}\n"
-                    f"Баланс: ${self.bybit.balance:,.2f}\n\n"
-                    f"Нажми кнопку ниже чтобы продолжить"
+                    f"Баланс: ${b['balance']:,.2f}\n\n"
+                    f"Нажми чтобы продолжить",
+                    {
+                        "inline_keyboard": [
+                            [{"text": "▶️ Возобновить", "callback_data": "resume"}],
+                            [
+                                {"text": "📊 Статус", "callback_data": "status"},
+                                {"text": "📈 Итоги", "callback_data": "report"}
+                            ],
+                            [{"text": "📋 История", "callback_data": "history"}]
+                        ]
+                    }
                 )
-                keyboard = {
-                    "inline_keyboard": [
-                        [{"text": "▶️ Возобновить", "callback_data": "resume"}],
-                        [
-                            {"text": "📊 Статус", "callback_data": "status"},
-                            {"text": "📈 Итоги", "callback_data": "report"}
-                        ],
-                        [{"text": "📋 История", "callback_data": "history"}]
-                    ]
-                }
-                self.send_keyboard(chat_id, status_text, keyboard)
             else:
                 self.send_keyboard(chat_id, self.get_dashboard())
 
@@ -722,19 +755,12 @@ class MartingaleBot:
                 f"Нажми кнопку чтобы продолжить",
                 {
                     "inline_keyboard": [
-                        [
-                            {
-                                "text": "▶️ Возобновить бота",
-                                "callback_data": "resume"
-                            }
-                        ],
+                        [{"text": "▶️ Возобновить бота", "callback_data": "resume"}],
                         [
                             {"text": "📊 Статус", "callback_data": "status"},
                             {"text": "📈 Итоги", "callback_data": "report"}
                         ],
-                        [
-                            {"text": "📋 История", "callback_data": "history"}
-                        ]
+                        [{"text": "📋 История", "callback_data": "history"}]
                     ]
                 }
             )
@@ -757,10 +783,10 @@ class MartingaleBot:
         if diff < HEARTBEAT_MINUTES:
             return
         self.last_heartbeat = datetime.now()
-        price   = self.bybit.get_price(SYMBOL)
-        status  = "🟢 В позиции" if self.in_trade else "👀 Жду входа"
-        if self.paused:
-            status = "⏸ НА ПАУЗЕ"
+        price  = self.bybit.get_price(SYMBOL)
+        status = "⏸ НА ПАУЗЕ" if self.paused else (
+            "🟢 В позиции" if self.in_trade else "👀 Жду входа"
+        )
         bal_str = ""
         if self.demo_mode:
             b       = self.bybit.get_balance_info()
@@ -807,7 +833,7 @@ class MartingaleBot:
         logger.info(
             f"🚀 ЗАПУСК v{BOT_VERSION} | "
             f"{'ДЕМО' if self.demo_mode else 'РЕАЛ'} | "
-            f"Плечо {LEVERAGE}x | Интервал {CHECK_INTERVAL}с"
+            f"Плечо {LEVERAGE}x | Уровней {len(MARGINS)}"
         )
 
         threading.Thread(target=self.poll_telegram, daemon=True).start()
@@ -824,6 +850,12 @@ class MartingaleBot:
                 f"📊 PnL: ${b['pnl']:+,.2f} ({b['pnl_pct']:+.2f}%)"
             )
 
+        storage_note = (
+            "\n☁️ Redis: подключён ✅"
+            if redis_available()
+            else "\n📁 Redis: не настроен ⚠️"
+        )
+
         restored = "\n♻️ Состояние восстановлено!" if self.in_trade else ""
 
         self.send_keyboard(
@@ -833,10 +865,10 @@ class MartingaleBot:
             f"⚙️ {setup.get('mode','?')} | {setup.get('leverage','?')}\n"
             f"📊 {SYMBOL} | ⚡ {LEVERAGE}x\n"
             f"📈 Уровней: {len(MARGINS)}\n"
-            f"🎯 SmartTP: {SMART_TP}\n"
-            f"📉 Вход: -{ENTRY_DROP_PCT}% | Стоп: -{STOP_LOSS_PCT}%\n"
+            f"🎯 SmartTP: {SMART_TP[0]}% → {SMART_TP[-1]}%\n"
+            f"📉 Шаг: {AVERAGING_STEP_PCT}% | Стоп: -{STOP_LOSS_PCT}%\n"
             f"🔄 Проверка: каждые {CHECK_INTERVAL}с"
-            f"{demo_note}{restored}\n\n"
+            f"{demo_note}{storage_note}{restored}\n\n"
             "👀 Слежу за HYPE..."
         )
 
@@ -844,7 +876,6 @@ class MartingaleBot:
 
         while self.running:
             try:
-                # ← ПАУЗУ ПРОВЕРЯЕМ ЗДЕСЬ
                 if self.paused:
                     time.sleep(2)
                     continue
@@ -889,7 +920,10 @@ class MartingaleBot:
                             bal_str    = ""
                             if self.demo_mode:
                                 b       = self.bybit.get_balance_info()
-                                bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}\n💵 Доступно: ${b['available']:,.2f}"
+                                bal_str = (
+                                    f"\n💳 Баланс: ${b['balance']:,.2f}"
+                                    f"\n💵 Доступно: ${b['available']:,.2f}"
+                                )
 
                             self.send_keyboard(
                                 chat_id,
@@ -935,7 +969,7 @@ class MartingaleBot:
                         bal_str = ""
                         if self.demo_mode:
                             b       = self.bybit.get_balance_info()
-                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}\n💵 Доступно: ${b['available']:,.2f}"
+                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}"
 
                         self.send_keyboard(
                             chat_id,
@@ -962,7 +996,11 @@ class MartingaleBot:
                         bal_str = ""
                         if self.demo_mode:
                             b       = self.bybit.get_balance_info()
-                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}\n💵 Доступно: ${b['available']:,.2f}\n📊 PnL: ${b['pnl']:+,.2f}"
+                            bal_str = (
+                                f"\n💳 Баланс: ${b['balance']:,.2f}"
+                                f"\n💵 Доступно: ${b['available']:,.2f}"
+                                f"\n📊 PnL: ${b['pnl']:+,.2f}"
+                            )
 
                         self.send_keyboard(
                             chat_id,
@@ -994,7 +1032,10 @@ class MartingaleBot:
                         bal_str    = ""
                         if self.demo_mode:
                             b       = self.bybit.get_balance_info()
-                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}\n💵 Доступно: ${b['available']:,.2f}"
+                            bal_str = (
+                                f"\n💳 Баланс: ${b['balance']:,.2f}"
+                                f"\n💵 Доступно: ${b['available']:,.2f}"
+                            )
 
                         self.send_keyboard(
                             chat_id,
