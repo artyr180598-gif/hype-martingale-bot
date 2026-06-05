@@ -1,48 +1,67 @@
 import os
 
+# ── BYBIT API ──────────────────────────────────────────────────────
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
+
+# ── TELEGRAM ───────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
+# ── ТОРГОВЛЯ ───────────────────────────────────────────────────────
 SYMBOL   = "HYPEUSDT"
 LEVERAGE = 20
 CATEGORY = "linear"
 
-MARGINS = [150, 225, 338, 506, 759, 1139, 1709]
+# ✅ 15 УРОВНЕЙ
+MARGINS = [
+    150, 165, 182, 200, 220,
+    242, 266, 293, 322, 354,
+    390, 429, 472, 519, 571
+]
 
-ENTRY_DROP_PCT       = 0.6
-AVERAGING_STEP_PCT   = 3.0
-TAKE_PROFIT_PCT      = 1.0
-STOP_LOSS_PCT        = 22.0
-STOP_LOSS_BACKUP_PCT = 24.0
-COMMISSION_PCT       = 0.1
-MAX_SLIPPAGE_PCT     = 0.5
+# Вход при откате -0.6% от максимума
+ENTRY_DROP_PCT = 0.6
 
-SMART_TP = [0.7, 1.0, 1.2, 1.0, 1.0, 1.0, 1.0]
+# Шаг усреднения 1.6%
+AVERAGING_STEP_PCT = 1.6
 
-CHECK_INTERVAL    = 5
-HEARTBEAT_MINUTES = 120
-QTY_PRECISION     = 2
-PRICE_PRECISION   = 3
+# SmartTP
+SMART_TP = [
+    0.7, 0.8, 1.0, 1.0, 1.0,
+    1.0, 1.0, 1.0, 1.0, 1.0,
+    1.0, 1.0, 1.0, 1.0, 1.0
+]
 
-API_MAX_RETRIES = 3
-API_RETRY_DELAY = 1
+# Стоп-лосс
+STOP_LOSS_PCT        = 27.0
+STOP_LOSS_BACKUP_PCT = 29.0
 
-# Фандинг платится каждые 8 часов
-FUNDING_HOURS = [0, 8, 16]
-DEFAULT_FUNDING_RATE = 0.0001  # 0.01% по умолчанию
+# ── КОМИССИИ И ТОЧНОСТЬ ───────────────────────────────────────────
+COMMISSION_PCT   = 0.1
+MAX_SLIPPAGE_PCT = 0.5
+QTY_PRECISION    = 2
+PRICE_PRECISION  = 3
 
+# ── ДЕМО РЕЖИМ ────────────────────────────────────────────────────
 DEMO_MODE    = True
 DEMO_BALANCE = 5500.0
 
-BOT_VERSION = "3.0.0"
+# ── ФАЙЛЫ (запасной вариант если Redis недоступен) ────────────────
+DATA_DIR = os.getenv("DATA_DIR", "/tmp/blackhorn")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# Файлы
-STATS_FILE       = "stats.json"
-STATE_FILE       = "state.json"
-HISTORY_FILE     = "history.json"
-DEMO_STATE_FILE  = "demo_state.json"  # сохранение демо-баланса
+STATS_FILE      = os.path.join(DATA_DIR, "stats.json")
+STATE_FILE      = os.path.join(DATA_DIR, "state.json")
+HISTORY_FILE    = os.path.join(DATA_DIR, "history.json")
+DEMO_STATE_FILE = os.path.join(DATA_DIR, "demo_state.json")
 
-# Пагинация истории
-HISTORY_PAGE_SIZE = 8  # сделок на страницу
+# ── НАСТРОЙКИ БОТА ────────────────────────────────────────────────
+CHECK_INTERVAL    = 5
+HEARTBEAT_MINUTES = 120
+HISTORY_PAGE_SIZE = 8
+BOT_VERSION       = "3.1.0"
+
+# ── ФАНДИНГ ───────────────────────────────────────────────────────
+FUNDING_HOURS        = [0, 8, 16]
+DEFAULT_FUNDING_RATE = 0.0001
