@@ -20,20 +20,15 @@ MARGINS = [
     390, 429, 472, 519, 571
 ]
 
-# Вход при откате -0.6% от максимума
-ENTRY_DROP_PCT = 0.6
-
-# Шаг усреднения 1.6%
+ENTRY_DROP_PCT     = 0.6
 AVERAGING_STEP_PCT = 1.6
 
-# SmartTP
 SMART_TP = [
     0.7, 0.8, 1.0, 1.0, 1.0,
     1.0, 1.0, 1.0, 1.0, 1.0,
     1.0, 1.0, 1.0, 1.0, 1.0
 ]
 
-# Стоп-лосс
 STOP_LOSS_PCT        = 27.0
 STOP_LOSS_BACKUP_PCT = 29.0
 
@@ -43,11 +38,15 @@ MAX_SLIPPAGE_PCT = 0.5
 QTY_PRECISION    = 2
 PRICE_PRECISION  = 3
 
+# ── API НАСТРОЙКИ ─────────────────────────────────────────────────
+API_MAX_RETRIES = 3
+API_RETRY_DELAY = 1.0
+
 # ── ДЕМО РЕЖИМ ────────────────────────────────────────────────────
 DEMO_MODE    = True
 DEMO_BALANCE = 5500.0
 
-# ── ФАЙЛЫ (запасной вариант если Redis недоступен) ────────────────
+# ── ФАЙЛЫ ─────────────────────────────────────────────────────────
 DATA_DIR = os.getenv("DATA_DIR", "/tmp/blackhorn")
 os.makedirs(DATA_DIR, exist_ok=True)
 
