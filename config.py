@@ -13,24 +13,26 @@ SYMBOL   = "HYPEUSDT"
 LEVERAGE = 20
 CATEGORY = "linear"
 
-# ✅ 15 УРОВНЕЙ
+# ✅ 17 УРОВНЕЙ — шаг 1.45%
 MARGINS = [
-    150, 165, 182, 200, 220,
-    242, 266, 293, 322, 354,
-    390, 429, 472, 519, 571
+    155, 170, 187, 206, 227,
+    250, 275, 302, 332, 365,
+    402, 442, 486, 535, 588,
+    647, 712
 ]
 
 ENTRY_DROP_PCT     = 0.6
-AVERAGING_STEP_PCT = 1.6
+AVERAGING_STEP_PCT = 1.45
 
 SMART_TP = [
     0.7, 0.8, 1.0, 1.0, 1.0,
     1.0, 1.0, 1.0, 1.0, 1.0,
-    1.0, 1.0, 1.0, 1.0, 1.0
+    1.0, 1.0, 1.0, 1.0, 1.0,
+    1.0, 1.0
 ]
 
-STOP_LOSS_PCT        = 27.0
-STOP_LOSS_BACKUP_PCT = 29.0
+STOP_LOSS_PCT        = 29.0
+STOP_LOSS_BACKUP_PCT = 31.0
 
 # ── КОМИССИИ И ТОЧНОСТЬ ───────────────────────────────────────────
 COMMISSION_PCT   = 0.1
@@ -59,7 +61,7 @@ DEMO_STATE_FILE = os.path.join(DATA_DIR, "demo_state.json")
 CHECK_INTERVAL    = 5
 HEARTBEAT_MINUTES = 120
 HISTORY_PAGE_SIZE = 8
-BOT_VERSION       = "3.1.0"
+BOT_VERSION       = "3.2.0"
 
 # ── ФАНДИНГ ───────────────────────────────────────────────────────
 FUNDING_HOURS        = [0, 8, 16]
