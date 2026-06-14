@@ -813,7 +813,8 @@ class MartingaleBot:
             import backtest as bt
             # таймфрейм: точнее для коротких периодов, легче для длинных
             interval    = "15" if days <= 365 else "60"
-            bt.INTERVAL = interval   # используется в заголовке отчёта
+            bt.INTERVAL = interval         # используется в заголовке отчёта
+            bt.LEVERAGE = self.leverage    # бэктест считает на ВЫБРАННОМ плече
             self._send_text(
                 chat_id,
                 f"🔬 БЭКТЕСТ запущен\n\n"
