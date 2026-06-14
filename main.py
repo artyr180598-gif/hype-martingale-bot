@@ -321,6 +321,24 @@ class MartingaleBot:
     def _mode_label(self):
         return "🎮 ДЕМО" if self.demo_mode else "💰 РЕАЛ"
 
+    def _balance_summary(self) -> dict:
+        """Единый доступ к балансу для обоих режимов.
+
+        DEMO  → get_balance_info() (полный набор полей).
+        REAL  → get_wallet_balance(), unrealised → pnl.
+        BybitClient не имеет get_balance_info(), поэтому в РЕАЛ-режиме
+        прямой вызов привёл бы к AttributeError.
+        """
+        if self.demo_mode:
+            return self.bybit.get_balance_info()
+        wb = self.bybit.get_wallet_balance()
+        return {
+            "balance":   wb.get("balance", 0.0),
+            "available": wb.get("available", 0.0),
+            "pnl":       wb.get("unrealised", 0.0),
+            "pnl_pct":   0.0,
+        }
+
     def _get_chat_id(self):
         from config import TELEGRAM_CHAT_ID
         return TELEGRAM_CHAT_ID
@@ -700,7 +718,7 @@ class MartingaleBot:
     def _handle_cmd(self, cmd: str, chat_id: str):
         if cmd in ("/start", "/status"):
             if self.paused:
-                b = self.bybit.get_balance_info()
+                b = self._balance_summary()
                 self.send_keyboard(
                     chat_id,
                     f"⏸ БОТ НА ПАУЗЕ\n\n"
@@ -744,7 +762,7 @@ class MartingaleBot:
 
         elif cmd == "/stop":
             self.paused = True
-            b = self.bybit.get_balance_info()
+            b = self._balance_summary()
             self.send_keyboard(
                 chat_id,
                 f"⏸ БОТ НА ПАУЗЕ\n\n"
