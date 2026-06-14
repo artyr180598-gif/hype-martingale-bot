@@ -10,7 +10,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ── ТОРГОВЛЯ ───────────────────────────────────────────────────────
 SYMBOL   = "HYPEUSDT"
-LEVERAGE = 20
+LEVERAGE = 20                      # плечо по умолчанию (можно менять в боте)
+LEVERAGE_OPTIONS = [5, 10, 15, 20, 25]   # доступные плечи в меню Telegram
 CATEGORY = "linear"
 
 # ✅ 17 УРОВНЕЙ — шаг 1.45%
@@ -67,14 +68,23 @@ STATS_FILE      = os.path.join(DATA_DIR, "stats.json")
 STATE_FILE      = os.path.join(DATA_DIR, "state.json")
 HISTORY_FILE    = os.path.join(DATA_DIR, "history.json")
 DEMO_STATE_FILE = os.path.join(DATA_DIR, "demo_state.json")
+SETTINGS_FILE   = os.path.join(DATA_DIR, "settings.json")
 
 # ── НАСТРОЙКИ БОТА ────────────────────────────────────────────────
 CHECK_INTERVAL     = 5
 HEARTBEAT_MINUTES  = 120
 HISTORY_PAGE_SIZE  = 8
 STOP_PAUSE_SECONDS = 120          # пауза после стопа/аварийного закрытия
-BOT_VERSION        = "3.3.0"
+BOT_VERSION        = "3.4.0"
 
 # ── ФАНДИНГ ───────────────────────────────────────────────────────
 FUNDING_HOURS        = [0, 8, 16]
 DEFAULT_FUNDING_RATE = 0.0001
+
+# ── НОВОСТИ (CryptoPanic) ─────────────────────────────────────────
+# Бесплатный токен: зарегистрируйся на cryptopanic.com → Account → API,
+# скопируй auth token и добавь в переменные Railway как CRYPTOPANIC_TOKEN.
+CRYPTOPANIC_TOKEN  = os.getenv("CRYPTOPANIC_TOKEN", "")
+NEWS_CURRENCY      = os.getenv("NEWS_CURRENCY", "HYPE")
+NEWS_CHECK_MINUTES = 30           # как часто проверять важные новости
+NEWS_MAX_ITEMS     = 8

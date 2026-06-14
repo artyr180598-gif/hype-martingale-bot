@@ -5,7 +5,7 @@ from config import (
     BYBIT_API_KEY, BYBIT_API_SECRET, CATEGORY,
     API_MAX_RETRIES, API_RETRY_DELAY,
     MAX_SLIPPAGE_PCT, PRICE_PRECISION, COMMISSION_PCT,
-    FUNDING_HOURS, DEFAULT_FUNDING_RATE
+    FUNDING_HOURS, DEFAULT_FUNDING_RATE, LEVERAGE
 )
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,7 @@ class BybitClient:
         self.min_qty          = 0.1
         self.qty_step         = 0.01
         self._last_funding_hr = -1
+        self.leverage         = LEVERAGE
         logger.info("✅ Bybit клиент подключён")
 
     def _retry(self, func, *args, **kwargs):
@@ -72,6 +73,24 @@ class BybitClient:
 
         out["ok"] = "error" not in out
         return out
+
+    def set_leverage(self, symbol: str, leverage: int) -> bool:
+        """Сменить плечо на бирже (вне позиции). Bybit ругается, если
+        плечо не изменилось — это не ошибка."""
+        try:
+            self.client.set_leverage(
+                category=CATEGORY, symbol=symbol,
+                buyLeverage=str(leverage), sellLeverage=str(leverage)
+            )
+            logger.info(f"✅ Плечо изменено на {leverage}x")
+            return True
+        except Exception as e:
+            msg = str(e)
+            if "110043" in msg or "not modified" in msg.lower():
+                logger.info(f"Плечо уже {leverage}x")
+                return True
+            logger.warning(f"set_leverage: {e}")
+            return False
 
     def get_price(self, symbol: str) -> float | None:
         try:
