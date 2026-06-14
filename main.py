@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta
 from config import (
     SYMBOL, LEVERAGE, LEVERAGE_OPTIONS, MARGINS,
+    DYNAMIC_MARGINS, RISK_PERCENT,
     ENTRY_DROP_PCT, AVERAGING_STEP_PCT,
     STOP_LOSS_PCT, STOP_LOSS_BACKUP_PCT,
     COMMISSION_PCT, SMART_TP,
@@ -150,6 +151,10 @@ class MartingaleBot:
         self.leverage       = int(self.settings.get("leverage", LEVERAGE))
         self.bybit.leverage = self.leverage
 
+        # Форма «лесенки» уровней (доли) и текущие суммы (пересчёт от баланса)
+        self.margin_weights = [m / sum(MARGINS) for m in MARGINS]
+        self.margins        = list(MARGINS)
+
         self._last_news_check = datetime.now() - timedelta(minutes=NEWS_CHECK_MINUTES)
         self._seen_news_ids   = None   # None = ещё не задан базовый набор
 
@@ -168,7 +173,7 @@ class MartingaleBot:
         Комиссия входа берётся с номинала (маржа × плечо), поэтому
         общая комиссия = Σмаржа × плечо × COMMISSION_PCT%.
         """
-        required = sum(MARGINS) * (1 + self.leverage * COMMISSION_PCT / 100)
+        required = sum(self.margins) * (1 + self.leverage * COMMISSION_PCT / 100)
         if self.demo_mode:
             balance = self.bybit.get_balance_info()["balance"]
         else:
@@ -191,6 +196,38 @@ class MartingaleBot:
                 f"✅ Платёжеспособность OK: маржа ${required:,.0f} ≤ "
                 f"баланс ${balance:,.2f}"
             )
+
+    def _recompute_margins(self):
+        """Пересчитать суммы уровней от текущего баланса (динамика).
+
+        Сохраняет форму «лесенки» (self.margin_weights), меняет масштаб.
+        Так уровни всегда влезают в баланс и растут/падают вместе с ним.
+        Вызывается только когда бот вне позиции (перед новой серией).
+        """
+        if not DYNAMIC_MARGINS:
+            self.margins = list(MARGINS)
+            return
+        try:
+            if self.demo_mode:
+                balance = self.bybit.get_balance_info()["balance"]
+            else:
+                balance = self.bybit.get_wallet_balance()["balance"]
+        except Exception as e:
+            logger.error(f"_recompute_margins: {e}")
+            self.margins = list(MARGINS)
+            return
+        if not balance or balance <= 0:
+            self.margins = list(MARGINS)
+            return
+        total_margin = (
+            balance * RISK_PERCENT / 100
+        ) / (1 + self.leverage * COMMISSION_PCT / 100)
+        self.margins = [round(total_margin * w, 2) for w in self.margin_weights]
+        logger.info(
+            f"📐 Уровни пересчитаны от ${balance:,.0f} "
+            f"({RISK_PERCENT}%): ур.1=${self.margins[0]:,.0f} → "
+            f"ур.{len(self.margins)}=${self.margins[-1]:,.0f}"
+        )
 
     def _sync_stats_with_balance(self):
         b = self.bybit.get_balance_info()
@@ -280,6 +317,7 @@ class MartingaleBot:
         self.average_price     = None
         self.total_qty         = 0.0
         self.recent_high       = None
+        self._recompute_margins()   # суммы уровней под текущий баланс
         save_state({})
         logger.info("🔄 Сброс — ожидание входа")
 
@@ -301,6 +339,7 @@ class MartingaleBot:
         self.average_price     = state.get("average_price")
         self.total_qty         = state.get("total_qty", 0.0)
         self.recent_high       = state.get("recent_high")
+        self.margins           = state.get("margins", self.margins)
 
         if self.demo_mode and self.in_trade and self.entries:
             self.bybit.position_size   = self.total_qty
@@ -335,7 +374,8 @@ class MartingaleBot:
             "first_entry_price": self.first_entry_price,
             "average_price":     self.average_price,
             "total_qty":         self.total_qty,
-            "recent_high":       self.recent_high
+            "recent_high":       self.recent_high,
+            "margins":           self.margins
         })
 
     def _round_qty(self, q):   return round(q, QTY_PRECISION)
@@ -459,9 +499,9 @@ class MartingaleBot:
         return price <= trigger, liq
 
     def _open_level(self, price) -> tuple[bool, float]:
-        if self.current_level >= len(MARGINS):
+        if self.current_level >= len(self.margins):
             return False, 0.0
-        margin       = MARGINS[self.current_level]
+        margin       = self.margins[self.current_level]
         expected_qty = self._round_qty((margin * self.leverage) / price)
         result       = self.bybit.place_market_buy(SYMBOL, expected_qty)
         if not result:
@@ -1176,6 +1216,7 @@ class MartingaleBot:
             f"⚙️ {setup.get('mode','?')} | {setup.get('leverage','?')}\n"
             f"📊 {SYMBOL} | ⚡ {self.leverage}x\n"
             f"📈 Уровней: {len(MARGINS)}\n"
+            f"📐 Уровни: {'динам. ' + str(RISK_PERCENT) + '% баланса' if DYNAMIC_MARGINS else 'фиксированные'}\n"
             f"🎯 SmartTP: {SMART_TP[0]}% → {SMART_TP[-1]}%\n"
             f"📉 Шаг: {AVERAGING_STEP_PCT}% | Стоп: -{STOP_LOSS_PCT}%\n"
             f"🔄 Проверка: каждые {CHECK_INTERVAL}с"
@@ -1244,7 +1285,7 @@ class MartingaleBot:
                                 f"💲 Цена входа:  ${actual_price:,.3f}\n"
                                 f"📉 Откат:       -{drop}%\n"
                                 f"⚡ Плечо:       {self.leverage}x\n"
-                                f"💵 Маржа:       ${MARGINS[0]:,.0f}\n"
+                                f"💵 Маржа:       ${self.margins[0]:,.0f}\n"
                                 f"📦 Куплено:     {self.entries[-1][1]:,.2f} HYPE\n"
                                 f"🎯 ТП:          ${tp:,.3f} (+{tp_pct}%)\n"
                                 f"🔴 СЛ:          ${sl_price:,.3f} (-{STOP_LOSS_PCT}%)\n"
@@ -1383,7 +1424,7 @@ class MartingaleBot:
                             chat_id,
                             f"📉 УСРЕДНЕНИЕ {self._mode_label()} | Уровень {len(self.entries)}\n\n"
                             f"💲 Цена:        ${price:,.3f} (-{drop}%)\n"
-                            f"💵 Добавлено:   ${MARGINS[self.current_level-1]:,.0f}\n"
+                            f"💵 Добавлено:   ${self.margins[self.current_level-1]:,.0f}\n"
                             f"💵 Всего:       ${self._total_invested():,.2f}\n"
                             f"📈 Средняя:     ${self.average_price:,.3f}\n"
                             f"🎯 Новый ТП:    ${tp:,.3f} (+{tp_pct}%)\n"

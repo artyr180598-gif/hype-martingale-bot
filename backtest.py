@@ -13,6 +13,11 @@ MARGINS = [
     330, 362, 399, 439, 482,
     531, 584
 ]
+# Динамические уровни (должно совпадать с config.py)
+DYNAMIC_MARGINS = True
+RISK_PERCENT    = 90
+WEIGHTS         = [m / sum(MARGINS) for m in MARGINS]
+
 ENTRY_DROP_PCT     = 0.6
 AVERAGING_STEP_PCT = 1.45
 SMART_TP = [
@@ -138,6 +143,7 @@ def run_backtest(candles: list) -> dict:
     total_qty  = 0.0
     invested   = 0.0
     recent_high = None
+    cur_margins = list(MARGINS)
     last_funding = None
 
     trades, stops, liquidations = [], [], []
@@ -149,10 +155,18 @@ def run_backtest(candles: list) -> dict:
         d = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
         return f"{d.year}-{d.month:02d}"
 
+    def recompute_margins():
+        nonlocal cur_margins
+        if not DYNAMIC_MARGINS:
+            cur_margins = list(MARGINS)
+            return
+        total = (balance * RISK_PERCENT / 100) / (1 + LEVERAGE * COMMISSION_PCT / 100)
+        cur_margins = [total * w for w in WEIGHTS]
+
     def open_level(price, ts):
         nonlocal balance, level, avg_price, total_qty, invested
         fill   = price * (1 + SLIPPAGE_PCT / 100)   # слипедж против нас
-        margin = MARGINS[level]
+        margin = cur_margins[level]
         qty    = (margin * LEVERAGE) / fill
         comm   = qty * fill * COMMISSION_PCT / 100
         if margin + comm > balance:
@@ -222,6 +236,7 @@ def run_backtest(candles: list) -> dict:
                 recent_high = high
             trigger = recent_high * (1 - ENTRY_DROP_PCT / 100)
             if low <= trigger:
+                recompute_margins()   # суммы уровней от текущего баланса
                 if open_level(min(trigger, o), ts):
                     in_trade, first_price = True, min(trigger, o)
                 else:
@@ -293,6 +308,7 @@ def report(res: dict) -> str:
         f"📊 БЭКТЕСТ {SYMBOL} | {INTERVAL}m",
         f"Период: {d1:%d.%m.%Y} → {d2:%d.%m.%Y} ({cov:.0f} дн)",
         f"Конфиг: {len(MARGINS)} ур | плечо {LEVERAGE}x | шаг {AVERAGING_STEP_PCT}%",
+        f"Уровни: {'динам. ' + str(RISK_PERCENT) + '% баланса' if DYNAMIC_MARGINS else 'фиксированные'}",
         f"Защита от ликвидации: вкл (буфер {LIQ_BUFFER_PCT}%, MMR {MAINTENANCE_MARGIN_RATE*100}%)",
         "═" * 34,
         f"💰 Старт: ${START_BALANCE:,.0f} → Итог: ${end_eq:,.2f}",
