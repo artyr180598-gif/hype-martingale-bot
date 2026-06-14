@@ -1079,12 +1079,12 @@ class MartingaleBot:
         emoji, label = sentiment(posts)
         lines = [f"📰 НОВОСТИ HYPE {emoji}", f"Настроение: {label}", "─" * 28, ""]
         for p in posts:
-            mark = ""
-            if p["positive"] or p["negative"]:
-                mark = f" (👍{p['positive']} 👎{p['negative']})"
             src = f" — {p['source']}" if p["source"] else ""
-            lines.append(f"• {p['title']}{mark}")
-            lines.append(f"  {p['published']}{src}")
+            when = f"{p['published']}" if p["published"] else ""
+            head = " | ".join(x for x in (when, src.lstrip(" —")) if x)
+            lines.append(f"• {p['title']}")
+            if head:
+                lines.append(f"  {head}")
             if p["url"]:
                 lines.append(f"  {p['url']}")
             lines.append("")
@@ -1092,20 +1092,13 @@ class MartingaleBot:
         return "\n".join(lines)
 
     def get_news_text(self) -> str:
-        if not news_available():
-            return (
-                "📰 НОВОСТИ не настроены\n\n"
-                "Чтобы включить:\n"
-                "1) Зарегистрируйся на cryptopanic.com\n"
-                "2) Account → API, скопируй токен\n"
-                "3) В Railway → Variables добавь\n"
-                "   CRYPTOPANIC_TOKEN = твой_токен\n"
-                "4) Перезапусти бота\n\n"
-                "Это бесплатно."
-            )
         posts = fetch_news(limit=NEWS_MAX_ITEMS)
         if not posts:
-            return "📰 Свежих новостей по HYPE не нашёл (или ошибка сети)."
+            return (
+                "📰 Свежих новостей по HYPE сейчас нет.\n\n"
+                "Источник: CryptoCompare (бесплатно). "
+                "Загляни позже — проверяю каждые 30 мин и пришлю важное сам."
+            )
         return self._format_news(posts)
 
     def _check_news_alerts(self):
