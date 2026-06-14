@@ -75,8 +75,16 @@ CHECK_INTERVAL     = 5
 HEARTBEAT_MINUTES  = 120
 HISTORY_PAGE_SIZE  = 8
 STOP_PAUSE_SECONDS = 120          # пауза после стопа/аварийного закрытия
-BOT_VERSION        = "3.3.0"
+BOT_VERSION        = "3.4.0"
 
 # ── ФАНДИНГ ───────────────────────────────────────────────────────
 FUNDING_HOURS        = [0, 8, 16]
 DEFAULT_FUNDING_RATE = 0.0001
+
+# ── НОВОСТИ (CryptoPanic) ─────────────────────────────────────────
+# Бесплатный токен: зарегистрируйся на cryptopanic.com → Account → API,
+# скопируй auth token и добавь в переменные Railway как CRYPTOPANIC_TOKEN.
+CRYPTOPANIC_TOKEN  = os.getenv("CRYPTOPANIC_TOKEN", "")
+NEWS_CURRENCY      = os.getenv("NEWS_CURRENCY", "HYPE")
+NEWS_CHECK_MINUTES = 30           # как часто проверять важные новости
+NEWS_MAX_ITEMS     = 8

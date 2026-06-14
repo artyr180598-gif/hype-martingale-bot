@@ -5,7 +5,7 @@ import os
 import requests
 import threading
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import (
     SYMBOL, LEVERAGE, LEVERAGE_OPTIONS, MARGINS,
     ENTRY_DROP_PCT, AVERAGING_STEP_PCT,
@@ -17,11 +17,13 @@ from config import (
     BOT_VERSION,
     STATS_FILE, STATE_FILE, HISTORY_FILE, SETTINGS_FILE,
     HISTORY_PAGE_SIZE, STOP_PAUSE_SECONDS,
-    LIQ_BUFFER_PCT, LIQ_PROTECTION_ENABLED
+    LIQ_BUFFER_PCT, LIQ_PROTECTION_ENABLED,
+    NEWS_CHECK_MINUTES, NEWS_MAX_ITEMS
 )
 from bybit_client import BybitClient
 from demo_client import DemoClient
 from storage import redis_set, redis_get, redis_available
+from news import news_available, fetch_news, sentiment
 
 logging.basicConfig(
     level=logging.INFO,
@@ -147,6 +149,9 @@ class MartingaleBot:
         self.settings       = load_settings()
         self.leverage       = int(self.settings.get("leverage", LEVERAGE))
         self.bybit.leverage = self.leverage
+
+        self._last_news_check = datetime.now() - timedelta(minutes=NEWS_CHECK_MINUTES)
+        self._seen_news_ids   = None   # None = ещё не задан базовый набор
 
         self._init_session()
 
@@ -760,7 +765,10 @@ class MartingaleBot:
                         {"text": "🔬 Бэктест",  "callback_data": "backtest"},
                         {"text": "⚙️ Плечо",    "callback_data": "leverage"}
                     ],
-                    [{"text": "⏸ Пауза", "callback_data": "stop"}]
+                    [
+                        {"text": "📰 Новости",  "callback_data": "news"},
+                        {"text": "⏸ Пауза",     "callback_data": "stop"}
+                    ]
                 ]
             }
         try:
@@ -975,6 +983,9 @@ class MartingaleBot:
                 days = 365
             self._start_backtest(chat_id, days)
 
+        elif cmd == "/news":
+            self.send_keyboard(chat_id, self.get_news_text())
+
         elif cmd == "/stop":
             self.paused = True
             b = self._balance_summary()
@@ -1062,6 +1073,79 @@ class MartingaleBot:
                 f"📊 PnL: ${b['pnl']:+,.2f}"
             )
 
+    # ── НОВОСТИ ───────────────────────────────────────────────────
+
+    def _format_news(self, posts: list) -> str:
+        emoji, label = sentiment(posts)
+        lines = [f"📰 НОВОСТИ HYPE {emoji}", f"Настроение: {label}", "─" * 28, ""]
+        for p in posts:
+            mark = ""
+            if p["positive"] or p["negative"]:
+                mark = f" (👍{p['positive']} 👎{p['negative']})"
+            src = f" — {p['source']}" if p["source"] else ""
+            lines.append(f"• {p['title']}{mark}")
+            lines.append(f"  {p['published']}{src}")
+            if p["url"]:
+                lines.append(f"  {p['url']}")
+            lines.append("")
+        lines.append("⚠️ Это информация, не финансовый совет.")
+        return "\n".join(lines)
+
+    def get_news_text(self) -> str:
+        if not news_available():
+            return (
+                "📰 НОВОСТИ не настроены\n\n"
+                "Чтобы включить:\n"
+                "1) Зарегистрируйся на cryptopanic.com\n"
+                "2) Account → API, скопируй токен\n"
+                "3) В Railway → Variables добавь\n"
+                "   CRYPTOPANIC_TOKEN = твой_токен\n"
+                "4) Перезапусти бота\n\n"
+                "Это бесплатно."
+            )
+        posts = fetch_news(limit=NEWS_MAX_ITEMS)
+        if not posts:
+            return "📰 Свежих новостей по HYPE не нашёл (или ошибка сети)."
+        return self._format_news(posts)
+
+    def _check_news_alerts(self):
+        """Авто-проверка важных новостей и срочный алерт при новых."""
+        if not news_available() or self.paused:
+            return
+        diff = (datetime.now() - self._last_news_check).total_seconds() / 60
+        if diff < NEWS_CHECK_MINUTES:
+            return
+        self._last_news_check = datetime.now()
+
+        posts = fetch_news(limit=NEWS_MAX_ITEMS, important_only=True)
+        if not posts:
+            return
+        ids = {p["id"] for p in posts if p["id"] is not None}
+
+        # Первый запуск — задаём базовый набор, старое не алертим
+        if self._seen_news_ids is None:
+            self._seen_news_ids = ids
+            return
+
+        new = [p for p in posts if p["id"] not in self._seen_news_ids]
+        self._seen_news_ids |= ids
+        if not new:
+            return
+
+        emoji, label = sentiment(new)
+        body = "\n".join(
+            f"• {p['title']}\n  {p['url']}" for p in new[:5]
+        )
+        self.send_keyboard(
+            self._get_chat_id(),
+            f"🚨 ВАЖНАЯ НОВОСТЬ HYPE {emoji}\n"
+            f"Настроение: {label}\n"
+            f"{'─'*28}\n\n"
+            f"{body}\n\n"
+            f"⚠️ Это информация, не финансовый совет."
+        )
+        logger.info(f"📰 Срочный алерт: {len(new)} важных новостей")
+
     def run(self):
         logger.info(
             f"🚀 ЗАПУСК v{BOT_VERSION} | "
@@ -1128,6 +1212,7 @@ class MartingaleBot:
 
                 self._heartbeat()
                 self._check_funding()
+                self._check_news_alerts()
 
                 if not self.in_trade:
                     if self.recent_high is None or price > self.recent_high:
