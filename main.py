@@ -7,7 +7,7 @@ import threading
 import json
 from datetime import datetime
 from config import (
-    SYMBOL, LEVERAGE, MARGINS,
+    SYMBOL, LEVERAGE, LEVERAGE_OPTIONS, MARGINS,
     ENTRY_DROP_PCT, AVERAGING_STEP_PCT,
     STOP_LOSS_PCT, STOP_LOSS_BACKUP_PCT,
     COMMISSION_PCT, SMART_TP,
@@ -15,7 +15,7 @@ from config import (
     QTY_PRECISION, PRICE_PRECISION,
     DEMO_MODE, DEMO_BALANCE,
     BOT_VERSION,
-    STATS_FILE, STATE_FILE, HISTORY_FILE,
+    STATS_FILE, STATE_FILE, HISTORY_FILE, SETTINGS_FILE,
     HISTORY_PAGE_SIZE, STOP_PAUSE_SECONDS,
     LIQ_BUFFER_PCT, LIQ_PROTECTION_ENABLED
 )
@@ -76,6 +76,21 @@ def save_stats(s):
         redis_set("stats", s)
 
 
+def load_settings() -> dict:
+    default = {"leverage": LEVERAGE}
+    if redis_available():
+        data = redis_get("settings")
+        if data:
+            return {**default, **data}
+    return {**default, **_load_json(SETTINGS_FILE, {})}
+
+
+def save_settings(s):
+    _atomic_write(SETTINGS_FILE, s)
+    if redis_available():
+        redis_set("settings", s)
+
+
 def load_state() -> dict:
     if redis_available():
         data = redis_get("state")
@@ -129,6 +144,10 @@ class MartingaleBot:
         self.last_heartbeat = datetime.now()
         self.history_page   = {}
 
+        self.settings       = load_settings()
+        self.leverage       = int(self.settings.get("leverage", LEVERAGE))
+        self.bybit.leverage = self.leverage
+
         self._init_session()
 
         if DEMO_MODE:
@@ -144,7 +163,7 @@ class MartingaleBot:
         Комиссия входа берётся с номинала (маржа × плечо), поэтому
         общая комиссия = Σмаржа × плечо × COMMISSION_PCT%.
         """
-        required = sum(MARGINS) * (1 + LEVERAGE * COMMISSION_PCT / 100)
+        required = sum(MARGINS) * (1 + self.leverage * COMMISSION_PCT / 100)
         if self.demo_mode:
             balance = self.bybit.get_balance_info()["balance"]
         else:
@@ -375,6 +394,35 @@ class MartingaleBot:
         from config import TELEGRAM_CHAT_ID
         return TELEGRAM_CHAT_ID
 
+    def _set_leverage(self, lev: int) -> tuple[bool, str]:
+        """Сменить плечо. Запрещено во время открытой сделки."""
+        if lev not in LEVERAGE_OPTIONS:
+            return False, "Недопустимое плечо"
+        if self.in_trade:
+            return False, "⚠️ Нельзя менять плечо во время сделки.\nДождись закрытия позиции."
+        self.leverage             = lev
+        self.bybit.leverage       = lev
+        self.settings["leverage"] = lev
+        save_settings(self.settings)
+        self.bybit.set_leverage(SYMBOL, lev)   # демо и реал реализуют метод
+        logger.info(f"⚙️ Плечо изменено на {lev}x")
+        return True, f"✅ Плечо установлено: {lev}x"
+
+    def _leverage_keyboard(self) -> dict:
+        row = [
+            {
+                "text": f"{'✅ ' if l == self.leverage else ''}{l}x",
+                "callback_data": f"lev_{l}"
+            }
+            for l in LEVERAGE_OPTIONS
+        ]
+        return {
+            "inline_keyboard": [
+                row,
+                [{"text": "◀️ Назад", "callback_data": "status"}]
+            ]
+        }
+
     def _should_enter(self, price):
         if self.recent_high is None:
             return False
@@ -409,7 +457,7 @@ class MartingaleBot:
         if self.current_level >= len(MARGINS):
             return False, 0.0
         margin       = MARGINS[self.current_level]
-        expected_qty = self._round_qty((margin * LEVERAGE) / price)
+        expected_qty = self._round_qty((margin * self.leverage) / price)
         result       = self.bybit.place_market_buy(SYMBOL, expected_qty)
         if not result:
             return False, 0.0
@@ -454,7 +502,7 @@ class MartingaleBot:
                 if pnl_data:
                     return True, pnl_data["exit_price"], pnl_data["pnl"]
                 return True, price, round(
-                    self._total_invested() * LEVERAGE * self._get_tp_pct() / 100, 2
+                    self._total_invested() * self.leverage * self._get_tp_pct() / 100, 2
                 )
             return False, 0.0, 0.0
 
@@ -549,7 +597,7 @@ class MartingaleBot:
                 f"║ ❌ Стопов:   {self.stats['total_stops']}\n"
                 f"║ 🏆 Винрейт:  {wr}%\n"
                 f"╠══════════════════════════════╣\n"
-                f"║ ⚡ {LEVERAGE}x | 🔄 {CHECK_INTERVAL}с | ⏱ {self._uptime()}\n"
+                f"║ ⚡ {self.leverage}x | 🔄 {CHECK_INTERVAL}с | ⏱ {self._uptime()}\n"
                 f"╚══════════════════════════════╝"
             )
         else:
@@ -581,7 +629,7 @@ class MartingaleBot:
                 f"║ 📊 Уровень:   {len(self.entries)}/{len(MARGINS)}\n"
                 f"╠══════════════════════════════╣\n"
                 f"{self._balance_block()}"
-                f"║ ⚡ {LEVERAGE}x | ⏱ {self._uptime()}\n"
+                f"║ ⚡ {self.leverage}x | ⏱ {self._uptime()}\n"
                 f"╚══════════════════════════════╝"
             )
 
@@ -687,7 +735,7 @@ class MartingaleBot:
             f"📈 Сессия:  {self.stats['session_trades']} сд | +${self.stats['session_profit']:,.2f}\n\n"
             f"✅ Сделок: {total} | ❌ Стопов: {self.stats['total_stops']}\n"
             f"🏆 Винрейт: {wr}%\n"
-            f"⚡ Плечо: {LEVERAGE}x\n"
+            f"⚡ Плечо: {self.leverage}x\n"
             f"⏱ Аптайм: {self._uptime()}\n"
             f"💾 Хранилище: {storage}"
         )
@@ -708,7 +756,10 @@ class MartingaleBot:
                         {"text": "📋 История", "callback_data": "history"},
                         {"text": "📈 Итоги",   "callback_data": "report"}
                     ],
-                    [{"text": "🔬 Бэктест", "callback_data": "backtest"}],
+                    [
+                        {"text": "🔬 Бэктест",  "callback_data": "backtest"},
+                        {"text": "⚙️ Плечо",    "callback_data": "leverage"}
+                    ],
                     [{"text": "⏸ Пауза", "callback_data": "stop"}]
                 ]
             }
@@ -760,7 +811,7 @@ class MartingaleBot:
                 f"🔬 БЭКТЕСТ запущен\n\n"
                 f"📆 Период: {days} дней\n"
                 f"🕯 Таймфрейм: {interval}m\n"
-                f"⚙️ Конфиг: {len(MARGINS)} ур | плечо {LEVERAGE}x\n\n"
+                f"⚙️ Конфиг: {len(MARGINS)} ур | плечо {self.leverage}x\n\n"
                 f"⏳ Скачиваю свечи и считаю..."
             )
             candles = bt.fetch_klines(days, interval)
@@ -872,6 +923,34 @@ class MartingaleBot:
 
         elif cmd == "/report":
             self.send_keyboard(chat_id, self.get_daily_report())
+
+        elif cmd == "/leverage":
+            note = (
+                "\n\n⚠️ Сейчас идёт сделка — смена применится после её закрытия."
+                if self.in_trade else
+                "\n\nВыбери плечо для следующих сделок:"
+            )
+            self.send_keyboard(
+                chat_id,
+                f"⚙️ ПЛЕЧО\n\n"
+                f"Текущее: {self.leverage}x\n"
+                f"Чем выше плечо — тем ближе ликвидация и выше риск."
+                f"{note}",
+                self._leverage_keyboard()
+            )
+
+        elif cmd.startswith("/lev_"):
+            try:
+                lev = int(cmd.split("_")[1])
+            except (ValueError, IndexError):
+                self.send_keyboard(chat_id, "❌ Не понял плечо")
+                return
+            ok, msg = self._set_leverage(lev)
+            self.send_keyboard(
+                chat_id,
+                f"{msg}\n\nТекущее плечо: {self.leverage}x",
+                self._leverage_keyboard()
+            )
 
         elif cmd == "/backtest":
             self.send_keyboard(
@@ -987,12 +1066,12 @@ class MartingaleBot:
         logger.info(
             f"🚀 ЗАПУСК v{BOT_VERSION} | "
             f"{'ДЕМО' if self.demo_mode else 'РЕАЛ'} | "
-            f"Плечо {LEVERAGE}x | Уровней {len(MARGINS)}"
+            f"Плечо {self.leverage}x | Уровней {len(MARGINS)}"
         )
 
         threading.Thread(target=self.poll_telegram, daemon=True).start()
         chat_id  = self._get_chat_id()
-        setup    = self.bybit.auto_setup(SYMBOL, LEVERAGE)
+        setup    = self.bybit.auto_setup(SYMBOL, self.leverage)
         sess_num = self.current_session["session_id"]
 
         demo_note = ""
@@ -1017,7 +1096,7 @@ class MartingaleBot:
             f"🚀 BlackHorn Capital v{BOT_VERSION}\n"
             f"📂 Сессия #{sess_num}\n\n"
             f"⚙️ {setup.get('mode','?')} | {setup.get('leverage','?')}\n"
-            f"📊 {SYMBOL} | ⚡ {LEVERAGE}x\n"
+            f"📊 {SYMBOL} | ⚡ {self.leverage}x\n"
             f"📈 Уровней: {len(MARGINS)}\n"
             f"🎯 SmartTP: {SMART_TP[0]}% → {SMART_TP[-1]}%\n"
             f"📉 Шаг: {AVERAGING_STEP_PCT}% | Стоп: -{STOP_LOSS_PCT}%\n"
@@ -1085,7 +1164,7 @@ class MartingaleBot:
                                 f"🟢 ВХОД 1 {self._mode_label()}\n\n"
                                 f"💲 Цена входа:  ${actual_price:,.3f}\n"
                                 f"📉 Откат:       -{drop}%\n"
-                                f"⚡ Плечо:       {LEVERAGE}x\n"
+                                f"⚡ Плечо:       {self.leverage}x\n"
                                 f"💵 Маржа:       ${MARGINS[0]:,.0f}\n"
                                 f"📦 Куплено:     {self.entries[-1][1]:,.2f} HYPE\n"
                                 f"🎯 ТП:          ${tp:,.3f} (+{tp_pct}%)\n"

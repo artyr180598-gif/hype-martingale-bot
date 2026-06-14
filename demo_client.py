@@ -61,6 +61,7 @@ class DemoClient:
         self._last_close_pnl  = None
         self._order_counter   = 0
         self._last_funding_hr = -1
+        self.leverage         = LEVERAGE   # можно менять из бота
 
     # ── СОХРАНЕНИЕ ────────────────────────────────────────────────
 
@@ -102,6 +103,7 @@ class DemoClient:
     # ── SETUP ─────────────────────────────────────────────────────
 
     def auto_setup(self, symbol: str, leverage: int) -> dict:
+        self.leverage = leverage
         return {
             "mode":     "One-Way ✅ (ДЕМО)",
             "leverage": f"{leverage}x ✅ (ДЕМО)",
@@ -109,6 +111,10 @@ class DemoClient:
             "qty_step": 0.01,
             "ok":       True
         }
+
+    def set_leverage(self, symbol: str, leverage: int) -> bool:
+        self.leverage = leverage
+        return True
 
     def set_take_profit(self, symbol: str, tp_price: float) -> bool:
         self.tp_price = tp_price
@@ -210,7 +216,7 @@ class DemoClient:
         if not price:
             return None
 
-        margin     = round((qty * price) / LEVERAGE, 4)
+        margin     = round((qty * price) / self.leverage, 4)
         entry_comm = round(qty * price * COMMISSION_PCT / 100, 4)
         total_cost = margin + entry_comm
 

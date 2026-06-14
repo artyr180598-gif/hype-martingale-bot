@@ -10,7 +10,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ── ТОРГОВЛЯ ───────────────────────────────────────────────────────
 SYMBOL   = "HYPEUSDT"
-LEVERAGE = 20
+LEVERAGE = 20                      # плечо по умолчанию (можно менять в боте)
+LEVERAGE_OPTIONS = [5, 10, 15, 20, 25]   # доступные плечи в меню Telegram
 CATEGORY = "linear"
 
 # ✅ 17 УРОВНЕЙ — шаг 1.45%
@@ -67,6 +68,7 @@ STATS_FILE      = os.path.join(DATA_DIR, "stats.json")
 STATE_FILE      = os.path.join(DATA_DIR, "state.json")
 HISTORY_FILE    = os.path.join(DATA_DIR, "history.json")
 DEMO_STATE_FILE = os.path.join(DATA_DIR, "demo_state.json")
+SETTINGS_FILE   = os.path.join(DATA_DIR, "settings.json")
 
 # ── НАСТРОЙКИ БОТА ────────────────────────────────────────────────
 CHECK_INTERVAL     = 5
