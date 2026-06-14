@@ -708,6 +708,7 @@ class MartingaleBot:
                         {"text": "📋 История", "callback_data": "history"},
                         {"text": "📈 Итоги",   "callback_data": "report"}
                     ],
+                    [{"text": "🔬 Бэктест", "callback_data": "backtest"}],
                     [{"text": "⏸ Пауза", "callback_data": "stop"}]
                 ]
             }
@@ -720,9 +721,67 @@ class MartingaleBot:
         except Exception as e:
             logger.error(f"send_keyboard: {e}")
 
+    def _send_text(self, chat_id: str, text: str):
+        try:
+            requests.post(
+                self._tg_url("sendMessage"),
+                json={"chat_id": chat_id, "text": text},
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"_send_text: {e}")
+
     def send_history_page(self, chat_id: str, page: int):
         text, keyboard = self.get_history_page(chat_id, page)
         self.send_keyboard(chat_id, text, keyboard)
+
+    def _start_backtest(self, chat_id: str, days: int):
+        """Запустить бэктест в фоне (не блокирует торговый цикл)."""
+        if getattr(self, "_backtest_running", False):
+            self.send_keyboard(
+                chat_id, "⏳ Бэктест уже выполняется — дождись результата."
+            )
+            return
+        self._backtest_running = True
+        threading.Thread(
+            target=self._run_backtest_job,
+            args=(chat_id, days),
+            daemon=True
+        ).start()
+
+    def _run_backtest_job(self, chat_id: str, days: int):
+        try:
+            import backtest as bt
+            # таймфрейм: точнее для коротких периодов, легче для длинных
+            interval    = "15" if days <= 365 else "60"
+            bt.INTERVAL = interval   # используется в заголовке отчёта
+            self._send_text(
+                chat_id,
+                f"🔬 БЭКТЕСТ запущен\n\n"
+                f"📆 Период: {days} дней\n"
+                f"🕯 Таймфрейм: {interval}m\n"
+                f"⚙️ Конфиг: {len(MARGINS)} ур | плечо {LEVERAGE}x\n\n"
+                f"⏳ Скачиваю свечи и считаю..."
+            )
+            candles = bt.fetch_klines(days, interval)
+            if not candles:
+                self.send_keyboard(
+                    chat_id, "🚨 Не удалось скачать свечи для бэктеста"
+                )
+                return
+            res  = bt.run_backtest(candles)
+            text = bt.report(res)
+            for i in range(0, len(text), 3900):
+                self._send_text(chat_id, text[i:i + 3900])
+                time.sleep(0.5)
+            self.send_keyboard(chat_id, "✅ Бэктест завершён")
+        except Exception as e:
+            logger.error(f"backtest job: {e}", exc_info=True)
+            self.send_keyboard(
+                chat_id, f"🚨 Ошибка бэктеста:\n{str(e)[:200]}"
+            )
+        finally:
+            self._backtest_running = False
 
     def _answer_cb(self, cb_id: str):
         try:
@@ -813,6 +872,29 @@ class MartingaleBot:
 
         elif cmd == "/report":
             self.send_keyboard(chat_id, self.get_daily_report())
+
+        elif cmd == "/backtest":
+            self.send_keyboard(
+                chat_id,
+                "🔬 БЭКТЕСТ\n\n"
+                "Прогон стратегии на реальных свечах HYPE.\n"
+                "Выбери период (займёт ~1-3 мин):",
+                {
+                    "inline_keyboard": [
+                        [{"text": "📆 6 месяцев", "callback_data": "bt_180"}],
+                        [{"text": "📆 1 год",      "callback_data": "bt_365"}],
+                        [{"text": "📆 2 года",     "callback_data": "bt_730"}],
+                        [{"text": "◀️ Назад",      "callback_data": "status"}]
+                    ]
+                }
+            )
+
+        elif cmd.startswith("/bt_"):
+            try:
+                days = int(cmd.split("_")[1])
+            except (ValueError, IndexError):
+                days = 365
+            self._start_backtest(chat_id, days)
 
         elif cmd == "/stop":
             self.paused = True
