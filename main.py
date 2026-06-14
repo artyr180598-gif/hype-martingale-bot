@@ -16,7 +16,8 @@ from config import (
     DEMO_MODE, DEMO_BALANCE,
     BOT_VERSION,
     STATS_FILE, STATE_FILE, HISTORY_FILE,
-    HISTORY_PAGE_SIZE
+    HISTORY_PAGE_SIZE, STOP_PAUSE_SECONDS,
+    LIQ_BUFFER_PCT, LIQ_PROTECTION_ENABLED
 )
 from bybit_client import BybitClient
 from demo_client import DemoClient
@@ -135,6 +136,37 @@ class MartingaleBot:
 
         self._reset()
         self._restore_state()
+        self._check_solvency()
+
+    def _check_solvency(self):
+        """Проверить, что суммарная маржа всех уровней умещается в баланс.
+
+        Комиссия входа берётся с номинала (маржа × плечо), поэтому
+        общая комиссия = Σмаржа × плечо × COMMISSION_PCT%.
+        """
+        required = sum(MARGINS) * (1 + LEVERAGE * COMMISSION_PCT / 100)
+        if self.demo_mode:
+            balance = self.bybit.get_balance_info()["balance"]
+        else:
+            balance = self.bybit.get_wallet_balance()["balance"]
+        if required > balance:
+            shortfall = required - balance
+            logger.warning(
+                f"⚠️ Маржа всех {len(MARGINS)} уровней (${required:,.0f}) "
+                f"> баланса (${balance:,.2f}). Не хватит на ${shortfall:,.0f} — "
+                f"последние уровни не откроются."
+            )
+            self._solvency_warning = (
+                f"\n\n⚠️ ВНИМАНИЕ: маржа всех уровней ${required:,.0f} "
+                f"превышает баланс ${balance:,.2f} на ${shortfall:,.0f}.\n"
+                f"Последние уровни усреднения не откроются!"
+            )
+        else:
+            self._solvency_warning = ""
+            logger.info(
+                f"✅ Платёжеспособность OK: маржа ${required:,.0f} ≤ "
+                f"баланс ${balance:,.2f}"
+            )
 
     def _sync_stats_with_balance(self):
         b = self.bybit.get_balance_info()
@@ -321,6 +353,24 @@ class MartingaleBot:
     def _mode_label(self):
         return "🎮 ДЕМО" if self.demo_mode else "💰 РЕАЛ"
 
+    def _balance_summary(self) -> dict:
+        """Единый доступ к балансу для обоих режимов.
+
+        DEMO  → get_balance_info() (полный набор полей).
+        REAL  → get_wallet_balance(), unrealised → pnl.
+        BybitClient не имеет get_balance_info(), поэтому в РЕАЛ-режиме
+        прямой вызов привёл бы к AttributeError.
+        """
+        if self.demo_mode:
+            return self.bybit.get_balance_info()
+        wb = self.bybit.get_wallet_balance()
+        return {
+            "balance":   wb.get("balance", 0.0),
+            "available": wb.get("available", 0.0),
+            "pnl":       wb.get("unrealised", 0.0),
+            "pnl_pct":   0.0,
+        }
+
     def _get_chat_id(self):
         from config import TELEGRAM_CHAT_ID
         return TELEGRAM_CHAT_ID
@@ -337,6 +387,23 @@ class MartingaleBot:
 
     def _should_stop(self, price):
         return self.in_trade and self._drop_pct(price) >= STOP_LOSS_PCT
+
+    def _get_liq_price(self):
+        try:
+            return self.bybit.get_liquidation_price(SYMBOL)
+        except Exception as e:
+            logger.error(f"_get_liq_price: {e}")
+            return None
+
+    def _liq_protection_triggered(self, price) -> tuple[bool, float | None]:
+        """True, если цена подошла к ликвидации ближе чем LIQ_BUFFER_PCT."""
+        if not LIQ_PROTECTION_ENABLED or not self.in_trade:
+            return False, None
+        liq = self._get_liq_price()
+        if not liq or liq <= 0:
+            return False, None
+        trigger = liq * (1 + LIQ_BUFFER_PCT / 100)
+        return price <= trigger, liq
 
     def _open_level(self, price) -> tuple[bool, float]:
         if self.current_level >= len(MARGINS):
@@ -492,6 +559,10 @@ class MartingaleBot:
             sl_price = self._round_price(self.first_entry_price * (1 - STOP_LOSS_PCT / 100))
             pnl      = round((price - self.average_price) * self.total_qty, 2)
             emoji    = "📈" if pnl >= 0 else "📉"
+            liq      = self._get_liq_price()
+            liq_line = (
+                f"║ ☠️ Ликвид.:   ${liq:,.3f}\n" if liq else ""
+            )
             return (
                 f"╔══════════════════════════════╗\n"
                 f"║  🚀 HYPE BOT {self._mode_label()}\n"
@@ -506,6 +577,7 @@ class MartingaleBot:
                 f"║ 💵 Вложено:   ${self._total_invested():,.2f}\n"
                 f"║ 🎯 ТП:        ${tp_price:,.3f} (+{tp_pct}%)\n"
                 f"║ 🔴 СЛ:        ${sl_price:,.3f} (-{STOP_LOSS_PCT}%)\n"
+                f"{liq_line}"
                 f"║ 📊 Уровень:   {len(self.entries)}/{len(MARGINS)}\n"
                 f"╠══════════════════════════════╣\n"
                 f"{self._balance_block()}"
@@ -636,6 +708,7 @@ class MartingaleBot:
                         {"text": "📋 История", "callback_data": "history"},
                         {"text": "📈 Итоги",   "callback_data": "report"}
                     ],
+                    [{"text": "🔬 Бэктест", "callback_data": "backtest"}],
                     [{"text": "⏸ Пауза", "callback_data": "stop"}]
                 ]
             }
@@ -648,9 +721,67 @@ class MartingaleBot:
         except Exception as e:
             logger.error(f"send_keyboard: {e}")
 
+    def _send_text(self, chat_id: str, text: str):
+        try:
+            requests.post(
+                self._tg_url("sendMessage"),
+                json={"chat_id": chat_id, "text": text},
+                timeout=10
+            )
+        except Exception as e:
+            logger.error(f"_send_text: {e}")
+
     def send_history_page(self, chat_id: str, page: int):
         text, keyboard = self.get_history_page(chat_id, page)
         self.send_keyboard(chat_id, text, keyboard)
+
+    def _start_backtest(self, chat_id: str, days: int):
+        """Запустить бэктест в фоне (не блокирует торговый цикл)."""
+        if getattr(self, "_backtest_running", False):
+            self.send_keyboard(
+                chat_id, "⏳ Бэктест уже выполняется — дождись результата."
+            )
+            return
+        self._backtest_running = True
+        threading.Thread(
+            target=self._run_backtest_job,
+            args=(chat_id, days),
+            daemon=True
+        ).start()
+
+    def _run_backtest_job(self, chat_id: str, days: int):
+        try:
+            import backtest as bt
+            # таймфрейм: точнее для коротких периодов, легче для длинных
+            interval    = "15" if days <= 365 else "60"
+            bt.INTERVAL = interval   # используется в заголовке отчёта
+            self._send_text(
+                chat_id,
+                f"🔬 БЭКТЕСТ запущен\n\n"
+                f"📆 Период: {days} дней\n"
+                f"🕯 Таймфрейм: {interval}m\n"
+                f"⚙️ Конфиг: {len(MARGINS)} ур | плечо {LEVERAGE}x\n\n"
+                f"⏳ Скачиваю свечи и считаю..."
+            )
+            candles = bt.fetch_klines(days, interval)
+            if not candles:
+                self.send_keyboard(
+                    chat_id, "🚨 Не удалось скачать свечи для бэктеста"
+                )
+                return
+            res  = bt.run_backtest(candles)
+            text = bt.report(res)
+            for i in range(0, len(text), 3900):
+                self._send_text(chat_id, text[i:i + 3900])
+                time.sleep(0.5)
+            self.send_keyboard(chat_id, "✅ Бэктест завершён")
+        except Exception as e:
+            logger.error(f"backtest job: {e}", exc_info=True)
+            self.send_keyboard(
+                chat_id, f"🚨 Ошибка бэктеста:\n{str(e)[:200]}"
+            )
+        finally:
+            self._backtest_running = False
 
     def _answer_cb(self, cb_id: str):
         try:
@@ -700,7 +831,7 @@ class MartingaleBot:
     def _handle_cmd(self, cmd: str, chat_id: str):
         if cmd in ("/start", "/status"):
             if self.paused:
-                b = self.bybit.get_balance_info()
+                b = self._balance_summary()
                 self.send_keyboard(
                     chat_id,
                     f"⏸ БОТ НА ПАУЗЕ\n\n"
@@ -742,9 +873,32 @@ class MartingaleBot:
         elif cmd == "/report":
             self.send_keyboard(chat_id, self.get_daily_report())
 
+        elif cmd == "/backtest":
+            self.send_keyboard(
+                chat_id,
+                "🔬 БЭКТЕСТ\n\n"
+                "Прогон стратегии на реальных свечах HYPE.\n"
+                "Выбери период (займёт ~1-3 мин):",
+                {
+                    "inline_keyboard": [
+                        [{"text": "📆 6 месяцев", "callback_data": "bt_180"}],
+                        [{"text": "📆 1 год",      "callback_data": "bt_365"}],
+                        [{"text": "📆 2 года",     "callback_data": "bt_730"}],
+                        [{"text": "◀️ Назад",      "callback_data": "status"}]
+                    ]
+                }
+            )
+
+        elif cmd.startswith("/bt_"):
+            try:
+                days = int(cmd.split("_")[1])
+            except (ValueError, IndexError):
+                days = 365
+            self._start_backtest(chat_id, days)
+
         elif cmd == "/stop":
             self.paused = True
-            b = self.bybit.get_balance_info()
+            b = self._balance_summary()
             self.send_keyboard(
                 chat_id,
                 f"⏸ БОТ НА ПАУЗЕ\n\n"
@@ -868,7 +1022,8 @@ class MartingaleBot:
             f"🎯 SmartTP: {SMART_TP[0]}% → {SMART_TP[-1]}%\n"
             f"📉 Шаг: {AVERAGING_STEP_PCT}% | Стоп: -{STOP_LOSS_PCT}%\n"
             f"🔄 Проверка: каждые {CHECK_INTERVAL}с"
-            f"{demo_note}{storage_note}{restored}\n\n"
+            f"{demo_note}{storage_note}{restored}"
+            f"{getattr(self, '_solvency_warning', '')}\n\n"
             "👀 Слежу за HYPE..."
         )
 
@@ -942,6 +1097,35 @@ class MartingaleBot:
                 else:
                     drop = round(self._drop_pct(price), 2)
 
+                    liq_hit, liq_price = self._liq_protection_triggered(price)
+                    if liq_hit:
+                        levels     = len(self.entries)
+                        commission = self._calc_commission(self.total_qty, price)
+                        loss       = self._close_all_stop(price)
+                        self._record_trade(loss, True, levels, now, exit_price=price, commission=commission)
+
+                        bal_str = ""
+                        if self.demo_mode:
+                            b       = self.bybit.get_balance_info()
+                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}"
+
+                        self.send_keyboard(
+                            chat_id,
+                            f"🛟 ЗАЩИТА ОТ ЛИКВИДАЦИИ {self._mode_label()}\n\n"
+                            f"⚠️ Цена подошла к ликвидации!\n"
+                            f"💲 Цена:        ${price:,.3f}\n"
+                            f"☠️ Ликвидация:  ${liq_price:,.3f}\n"
+                            f"📉 Падение:     -{drop}%\n"
+                            f"💸 Убыток:      -${loss:,.2f}\n"
+                            f"📊 Уровней:     {levels}\n"
+                            f"⏳ Пауза..."
+                            f"{bal_str}"
+                        )
+                        self._reset()
+                        self.recent_high = price
+                        time.sleep(STOP_PAUSE_SECONDS)
+                        continue
+
                     if not self.demo_mode:
                         if self.bybit.get_position_size(SYMBOL) == 0.0:
                             pnl_data   = self.bybit.get_closed_pnl(SYMBOL)
@@ -984,7 +1168,7 @@ class MartingaleBot:
                         )
                         self._reset()
                         self.recent_high = price
-                        time.sleep(120)
+                        time.sleep(STOP_PAUSE_SECONDS)
                         continue
 
                     tp_hit, tp_price, profit = self._check_tp_hit(price)

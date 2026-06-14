@@ -3,15 +3,15 @@ import os
 import requests
 from datetime import datetime, timezone
 
-# ── СТРАТЕГИЯ (config v3.2.0) ─────────────────────────────────────
+# ── СТРАТЕГИЯ (config v3.3.0) ─────────────────────────────────────
 SYMBOL   = "HYPEUSDT"
 LEVERAGE = 20
 
 MARGINS = [
-    155, 170, 187, 206, 227,
-    250, 275, 302, 332, 365,
-    402, 442, 486, 535, 588,
-    647, 712
+    127, 139, 153, 169, 186,
+    205, 226, 248, 272, 299,
+    330, 362, 399, 439, 482,
+    531, 584
 ]
 ENTRY_DROP_PCT     = 0.6
 AVERAGING_STEP_PCT = 1.45

@@ -91,15 +91,36 @@ class BybitClient:
             return DEFAULT_FUNDING_RATE
 
     def apply_funding(self, symbol: str) -> dict | None:
-        """Проверить и вернуть инфо о фандинге (реальный счёт)."""
+        """Проверить и вернуть инфо о фандинге (реальный счёт).
+
+        Фактическую сумму фандинга берём из лога транзакций Bybit
+        (тип SETTLEMENT), а не оцениваем — чтобы статистика совпадала
+        с реальным списанием. При любой ошибке payment=None (деградация
+        до прежнего поведения без падения).
+        """
         from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc)
         hour    = now_utc.hour
         if hour not in FUNDING_HOURS or self._last_funding_hr == hour:
             return None
         self._last_funding_hr = hour
-        rate = self.get_funding_rate(symbol)
-        return {"rate": rate, "hour": hour, "payment": None}
+        rate    = self.get_funding_rate(symbol)
+        payment = self._fetch_last_funding_fee(symbol)
+        return {"rate": rate, "hour": hour, "payment": payment}
+
+    def _fetch_last_funding_fee(self, symbol: str) -> float | None:
+        try:
+            r   = self.client.get_transaction_log(
+                accountType="UNIFIED", category=CATEGORY,
+                symbol=symbol, type="SETTLEMENT", limit=1
+            )
+            lst = r["result"]["list"]
+            if lst:
+                raw = lst[0].get("funding") or lst[0].get("cashFlow") or 0
+                return abs(round(float(raw), 4))
+        except Exception as e:
+            logger.warning(f"_fetch_last_funding_fee: {e}")
+        return None
 
     def get_wallet_balance(self) -> dict:
         try:
@@ -124,6 +145,19 @@ class BybitClient:
         except Exception as e:
             logger.error(f"get_position_size: {e}")
             return 0.0
+
+    def get_liquidation_price(self, symbol: str) -> float | None:
+        """Фактическая цена ликвидации позиции с биржи (поле liqPrice)."""
+        try:
+            r   = self.client.get_positions(category=CATEGORY, symbol=symbol)
+            pos = r["result"]["list"]
+            if pos and float(pos[0].get("size", 0) or 0) > 0:
+                lp = pos[0].get("liqPrice", "")
+                if lp not in ("", "0", None):
+                    return float(lp)
+        except Exception as e:
+            logger.error(f"get_liquidation_price: {e}")
+        return None
 
     def place_market_buy(self, symbol: str, qty: float) -> dict | None:
         qty = self._round_qty(qty)
