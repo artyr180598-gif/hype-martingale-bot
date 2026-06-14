@@ -81,10 +81,11 @@ BOT_VERSION        = "3.4.0"
 FUNDING_HOURS        = [0, 8, 16]
 DEFAULT_FUNDING_RATE = 0.0001
 
-# ── НОВОСТИ (CryptoPanic) ─────────────────────────────────────────
-# Бесплатный токен: зарегистрируйся на cryptopanic.com → Account → API,
-# скопируй auth token и добавь в переменные Railway как CRYPTOPANIC_TOKEN.
-CRYPTOPANIC_TOKEN  = os.getenv("CRYPTOPANIC_TOKEN", "")
-NEWS_CURRENCY      = os.getenv("NEWS_CURRENCY", "HYPE")
-NEWS_CHECK_MINUTES = 30           # как часто проверять важные новости
-NEWS_MAX_ITEMS     = 8
+# ── НОВОСТИ (CryptoCompare / CCData) ──────────────────────────────
+# Бесплатно и БЕЗ обязательного ключа. Если хочешь больше лимитов —
+# можно добавить бесплатный ключ в Railway как CRYPTOCOMPARE_TOKEN.
+CRYPTOCOMPARE_TOKEN = os.getenv("CRYPTOCOMPARE_TOKEN", "")
+NEWS_KEYWORDS       = ["hyperliquid", "$hype"]   # точное совпадение, без слова "hype"
+NEWS_TICKER         = "HYPE"      # тег монеты в categories/tags
+NEWS_CHECK_MINUTES  = 30          # как часто проверять новости для авто-алертов
+NEWS_MAX_ITEMS      = 8
