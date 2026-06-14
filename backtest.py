@@ -27,6 +27,13 @@ SLIPPAGE_PCT    = 0.05     # реализм: 0.05% на каждое испол�
 FUNDING_8H_PCT  = 0.01
 START_BALANCE   = 5500.0
 
+# ── ЗАЩИТА ОТ ЛИКВИДАЦИИ (должно совпадать с config.py) ───────────
+# Бэктест моделирует ликвидацию ТОЧНО как живой бот, иначе результат
+# был бы выдумкой: старая версия пересиживала любую просадку.
+MAINTENANCE_MARGIN_RATE = 0.005   # поддерживающая маржа (0.5% — оптимистично)
+LIQ_BUFFER_PCT          = 2.0     # аварийное закрытие за 2% до ликвидации
+LIQ_PROTECTION_ENABLED  = True
+
 DAYS     = 365
 INTERVAL = "15"            # 15m: год = ~35k свечей, надёжно
 
@@ -133,9 +140,10 @@ def run_backtest(candles: list) -> dict:
     recent_high = None
     last_funding = None
 
-    trades, stops = [], []
+    trades, stops, liquidations = [], [], []
     level_dist, monthly = {}, {}
     insolvent = False
+    total_funding = 0.0
 
     def mk(ts):
         d = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
@@ -157,7 +165,17 @@ def run_backtest(candles: list) -> dict:
         level     += 1
         return True
 
-    def close_position(price, ts, is_stop):
+    def liq_price():
+        """Цена ликвидации текущей позиции (та же формула, что в боте)."""
+        if total_qty <= 0 or avg_price <= 0:
+            return None
+        denom = total_qty * (1 - MAINTENANCE_MARGIN_RATE)
+        if denom <= 0:
+            return None
+        lp = (total_qty * avg_price - (balance + invested)) / denom
+        return lp if lp > 0 else None
+
+    def close_position(price, ts, is_stop, is_liq=False):
         nonlocal balance, in_trade, entries, level, first_price
         nonlocal avg_price, total_qty, invested
         fill  = price * (1 - SLIPPAGE_PCT / 100)
@@ -167,9 +185,12 @@ def run_backtest(candles: list) -> dict:
         balance += invested + net
         monthly[mk(ts)] = monthly.get(mk(ts), 0.0) + net
         level_dist[level] = level_dist.get(level, 0) + 1
-        rec = {"ts": ts, "levels": level, "net": net, "is_stop": is_stop}
+        rec = {"ts": ts, "levels": level, "net": net,
+               "is_stop": is_stop, "is_liq": is_liq}
         trades.append(rec)
-        if is_stop:
+        if is_liq:
+            liquidations.append(rec)
+        elif is_stop:
             stops.append(rec)
         in_trade, entries, level = False, [], 0
         first_price, avg_price, total_qty, invested = None, 0.0, 0.0, 0.0
@@ -182,7 +203,9 @@ def run_backtest(candles: list) -> dict:
             h8 = ts // (8 * 3600 * 1000)
             if last_funding != h8:
                 last_funding = h8
-                balance -= total_qty * avg_price * FUNDING_8H_PCT / 100
+                f = total_qty * avg_price * FUNDING_8H_PCT / 100
+                balance       -= f
+                total_funding += f
 
         # ── просадка эквити по худшей точке свечи ──
         if in_trade:
@@ -204,6 +227,17 @@ def run_backtest(candles: list) -> dict:
                 else:
                     insolvent = True
         else:
+            # ── ЗАЩИТА ОТ ЛИКВИДАЦИИ (как в живом боте) ──
+            if LIQ_PROTECTION_ENABLED:
+                lp = liq_price()
+                if lp:
+                    liq_trigger = lp * (1 + LIQ_BUFFER_PCT / 100)
+                    if low <= liq_trigger:
+                        # закрытие по цене срабатывания защиты (или ниже при гэпе)
+                        close_position(min(liq_trigger, o), ts, True, is_liq=True)
+                        recent_high = close
+                        continue
+
             sl = first_price * (1 - STOP_LOSS_PCT / 100)
             if low <= sl:
                 close_position(sl, ts, True)
@@ -228,6 +262,7 @@ def run_backtest(candles: list) -> dict:
         "balance": balance, "open_pnl": open_pnl,
         "invested_now": invested, "in_trade": in_trade,
         "level_now": level, "trades": trades, "stops": stops,
+        "liquidations": liquidations, "total_funding": total_funding,
         "level_dist": level_dist, "monthly": monthly,
         "max_eq_dd": max_eq_dd, "max_eq_dd_ts": max_eq_dd_ts,
         "insolvent": insolvent,
@@ -237,10 +272,17 @@ def run_backtest(candles: list) -> dict:
 
 def report(res: dict) -> str:
     tr, st = res["trades"], res["stops"]
-    n, ns  = len(tr), len(st)
-    wr     = round((n - ns) / n * 100, 1) if n else 0
+    liq    = res.get("liquidations", [])
+    n      = len(tr)
+    ns     = len(st)
+    nl     = len(liq)
+    losses = ns + nl
+    wr     = round((n - losses) / n * 100, 1) if n else 0
     total  = sum(t["net"] for t in tr)
+    funding = res.get("total_funding", 0.0)
     end_eq = res["balance"] + res["invested_now"] + res["open_pnl"]
+    true_net = end_eq - START_BALANCE          # честная прибыль (с фандингом)
+    roi    = true_net / START_BALANCE * 100
     d1 = datetime.fromtimestamp(res["period"][0] / 1000)
     d2 = datetime.fromtimestamp(res["period"][1] / 1000)
     cov = (res["period"][1] - res["period"][0]) / 86400000
@@ -248,11 +290,14 @@ def report(res: dict) -> str:
     L = [
         f"📊 БЭКТЕСТ {SYMBOL} | {INTERVAL}m",
         f"Период: {d1:%d.%m.%Y} → {d2:%d.%m.%Y} ({cov:.0f} дн)",
-        f"Конфиг: {len(MARGINS)} ур | шаг {AVERAGING_STEP_PCT}% | СЛ -{STOP_LOSS_PCT}% | слипедж {SLIPPAGE_PCT}%",
+        f"Конфиг: {len(MARGINS)} ур | плечо {LEVERAGE}x | шаг {AVERAGING_STEP_PCT}%",
+        f"Защита от ликвидации: вкл (буфер {LIQ_BUFFER_PCT}%, MMR {MAINTENANCE_MARGIN_RATE*100}%)",
         "═" * 34,
         f"💰 Старт: ${START_BALANCE:,.0f} → Итог: ${end_eq:,.2f}",
-        f"📈 PnL закрытый: ${total:+,.2f}",
-        f"✅ {n} сд | ❌ {ns} стопов | 🏆 {wr}%",
+        f"✅ ЧИСТАЯ ПРИБЫЛЬ (с фандингом): ${true_net:+,.2f} ({roi:+.0f}%)",
+        f"📈 PnL закрытый (без фандинга): ${total:+,.2f}",
+        f"🌊 Фандинг съел: -${funding:,.2f}",
+        f"✅ {n} сд | ❌ {ns} стопов | ☠️ {nl} ликвидаций | 🏆 {wr}%",
         f"📉 МАКС ПРОСАДКА ЭКВИТИ: -{res['max_eq_dd']:.1f}%",
     ]
     if res["max_eq_dd_ts"]:
@@ -261,6 +306,8 @@ def report(res: dict) -> str:
         L.append(f"⚠️ Открытая поз.: ур.{res['level_now']}, PnL ${res['open_pnl']:+,.2f}")
     if res["insolvent"]:
         L.append("🚨 БАЛАНСА НЕ ХВАТИЛО — стратегия сломалась!")
+    if nl > 0:
+        L.append(f"🚨 БЫЛО {nl} ЛИКВИДАЦИЙ — на реале это огромные убытки!")
     L.append("─" * 34)
     L.append("Макс. уровень за сделку:")
     for lvl in sorted(res["level_dist"]):
@@ -269,6 +316,11 @@ def report(res: dict) -> str:
     L.append("По месяцам:")
     for m in sorted(res["monthly"]):
         L.append(f"  {m}: ${res['monthly'][m]:+,.2f}")
+    if liq:
+        L.append("─" * 34)
+        L.append("☠️ Ликвидации (защита сработала):")
+        for s in liq:
+            L.append(f"  {datetime.fromtimestamp(s['ts']/1000):%d.%m.%Y} | ур.{s['levels']} | ${s['net']:,.2f}")
     if st:
         L.append("─" * 34)
         L.append("Стопы:")
