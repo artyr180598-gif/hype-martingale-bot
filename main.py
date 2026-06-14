@@ -16,7 +16,8 @@ from config import (
     DEMO_MODE, DEMO_BALANCE,
     BOT_VERSION,
     STATS_FILE, STATE_FILE, HISTORY_FILE,
-    HISTORY_PAGE_SIZE
+    HISTORY_PAGE_SIZE, STOP_PAUSE_SECONDS,
+    LIQ_BUFFER_PCT, LIQ_PROTECTION_ENABLED
 )
 from bybit_client import BybitClient
 from demo_client import DemoClient
@@ -135,6 +136,37 @@ class MartingaleBot:
 
         self._reset()
         self._restore_state()
+        self._check_solvency()
+
+    def _check_solvency(self):
+        """Проверить, что суммарная маржа всех уровней умещается в баланс.
+
+        Комиссия входа берётся с номинала (маржа × плечо), поэтому
+        общая комиссия = Σмаржа × плечо × COMMISSION_PCT%.
+        """
+        required = sum(MARGINS) * (1 + LEVERAGE * COMMISSION_PCT / 100)
+        if self.demo_mode:
+            balance = self.bybit.get_balance_info()["balance"]
+        else:
+            balance = self.bybit.get_wallet_balance()["balance"]
+        if required > balance:
+            shortfall = required - balance
+            logger.warning(
+                f"⚠️ Маржа всех {len(MARGINS)} уровней (${required:,.0f}) "
+                f"> баланса (${balance:,.2f}). Не хватит на ${shortfall:,.0f} — "
+                f"последние уровни не откроются."
+            )
+            self._solvency_warning = (
+                f"\n\n⚠️ ВНИМАНИЕ: маржа всех уровней ${required:,.0f} "
+                f"превышает баланс ${balance:,.2f} на ${shortfall:,.0f}.\n"
+                f"Последние уровни усреднения не откроются!"
+            )
+        else:
+            self._solvency_warning = ""
+            logger.info(
+                f"✅ Платёжеспособность OK: маржа ${required:,.0f} ≤ "
+                f"баланс ${balance:,.2f}"
+            )
 
     def _sync_stats_with_balance(self):
         b = self.bybit.get_balance_info()
@@ -356,6 +388,23 @@ class MartingaleBot:
     def _should_stop(self, price):
         return self.in_trade and self._drop_pct(price) >= STOP_LOSS_PCT
 
+    def _get_liq_price(self):
+        try:
+            return self.bybit.get_liquidation_price(SYMBOL)
+        except Exception as e:
+            logger.error(f"_get_liq_price: {e}")
+            return None
+
+    def _liq_protection_triggered(self, price) -> tuple[bool, float | None]:
+        """True, если цена подошла к ликвидации ближе чем LIQ_BUFFER_PCT."""
+        if not LIQ_PROTECTION_ENABLED or not self.in_trade:
+            return False, None
+        liq = self._get_liq_price()
+        if not liq or liq <= 0:
+            return False, None
+        trigger = liq * (1 + LIQ_BUFFER_PCT / 100)
+        return price <= trigger, liq
+
     def _open_level(self, price) -> tuple[bool, float]:
         if self.current_level >= len(MARGINS):
             return False, 0.0
@@ -510,6 +559,10 @@ class MartingaleBot:
             sl_price = self._round_price(self.first_entry_price * (1 - STOP_LOSS_PCT / 100))
             pnl      = round((price - self.average_price) * self.total_qty, 2)
             emoji    = "📈" if pnl >= 0 else "📉"
+            liq      = self._get_liq_price()
+            liq_line = (
+                f"║ ☠️ Ликвид.:   ${liq:,.3f}\n" if liq else ""
+            )
             return (
                 f"╔══════════════════════════════╗\n"
                 f"║  🚀 HYPE BOT {self._mode_label()}\n"
@@ -524,6 +577,7 @@ class MartingaleBot:
                 f"║ 💵 Вложено:   ${self._total_invested():,.2f}\n"
                 f"║ 🎯 ТП:        ${tp_price:,.3f} (+{tp_pct}%)\n"
                 f"║ 🔴 СЛ:        ${sl_price:,.3f} (-{STOP_LOSS_PCT}%)\n"
+                f"{liq_line}"
                 f"║ 📊 Уровень:   {len(self.entries)}/{len(MARGINS)}\n"
                 f"╠══════════════════════════════╣\n"
                 f"{self._balance_block()}"
@@ -886,7 +940,8 @@ class MartingaleBot:
             f"🎯 SmartTP: {SMART_TP[0]}% → {SMART_TP[-1]}%\n"
             f"📉 Шаг: {AVERAGING_STEP_PCT}% | Стоп: -{STOP_LOSS_PCT}%\n"
             f"🔄 Проверка: каждые {CHECK_INTERVAL}с"
-            f"{demo_note}{storage_note}{restored}\n\n"
+            f"{demo_note}{storage_note}{restored}"
+            f"{getattr(self, '_solvency_warning', '')}\n\n"
             "👀 Слежу за HYPE..."
         )
 
@@ -960,6 +1015,35 @@ class MartingaleBot:
                 else:
                     drop = round(self._drop_pct(price), 2)
 
+                    liq_hit, liq_price = self._liq_protection_triggered(price)
+                    if liq_hit:
+                        levels     = len(self.entries)
+                        commission = self._calc_commission(self.total_qty, price)
+                        loss       = self._close_all_stop(price)
+                        self._record_trade(loss, True, levels, now, exit_price=price, commission=commission)
+
+                        bal_str = ""
+                        if self.demo_mode:
+                            b       = self.bybit.get_balance_info()
+                            bal_str = f"\n💳 Баланс: ${b['balance']:,.2f}"
+
+                        self.send_keyboard(
+                            chat_id,
+                            f"🛟 ЗАЩИТА ОТ ЛИКВИДАЦИИ {self._mode_label()}\n\n"
+                            f"⚠️ Цена подошла к ликвидации!\n"
+                            f"💲 Цена:        ${price:,.3f}\n"
+                            f"☠️ Ликвидация:  ${liq_price:,.3f}\n"
+                            f"📉 Падение:     -{drop}%\n"
+                            f"💸 Убыток:      -${loss:,.2f}\n"
+                            f"📊 Уровней:     {levels}\n"
+                            f"⏳ Пауза..."
+                            f"{bal_str}"
+                        )
+                        self._reset()
+                        self.recent_high = price
+                        time.sleep(STOP_PAUSE_SECONDS)
+                        continue
+
                     if not self.demo_mode:
                         if self.bybit.get_position_size(SYMBOL) == 0.0:
                             pnl_data   = self.bybit.get_closed_pnl(SYMBOL)
@@ -1002,7 +1086,7 @@ class MartingaleBot:
                         )
                         self._reset()
                         self.recent_high = price
-                        time.sleep(120)
+                        time.sleep(STOP_PAUSE_SECONDS)
                         continue
 
                     tp_hit, tp_price, profit = self._check_tp_hit(price)

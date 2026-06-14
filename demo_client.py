@@ -145,6 +145,30 @@ class DemoClient:
     def get_position_size(self, symbol: str) -> float:
         return self.position_size
 
+    def get_liquidation_price(self, symbol: str = None) -> float | None:
+        """Оценка цены ликвидации длинной позиции (cross, one-way).
+
+        Ликвидация при: equity(price) <= maintenance_margin
+          equity   = свободный баланс + занятая маржа + нереал. PnL
+                   = balance + total_invested + qty*(price - avg)
+          maint    = qty * price * MMR
+        Отсюда:  price <= (qty*avg - (balance + invested)) / (qty*(1 - MMR))
+        """
+        from config import MAINTENANCE_MARGIN_RATE
+        qty = self.position_size
+        avg = self.avg_entry_price
+        if qty <= 0 or avg <= 0:
+            return None
+        denom = qty * (1 - MAINTENANCE_MARGIN_RATE)
+        if denom <= 0:
+            return None
+        liq = (qty * avg - (self.balance + self.total_invested)) / denom
+        return round(liq, 4) if liq > 0 else None
+
+    def liquidate(self, liq_price: float):
+        """Принудительная ликвидация: теряем всю занятую маржу."""
+        self._do_close(liq_price)
+
     # ── ФАНДИНГ ───────────────────────────────────────────────────
 
     def apply_funding(self, symbol: str) -> dict | None:
