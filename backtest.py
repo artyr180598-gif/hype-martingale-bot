@@ -247,7 +247,9 @@ def run_backtest(candles: list) -> dict:
                 lp = first_price * (1 - level * AVERAGING_STEP_PCT / 100)
                 if low <= lp:
                     if not open_level(lp, ts):
-                        insolvent = True
+                        # денег на следующий уровень нет — НЕ ломаем бэктест,
+                        # а держим позицию, как живой бот: выход случится по
+                        # стопу/ликвидации/тейку на следующих свечах.
                         break
                 else:
                     break
