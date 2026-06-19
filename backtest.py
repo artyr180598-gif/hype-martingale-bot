@@ -3,72 +3,89 @@ import os
 import requests
 from datetime import datetime, timezone
 
-# ── СТРАТЕГИЯ (config v3.3.0) ─────────────────────────────────────
-SYMBOL   = "HYPEUSDT"
-LEVERAGE = 20
-
-MARGINS = [
-    127, 139, 153, 169, 186,
-    205, 226, 248, 272, 299,
-    330, 362, 399, 439, 482,
-    531, 584
-]
-# Динамические уровни (должно совпадать с config.py)
-DYNAMIC_MARGINS = True
-RISK_PERCENT    = 90
-WEIGHTS         = [m / sum(MARGINS) for m in MARGINS]
-
-ENTRY_DROP_PCT     = 0.6
-AVERAGING_STEP_PCT = 1.45
-SMART_TP = [
-    0.7, 0.8, 1.0, 1.0, 1.0,
-    1.0, 1.0, 1.0, 1.0, 1.0,
-    1.0, 1.0, 1.0, 1.0, 1.0,
-    1.0, 1.0
-]
-STOP_LOSS_PCT   = 29.0
-COMMISSION_PCT  = 0.1
-SLIPPAGE_PCT    = 0.05     # реализм: 0.05% на каждое исполнение
-FUNDING_8H_PCT  = 0.01
-START_BALANCE   = 5500.0
-
-# ── ЗАЩИТА ОТ ЛИКВИДАЦИИ (должно совпадать с config.py) ───────────
-# Бэктест моделирует ликвидацию ТОЧНО как живой бот, иначе результат
-# был бы выдумкой: старая версия пересиживала любую просадку.
-MAINTENANCE_MARGIN_RATE = 0.005   # поддерживающая маржа (0.5% — оптимистично)
-LIQ_BUFFER_PCT          = 2.0     # аварийное закрытие за 2% до ликвидации
-LIQ_PROTECTION_ENABLED  = True
-
-DAYS     = 365
-INTERVAL = "15"            # 15m: год = ~35k свечей, надёжно
+# ── ЗАГАЛЬНІ ПАРАМЕТРИ ────────────────────────────────────────────
+SYMBOL       = "HYPEUSDT"
+DAYS         = 365
+INTERVAL     = "15"
+COMMISSION   = 0.1
+SLIPPAGE     = 0.05
+FUNDING_8H   = 0.01
+START_BAL    = 5500.0
+MMR          = 0.5    # maintenance margin rate Bybit %
 
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
+# ── 4 КОНФІГУРАЦІЇ ────────────────────────────────────────────────
+CONFIGS = [
+    {
+        "name":     "A: 20x / 17ур / СЛ-29%",
+        "leverage": 20,
+        "margins":  [155,170,187,206,227,250,275,
+                     302,332,365,402,442,486,535,588,647,712],
+        "step":     1.45,
+        "sl":       29.0,
+        "smart_tp": [0.7,0.8,1.0,1.0,1.0,1.0,1.0,1.0,1.0,
+                     1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0],
+        "pause_after_liq": False,
+    },
+    {
+        "name":     "B: 6x / 17ур / СЛ-29%",
+        "leverage": 6,
+        "margins":  [155,170,187,206,227,250,275,
+                     302,332,365,402,442,486,535,588,647,712],
+        "step":     1.45,
+        "sl":       29.0,
+        "smart_tp": [0.7,0.8,1.0,1.0,1.0,1.0,1.0,1.0,1.0,
+                     1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0],
+        "pause_after_liq": False,
+    },
+    {
+        "name":     "C: 10x / 10ур / СЛ-12%",
+        "leverage": 10,
+        "margins":  [200,225,252,283,317,355,398,446,500,560],
+        "step":     1.2,
+        "sl":       12.0,
+        "smart_tp": [0.7,0.8,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0],
+        "pause_after_liq": False,
+    },
+    {
+        "name":     "D: 6x / 17ур + пауза 48г після лікв.",
+        "leverage": 6,
+        "margins":  [155,170,187,206,227,250,275,
+                     302,332,365,402,442,486,535,588,647,712],
+        "step":     1.45,
+        "sl":       29.0,
+        "smart_tp": [0.7,0.8,1.0,1.0,1.0,1.0,1.0,1.0,1.0,
+                     1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0],
+        "pause_after_liq": True,
+    },
+]
 
-def tg_send(text: str):
+
+def tg(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print(text)
         return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
-            timeout=10
-        )
-    except Exception:
-        pass
+    for i in range(0, len(text), 3900):
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": text[i:i+3900]},
+                timeout=10
+            )
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"TG error: {e}")
 
 
-def fetch_klines(days: int, interval: str) -> list:
-    """Пагинация ВПЕРЁД от стартовой даты — надёжно для длинной истории."""
-    interval_ms = int(interval) * 60 * 1000
-    end_ms      = int(time.time() * 1000)
-    start_ms    = end_ms - days * 24 * 60 * 60 * 1000
-    out         = []
-    cursor      = start_ms
-    empty_tries = 0
+def fetch_candles() -> list:
+    end_ms   = int(time.time() * 1000)
+    start_ms = end_ms - DAYS * 86400 * 1000
+    out, cursor, empty = [], start_ms, 0
+    iv_ms = int(INTERVAL) * 60 * 1000
 
-    print(f"Скачиваю {days} дней свечей {interval}m...")
+    print(f"Завантажую {DAYS} днів свічок {INTERVAL}m...")
     while cursor < end_ms:
         try:
             r = requests.get(
@@ -76,285 +93,333 @@ def fetch_klines(days: int, interval: str) -> list:
                 params={
                     "category": "linear",
                     "symbol":   SYMBOL,
-                    "interval": interval,
+                    "interval": INTERVAL,
                     "start":    cursor,
                     "limit":    1000
                 },
                 timeout=15
             ).json()
         except Exception as e:
-            print(f"Ошибка сети: {e}, повтор через 2с")
+            print(f"Помилка: {e}, повтор...")
             time.sleep(2)
             continue
 
         rows = r.get("result", {}).get("list", [])
         if not rows:
-            # либо монета ещё не торговалась, либо конец данных
-            empty_tries += 1
-            if empty_tries > 3:
+            empty += 1
+            if empty > 3:
                 break
-            cursor += 1000 * interval_ms   # перепрыгнуть пустой период
+            cursor += 500 * iv_ms
             continue
-        empty_tries = 0
+        empty = 0
 
-        rows.sort(key=lambda x: int(x[0]))   # Bybit отдаёт от новых к старым
+        rows.sort(key=lambda x: int(x[0]))
         for row in rows:
             ts = int(row[0])
             if ts >= end_ms:
                 continue
-            out.append((
-                ts,
-                float(row[1]), float(row[2]),
-                float(row[3]), float(row[4]),
-            ))
+            out.append((ts, float(row[1]), float(row[2]),
+                        float(row[3]), float(row[4])))
 
         newest = int(rows[-1][0])
         if newest <= cursor:
             break
-        cursor = newest + interval_ms
-        print(f"  ...{len(out)} свечей", end="\r")
+        cursor = newest + iv_ms
+        print(f"  ...{len(out)} свічок", end="\r")
         time.sleep(0.05)
 
-    # дедупликация и сортировка
     seen, clean = set(), []
     for c in sorted(out, key=lambda x: x[0]):
         if c[0] not in seen:
             seen.add(c[0])
             clean.append(c)
 
-    if clean:
-        d1 = datetime.fromtimestamp(clean[0][0] / 1000)
-        d2 = datetime.fromtimestamp(clean[-1][0] / 1000)
-        print(f"\nГотово: {len(clean)} свечей | {d1:%d.%m.%Y} → {d2:%d.%m.%Y}")
+    d1 = datetime.fromtimestamp(clean[0][0]/1000)
+    d2 = datetime.fromtimestamp(clean[-1][0]/1000)
+    print(f"\nГотово: {len(clean)} свічок | {d1:%d.%m.%Y}→{d2:%d.%m.%Y}")
     return clean
 
 
-def run_backtest(candles: list) -> dict:
-    balance      = START_BALANCE
-    peak_equity  = START_BALANCE
-    max_eq_dd    = 0.0
-    max_eq_dd_ts = None
+def run_config(cfg: dict, candles: list) -> dict:
+    lev      = cfg["leverage"]
+    margins  = cfg["margins"]
+    step_pct = cfg["step"]
+    sl_pct   = cfg["sl"]
+    smart_tp = cfg["smart_tp"]
+    pause48  = cfg["pause_after_liq"]
 
-    in_trade   = False
-    entries    = []
-    level      = 0
+    balance     = START_BAL
+    peak_eq     = START_BAL
+    max_dd      = 0.0
+    max_dd_ts   = None
+
+    in_trade    = False
+    entries     = []
+    level       = 0
     first_price = None
-    avg_price  = 0.0
-    total_qty  = 0.0
-    invested   = 0.0
+    avg_price   = 0.0
+    total_qty   = 0.0
+    invested    = 0.0
     recent_high = None
-    cur_margins = list(MARGINS)
-    last_funding = None
+    last_fund   = None
+    pause_until = 0
 
-    trades, stops, liquidations = [], [], []
-    level_dist, monthly = {}, {}
-    insolvent = False
+    trades, liqs = [], []
+    monthly, lev_dist = {}, {}
     total_funding = 0.0
 
-    def mk(ts):
-        d = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+    def mkey(ts):
+        d = datetime.fromtimestamp(ts/1000, tz=timezone.utc)
         return f"{d.year}-{d.month:02d}"
 
-    def recompute_margins():
-        nonlocal cur_margins
-        if not DYNAMIC_MARGINS:
-            cur_margins = list(MARGINS)
-            return
-        total = (balance * RISK_PERCENT / 100) / (1 + LEVERAGE * COMMISSION_PCT / 100)
-        cur_margins = [total * w for w in WEIGHTS]
+    def liq_price():
+        """Ціна ліквідації Bybit cross-margin."""
+        if not entries:
+            return 0.0
+        # (маржа_всього - MMR*позиція) / (qty * (1 - MMR/100))
+        pos_val = total_qty * avg_price
+        margin_ratio = (invested - pos_val * MMR / 100)
+        if total_qty == 0:
+            return 0.0
+        return avg_price - margin_ratio / total_qty
 
-    def open_level(price, ts):
+    def open_lvl(price):
         nonlocal balance, level, avg_price, total_qty, invested
-        fill   = price * (1 + SLIPPAGE_PCT / 100)   # слипедж против нас
-        margin = cur_margins[level]
-        qty    = (margin * LEVERAGE) / fill
-        comm   = qty * fill * COMMISSION_PCT / 100
+        if level >= len(margins):
+            return False
+        fill   = price * (1 + SLIPPAGE/100)
+        margin = margins[level]
+        qty    = (margin * lev) / fill
+        comm   = qty * fill * COMMISSION/100
         if margin + comm > balance:
             return False
-        balance  -= margin + comm
+        balance    -= margin + comm
         entries.append((fill, qty, margin))
-        total_qty += qty
-        invested  += margin
-        avg_price  = sum(p * q for p, q, _ in entries) / sum(q for _, q, _ in entries)
-        level     += 1
+        total_qty  += qty
+        invested   += margin
+        avg_price   = sum(p*q for p,q,_ in entries) / total_qty
+        level      += 1
         return True
 
-    def liq_price():
-        """Цена ликвидации текущей позиции (та же формула, что в боте)."""
-        if total_qty <= 0 or avg_price <= 0:
-            return None
-        denom = total_qty * (1 - MAINTENANCE_MARGIN_RATE)
-        if denom <= 0:
-            return None
-        lp = (total_qty * avg_price - (balance + invested)) / denom
-        return lp if lp > 0 else None
+    def close_pos(price, ts, is_liq=False, is_sl=False):
+        nonlocal balance, in_trade, entries, level
+        nonlocal first_price, avg_price, total_qty, invested
+        nonlocal total_funding
 
-    def close_position(price, ts, is_stop, is_liq=False):
-        nonlocal balance, in_trade, entries, level, first_price
-        nonlocal avg_price, total_qty, invested
-        fill  = price * (1 - SLIPPAGE_PCT / 100)
+        fill  = price * (1 - SLIPPAGE/100)
         gross = total_qty * (fill - avg_price)
-        comm  = total_qty * fill * COMMISSION_PCT / 100
+        comm  = total_qty * fill * COMMISSION/100
         net   = gross - comm
         balance += invested + net
-        monthly[mk(ts)] = monthly.get(mk(ts), 0.0) + net
-        level_dist[level] = level_dist.get(level, 0) + 1
-        rec = {"ts": ts, "levels": level, "net": net,
-               "is_stop": is_stop, "is_liq": is_liq}
+
+        mk = mkey(ts)
+        monthly[mk] = monthly.get(mk, 0.0) + net
+        lev_dist[level] = lev_dist.get(level, 0) + 1
+
+        rec = {
+            "ts": ts, "levels": level,
+            "net": net, "is_liq": is_liq, "is_sl": is_sl
+        }
         trades.append(rec)
         if is_liq:
-            liquidations.append(rec)
-        elif is_stop:
-            stops.append(rec)
-        in_trade, entries, level = False, [], 0
-        first_price, avg_price, total_qty, invested = None, 0.0, 0.0, 0.0
+            liqs.append(rec)
+
+        in_trade    = False
+        entries     = []
+        level       = 0
+        first_price = None
+        avg_price   = 0.0
+        total_qty   = 0.0
+        invested    = 0.0
 
     for ts, o, high, low, close in candles:
-        if insolvent:
+        if balance <= 0:
             break
+        if pause48 and ts < pause_until:
+            continue
 
+        # Фандинг
         if in_trade:
-            h8 = ts // (8 * 3600 * 1000)
-            if last_funding != h8:
-                last_funding = h8
-                f = total_qty * avg_price * FUNDING_8H_PCT / 100
-                balance       -= f
-                total_funding += f
+            h8 = ts // (8*3600*1000)
+            if last_fund != h8:
+                last_fund = h8
+                pay = total_qty * avg_price * FUNDING_8H/100
+                balance      -= pay
+                total_funding += pay
 
-        # ── просадка эквити по худшей точке свечи ──
+        # Просадка еквіті по worst case свічки
         if in_trade:
-            worst_eq = balance + invested + total_qty * (low - avg_price)
+            worst = balance + invested + total_qty*(low - avg_price)
         else:
-            worst_eq = balance
-        peak_equity = max(peak_equity, worst_eq)
-        dd = (peak_equity - worst_eq) / peak_equity * 100
-        if dd > max_eq_dd:
-            max_eq_dd, max_eq_dd_ts = dd, ts
+            worst = balance
+        peak_eq = max(peak_eq, balance + invested +
+                      (total_qty*(close - avg_price) if in_trade else 0))
+        dd = (peak_eq - worst) / peak_eq * 100 if peak_eq > 0 else 0
+        if dd > max_dd:
+            max_dd, max_dd_ts = dd, ts
 
         if not in_trade:
             if recent_high is None or high > recent_high:
                 recent_high = high
-            trigger = recent_high * (1 - ENTRY_DROP_PCT / 100)
+            trigger = recent_high * (1 - 0.6/100)
             if low <= trigger:
-                recompute_margins()   # суммы уровней от текущего баланса
-                if open_level(min(trigger, o), ts):
-                    in_trade, first_price = True, min(trigger, o)
-                else:
-                    insolvent = True
+                ep = min(trigger, o)
+                if open_lvl(ep):
+                    in_trade    = True
+                    first_price = ep
         else:
-            # ── ЗАЩИТА ОТ ЛИКВИДАЦИИ (как в живом боте) ──
-            if LIQ_PROTECTION_ENABLED:
-                lp = liq_price()
-                if lp:
-                    liq_trigger = lp * (1 + LIQ_BUFFER_PCT / 100)
-                    if low <= liq_trigger:
-                        # закрытие по цене срабатывания защиты (или ниже при гэпе)
-                        close_position(min(liq_trigger, o), ts, True, is_liq=True)
-                        recent_high = close
-                        continue
+            # 1. Ліквідація
+            lp = liq_price()
+            if lp > 0 and low <= lp:
+                loss = -(invested + total_qty*(lp - avg_price) -
+                         total_qty*lp*COMMISSION/100)
+                balance = max(0, balance - abs(
+                    invested - (invested + total_qty*(lp-avg_price))
+                ))
+                rec = {
+                    "ts": ts, "levels": level,
+                    "net": -(invested), "is_liq": True, "is_sl": False
+                }
+                mk = mkey(ts)
+                monthly[mk] = monthly.get(mk, 0.0) - invested
+                lev_dist[level] = lev_dist.get(level, 0) + 1
+                liqs.append(rec)
+                trades.append(rec)
+                in_trade, entries, level = False, [], 0
+                first_price = avg_price = None
+                total_qty = invested = 0.0
+                recent_high = close
+                if pause48:
+                    pause_until = ts + 48*3600*1000
+                continue
 
-            sl = first_price * (1 - STOP_LOSS_PCT / 100)
+            # 2. Стоп-лосс
+            sl = first_price * (1 - sl_pct/100)
             if low <= sl:
-                close_position(sl, ts, True)
+                close_pos(sl, ts, is_sl=True)
                 recent_high = close
                 continue
-            while level < len(MARGINS):
-                lp = first_price * (1 - level * AVERAGING_STEP_PCT / 100)
-                if low <= lp:
-                    if not open_level(lp, ts):
-                        # денег на следующий уровень нет — НЕ ломаем бэктест,
-                        # а держим позицию, как живой бот: выход случится по
-                        # стопу/ликвидации/тейку на следующих свечах.
+
+            # 3. Усереднення
+            while level < len(margins):
+                lp2 = first_price*(1 - level*step_pct/100)
+                if low <= lp2:
+                    if not open_lvl(lp2):
                         break
                 else:
                     break
-            tp_pct = SMART_TP[min(max(level - 1, 0), len(SMART_TP) - 1)]
-            tp = avg_price * (1 + tp_pct / 100)
+
+            # 4. Тейк-профіт
+            tp_idx = min(max(level-1, 0), len(smart_tp)-1)
+            tp = avg_price * (1 + smart_tp[tp_idx]/100)
             if high >= tp:
-                close_position(tp, ts, False)
+                close_pos(tp, ts)
                 recent_high = close
 
-    open_pnl = total_qty * (candles[-1][4] - avg_price) if in_trade else 0.0
+    open_pnl = total_qty*(candles[-1][4]-avg_price) if in_trade else 0.0
+    end_eq   = balance + invested + open_pnl
+
     return {
-        "balance": balance, "open_pnl": open_pnl,
-        "invested_now": invested, "in_trade": in_trade,
-        "level_now": level, "trades": trades, "stops": stops,
-        "liquidations": liquidations, "total_funding": total_funding,
-        "level_dist": level_dist, "monthly": monthly,
-        "max_eq_dd": max_eq_dd, "max_eq_dd_ts": max_eq_dd_ts,
-        "insolvent": insolvent,
-        "period": (candles[0][0], candles[-1][0])
+        "trades":        trades,
+        "liqs":          liqs,
+        "monthly":       monthly,
+        "lev_dist":      lev_dist,
+        "max_dd":        max_dd,
+        "max_dd_ts":     max_dd_ts,
+        "end_eq":        end_eq,
+        "balance":       balance,
+        "total_funding": total_funding,
+        "period":        (candles[0][0], candles[-1][0])
     }
 
 
-def report(res: dict) -> str:
-    tr, st = res["trades"], res["stops"]
-    liq    = res.get("liquidations", [])
-    n      = len(tr)
-    ns     = len(st)
-    nl     = len(liq)
-    losses = ns + nl
-    wr     = round((n - losses) / n * 100, 1) if n else 0
-    total  = sum(t["net"] for t in tr)
-    funding = res.get("total_funding", 0.0)
-    end_eq = res["balance"] + res["invested_now"] + res["open_pnl"]
-    true_net = end_eq - START_BALANCE          # честная прибыль (с фандингом)
-    roi    = true_net / START_BALANCE * 100
-    d1 = datetime.fromtimestamp(res["period"][0] / 1000)
-    d2 = datetime.fromtimestamp(res["period"][1] / 1000)
-    cov = (res["period"][1] - res["period"][0]) / 86400000
+def report_config(cfg: dict, res: dict) -> str:
+    tr    = res["trades"]
+    liqs  = res["liqs"]
+    n     = len(tr)
+    nl    = len(liqs)
+    wins  = n - nl
+    wr    = round(wins/n*100, 1) if n else 0
+    total = sum(t["net"] for t in tr)
+    end   = res["end_eq"]
+    pct   = round((end - START_BAL)/START_BAL*100, 1)
+    d1    = datetime.fromtimestamp(res["period"][0]/1000)
+    d2    = datetime.fromtimestamp(res["period"][1]/1000)
 
-    L = [
-        f"📊 БЭКТЕСТ {SYMBOL} | {INTERVAL}m",
-        f"Период: {d1:%d.%m.%Y} → {d2:%d.%m.%Y} ({cov:.0f} дн)",
-        f"Конфиг: {len(MARGINS)} ур | плечо {LEVERAGE}x | шаг {AVERAGING_STEP_PCT}%",
-        f"Уровни: {'динам. ' + str(RISK_PERCENT) + '% баланса' if DYNAMIC_MARGINS else 'фиксированные'}",
-        f"Защита от ликвидации: вкл (буфер {LIQ_BUFFER_PCT}%, MMR {MAINTENANCE_MARGIN_RATE*100}%)",
-        "═" * 34,
-        f"💰 Старт: ${START_BALANCE:,.0f} → Итог: ${end_eq:,.2f}",
-        f"✅ ЧИСТАЯ ПРИБЫЛЬ (с фандингом): ${true_net:+,.2f} ({roi:+.0f}%)",
-        f"📈 PnL закрытый (без фандинга): ${total:+,.2f}",
-        f"🌊 Фандинг съел: -${funding:,.2f}",
-        f"✅ {n} сд | ❌ {ns} стопов | ☠️ {nl} ликвидаций | 🏆 {wr}%",
-        f"📉 МАКС ПРОСАДКА ЭКВИТИ: -{res['max_eq_dd']:.1f}%",
+    lines = [
+        f"{'═'*36}",
+        f"📊 {cfg['name']}",
+        f"{'═'*36}",
+        f"💰 ${START_BAL:,.0f} → ${end:,.2f} ({pct:+.1f}%)",
+        f"📈 PnL закрит.: ${total:+,.2f}",
+        f"🌊 Фандинг:    -${res['total_funding']:,.2f}",
+        f"✅ {wins} угод | 💀 {nl} лікв. | 🏆 WR {wr}%",
+        f"📉 Макс. просадка: -{res['max_dd']:.1f}%",
     ]
-    if res["max_eq_dd_ts"]:
-        L.append(f"   (дата: {datetime.fromtimestamp(res['max_eq_dd_ts']/1000):%d.%m.%Y})")
-    if res["in_trade"]:
-        L.append(f"⚠️ Открытая поз.: ур.{res['level_now']}, PnL ${res['open_pnl']:+,.2f}")
-    if res["insolvent"]:
-        L.append("🚨 БАЛАНСА НЕ ХВАТИЛО — стратегия сломалась!")
-    if nl > 0:
-        L.append(f"🚨 БЫЛО {nl} ЛИКВИДАЦИЙ — на реале это огромные убытки!")
-    L.append("─" * 34)
-    L.append("Макс. уровень за сделку:")
-    for lvl in sorted(res["level_dist"]):
-        L.append(f"  ур.{lvl:>2}: {res['level_dist'][lvl]:>4}")
-    L.append("─" * 34)
-    L.append("По месяцам:")
-    for m in sorted(res["monthly"]):
-        L.append(f"  {m}: ${res['monthly'][m]:+,.2f}")
-    if liq:
-        L.append("─" * 34)
-        L.append("☠️ Ликвидации (защита сработала):")
-        for s in liq:
-            L.append(f"  {datetime.fromtimestamp(s['ts']/1000):%d.%m.%Y} | ур.{s['levels']} | ${s['net']:,.2f}")
-    if st:
-        L.append("─" * 34)
-        L.append("Стопы:")
-        for s in st:
-            L.append(f"  {datetime.fromtimestamp(s['ts']/1000):%d.%m.%Y} | ур.{s['levels']} | ${s['net']:,.2f}")
-    return "\n".join(L)
+    if res["max_dd_ts"]:
+        lines.append(
+            f"   дата: {datetime.fromtimestamp(res['max_dd_ts']/1000):%d.%m.%Y}"
+        )
+
+    if liqs:
+        lines.append("💀 Ліквідації:")
+        for lq in liqs[:5]:
+            d = datetime.fromtimestamp(lq["ts"]/1000)
+            lines.append(f"  {d:%d.%m.%Y} ур.{lq['levels']} ${lq['net']:,.0f}")
+        if len(liqs) > 5:
+            lines.append(f"  ...ще {len(liqs)-5}")
+
+    lines.append("📅 По місяцях:")
+    for mk in sorted(res["monthly"])[-6:]:
+        lines.append(f"  {mk}: ${res['monthly'][mk]:+,.0f}")
+
+    return "\n".join(lines)
+
+
+def summary(results: list) -> str:
+    lines = [
+        "🏆 ПІДСУМОК — ЯКИЙ КОНФІГ ВИГРАВ?",
+        "═"*36,
+    ]
+    ranked = sorted(results, key=lambda x: x[1]["end_eq"], reverse=True)
+    medals = ["🥇","🥈","🥉","4️⃣"]
+    for i, (cfg, res) in enumerate(ranked):
+        pct = round((res["end_eq"]-START_BAL)/START_BAL*100, 1)
+        nl  = len(res["liqs"])
+        lines.append(
+            f"{medals[i]} {cfg['name']}\n"
+            f"   Підсумок: ${res['end_eq']:,.0f} ({pct:+.1f}%)"
+            f" | Ліквід.: {nl}"
+        )
+    lines.append("═"*36)
+    winner = ranked[0]
+    lines.append(
+        f"✅ ПЕРЕМОЖЕЦЬ: {winner[0]['name']}\n"
+        f"   Саме цей конфіг рекомендується для реалу!"
+    )
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    candles = fetch_klines(DAYS, INTERVAL)
+    tg("⏳ Запускаю мульти-бектест 4 конфігурацій...\nЗавантажую свічки...")
+    candles = fetch_candles()
+
     if not candles:
-        tg_send("🚨 Бэктест: не удалось скачать свечи")
+        tg("🚨 Не вдалося завантажити свічки!")
     else:
-        res  = run_backtest(candles)
-        text = report(res)
-        print(text)
-        for i in range(0, len(text), 3900):
-            tg_send(text[i:i + 3900])
+        d1 = datetime.fromtimestamp(candles[0][0]/1000)
+        d2 = datetime.fromtimestamp(candles[-1][0]/1000)
+        tg(f"✅ Завантажено {len(candles)} свічок\n"
+           f"Період: {d1:%d.%m.%Y} → {d2:%d.%m.%Y}\n"
+           f"Тестую 4 конфігурації...")
+
+        results = []
+        for i, cfg in enumerate(CONFIGS):
+            print(f"\nТестую {cfg['name']}...")
+            res = run_config(cfg, candles)
+            results.append((cfg, res))
+            tg(report_config(cfg, res))
             time.sleep(1)
+
+        tg(summary(results))
+        tg("✅ Бектест завершено!")
