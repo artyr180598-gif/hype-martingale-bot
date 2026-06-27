@@ -1,95 +1,123 @@
-import logging
+"""
+Модуль новин для BlackHorn Capital.
+Використовує безкоштовний CryptoCompare API.
+Якщо ключ не налаштований — просто повертає порожній список.
+"""
+import os
 import requests
-from config import (
-    CRYPTOCOMPARE_TOKEN, NEWS_KEYWORDS, NEWS_TICKER
-)
+import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-# Бесплатный новостной API CryptoCompare (CCData). Работает без ключа.
-BASE_URL = "https://min-api.cryptocompare.com/data/v2/news/"
+# Безкоштовний ключ CryptoCompare (необов'язковий)
+CC_API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY", "")
+CC_URL     = "https://min-api.cryptocompare.com/data/v2/news/"
 
-# Простые словари настроения (без ИИ) — оценка по заголовкам.
-POS_WORDS = [
-    "surge", "rally", "bull", "gain", "soar", "jump", "partnership",
-    "launch", "adoption", "record", "breakout", "integration",
-    "listing", "upgrade", "growth", "rise", "boost", "all-time high",
-]
-NEG_WORDS = [
-    "hack", "exploit", "crash", "dump", "bear", "plunge", "lawsuit",
-    "ban", "sell-off", "scam", "outage", "delist", "fud", "drop",
-    "decline", "fall", "liquidat", "down", "warning",
+# Ключові слова для фільтрації важливих новин
+IMPORTANT_KEYWORDS = [
+    "hyperliquid", "hype", "hack", "exploit",
+    "crash", "ban", "sec", "regulation",
+    "liquidation", "whale", "dump", "collapse"
 ]
 
 
 def news_available() -> bool:
-    """Источник бесплатный и без ключа — всегда доступен (если есть сеть)."""
-    return True
+    """Перевірити чи доступний модуль новин."""
+    return True   # завжди доступний, просто може повернути []
 
 
-def _matches(article: dict) -> bool:
-    """Точная фильтрация по HYPE: тег-тикер или 'hyperliquid'/'$hype'.
-    Слово 'hype' само по себе НЕ ловим, чтобы не было ложных срабатываний."""
-    cats = (
-        (article.get("categories", "") or "") + "|" +
-        (article.get("tags", "") or "")
-    ).upper()
-    tokens = [t.strip() for t in cats.split("|") if t.strip()]
-    if NEWS_TICKER.upper() in tokens:
-        return True
-    text = (
-        (article.get("title", "") or "") + " " +
-        (article.get("body", "") or "")
-    ).lower()
-    return any(kw in text for kw in NEWS_KEYWORDS)
-
-
-def fetch_news(limit: int = 8, important_only: bool = False) -> list:
-    """Свежие новости по HYPE. Пустой список при ошибке/отсутствии."""
-    params = {"lang": "EN"}
-    if CRYPTOCOMPARE_TOKEN:
-        params["api_key"] = CRYPTOCOMPARE_TOKEN
+def fetch_news(
+    limit: int = 5,
+    important_only: bool = False
+) -> list:
+    """
+    Отримати новини по HYPE/Hyperliquid.
+    Повертає список dict: {id, title, url, source, published}
+    """
     try:
-        r    = requests.get(BASE_URL, params=params, timeout=10)
-        data = r.json()
-        articles = data.get("Data", []) or []
-        out = []
-        for a in articles:
-            if not _matches(a):
-                continue
-            ts = a.get("published_on", 0)
-            from datetime import datetime, timezone
-            when = (
-                datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d.%m %H:%M")
-                if ts else ""
-            )
-            out.append({
-                "id":        str(a.get("id", "")),
-                "title":     (a.get("title") or "").strip(),
-                "url":       a.get("url") or a.get("guid", ""),
-                "source":    a.get("source_info", {}).get("name")
-                             or a.get("source", ""),
-                "published": when,
+        params = {
+            "categories": "HYPE,Hyperliquid,DeFi",
+            "excludeCategories": "Sponsored",
+            "lang": "EN",
+            "sortOrder": "latest",
+        }
+        if CC_API_KEY:
+            params["api_key"] = CC_API_KEY
+
+        r = requests.get(CC_URL, params=params, timeout=10)
+        if r.status_code != 200:
+            return []
+
+        data = r.json().get("Data", [])
+        posts = []
+        for item in data[:limit * 3]:
+            title = item.get("title", "")
+            body  = item.get("body", "").lower()
+
+            # Фільтр важливих
+            if important_only:
+                text_lower = title.lower() + " " + body
+                if not any(kw in text_lower for kw in IMPORTANT_KEYWORDS):
+                    continue
+
+            # Час публікації
+            ts = item.get("published_on", 0)
+            if ts:
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                pub = dt.strftime("%d.%m %H:%M")
+            else:
+                pub = ""
+
+            posts.append({
+                "id":        item.get("id"),
+                "title":     title,
+                "url":       item.get("url", ""),
+                "source":    item.get("source_info", {}).get("name", ""),
+                "published": pub,
+                "tags":      item.get("tags", "").lower()
             })
-            if len(out) >= limit:
+
+            if len(posts) >= limit:
                 break
-        return out
+
+        return posts
+
     except Exception as e:
         logger.error(f"fetch_news: {e}")
         return []
 
 
 def sentiment(posts: list) -> tuple[str, str]:
-    """Простой сигнал настроения по ключевым словам в заголовках."""
-    pos = neg = 0
+    """
+    Простий аналіз настрою за ключовими словами.
+    Повертає (emoji, label).
+    """
+    if not posts:
+        return "😐", "Нейтральний"
+
+    negative_kw = [
+        "crash", "dump", "hack", "exploit", "ban",
+        "liquidation", "collapse", "fall", "drop",
+        "fear", "panic", "sell", "bear", "down"
+    ]
+    positive_kw = [
+        "surge", "rally", "pump", "gain", "rise",
+        "bull", "up", "growth", "adoption", "launch",
+        "partnership", "record", "high", "win"
+    ]
+
+    neg_count = 0
+    pos_count = 0
+
     for p in posts:
-        t = p["title"].lower()
-        pos += sum(1 for w in POS_WORDS if w in t)
-        neg += sum(1 for w in NEG_WORDS if w in t)
-    if pos == 0 and neg == 0:
-        return "⚪", "Нейтрально"
-    if pos > neg * 1.5:
-        return "🟢", "Преобладает позитив"
-    if neg > pos * 1.5:
-        return "🔴", "Преобладает негатив"
-    return "🟡", "Смешанные настроения"
+        text = (p.get("title", "") + " " + p.get("tags", "")).lower()
+        neg_count += sum(1 for kw in negative_kw if kw in text)
+        pos_count += sum(1 for kw in positive_kw if kw in text)
+
+    if pos_count > neg_count * 1.5:
+        return "🟢", "Позитивний"
+    elif neg_count > pos_count * 1.5:
+        return "🔴", "Негативний"
+    else:
+        return "🟡", "Нейтральний"
