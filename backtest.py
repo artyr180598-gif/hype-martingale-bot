@@ -10,7 +10,7 @@ INTERVAL     = "15"
 COMMISSION   = 0.1
 SLIPPAGE     = 0.05
 FUNDING_8H   = 0.01
-START_BAL    = 1000.0
+START_BAL    = 5000.0
 MMR          = 0.5    # maintenance margin rate Bybit %
 LEVERAGE     = 10
 
