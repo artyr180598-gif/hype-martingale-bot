@@ -16,6 +16,7 @@ dependencies = [
   "alembic>=1.16,<2",
   "redis>=6,<8",
   "httpx>=0.28,<1",
+  "websockets>=15,<16",
   "numpy>=2.2,<3",
   "pandas>=2.2,<3",
   "structlog>=25,<26",
