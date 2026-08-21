@@ -13,11 +13,7 @@ from app.data.models import MarketEvent, MarketEventType, TickerEvent, TradeEven
 
 
 class BybitLinearAdapter:
-    """Public Bybit V5 linear market-data adapter.
-
-    This adapter intentionally has no order-entry methods. It is safe for the
-    initial research/paper-trading deployment.
-    """
+    """Public Bybit V5 linear market-data adapter with reconnect/backoff."""
 
     name = "bybit-linear"
     ws_url = "wss://stream.bybit.com/v5/public/linear"
@@ -37,10 +33,7 @@ class BybitLinearAdapter:
         stop=stop_after_attempt(4),
         reraise=True,
     )
-    async def fetch_kline(
-        self, symbol: str, interval: str = "1", limit: int = 1000
-    ) -> list[list[Any]]:
-        """Fetch historical klines; caller is responsible for normalization."""
+    async def fetch_kline(self, symbol: str, interval: str = "1", limit: int = 1000) -> list[list[Any]]:
         params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.get(f"{self.rest_url}/v5/market/kline", params=params)
@@ -59,10 +52,7 @@ class BybitLinearAdapter:
         while True:
             try:
                 async with websockets.connect(
-                    self.ws_url,
-                    ping_interval=None,
-                    ping_timeout=None,
-                    close_timeout=5,
+                    self.ws_url, ping_interval=None, ping_timeout=None, close_timeout=5,
                     max_size=4 * 1024 * 1024,
                 ) as ws:
                     self._socket = ws
@@ -71,9 +61,7 @@ class BybitLinearAdapter:
                     heartbeat = asyncio.create_task(self._heartbeat(ws))
                     try:
                         async for raw in ws:
-                            payload = json.loads(raw)
-                            event = self._normalize(payload)
-                            if event is not None:
+                            for event in self._normalize(json.loads(raw)):
                                 yield event
                     finally:
                         heartbeat.cancel()
@@ -86,20 +74,17 @@ class BybitLinearAdapter:
             await asyncio.sleep(20)
             await ws.send(json.dumps({"op": "ping"}))
 
-    def _normalize(self, payload: dict[str, Any]) -> MarketEvent | None:
+    def _normalize(self, payload: dict[str, Any]) -> list[MarketEvent]:
         topic = payload.get("topic", "")
         data = payload.get("data")
         if not data:
-            return None
+            return []
         now = datetime.now(timezone.utc)
         if topic.startswith("tickers."):
             row = data[0] if isinstance(data, list) else data
-            return TickerEvent(
-                event_type=MarketEventType.TICKER,
-                exchange=self.name,
-                symbol=row["symbol"],
-                event_time=self._utc_ms(int(payload.get("ts", 0))),
-                received_at=now,
+            return [TickerEvent(
+                event_type=MarketEventType.TICKER, exchange=self.name, symbol=row["symbol"],
+                event_time=self._utc_ms(int(payload.get("ts", 0))), received_at=now,
                 last_price=Decimal(row["lastPrice"]),
                 mark_price=Decimal(row["markPrice"]) if row.get("markPrice") else None,
                 index_price=Decimal(row["indexPrice"]) if row.get("indexPrice") else None,
@@ -110,24 +95,15 @@ class BybitLinearAdapter:
                 open_interest=Decimal(row["openInterest"]) if row.get("openInterest") else None,
                 funding_rate=Decimal(row["fundingRate"]) if row.get("fundingRate") else None,
                 basis_rate=Decimal(row["basisRate"]) if row.get("basisRate") else None,
-            )
+            )]
         if topic.startswith("publicTrade."):
-            for row in data:
-                yield_event = TradeEvent(
-                    event_type=MarketEventType.TRADE,
-                    exchange=self.name,
-                    symbol=row["s"],
-                    event_time=self._utc_ms(int(row["T"])),
-                    received_at=now,
-                    price=Decimal(row["p"]),
-                    quantity=Decimal(row["v"]),
-                    side=row["S"].lower(),
-                    trade_id=row.get("i"),
-                )
-                # The protocol expects one event per trade, but this helper is
-                # intentionally kept single-event. Batched normalization is handled by collectors.
-                return yield_event
-        return None
+            return [TradeEvent(
+                event_type=MarketEventType.TRADE, exchange=self.name, symbol=row["s"],
+                event_time=self._utc_ms(int(row["T"])), received_at=now,
+                price=Decimal(row["p"]), quantity=Decimal(row["v"]), side=row["S"].lower(),
+                trade_id=row.get("i"),
+            ) for row in data]
+        return []
 
     async def close(self) -> None:
         socket = self._socket
