@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from math import sqrt
+from math import log, sqrt
 
 
 def returns(closes: Sequence[float], periods: int = 1) -> float | None:
@@ -21,11 +21,13 @@ def true_range(high: float, low: float, previous_close: float | None) -> float:
 def realized_volatility(closes: Sequence[float], window: int = 20, annualization: float = 365.0) -> float | None:
     if window <= 1 or len(closes) < window + 1:
         return None
-    log_returns: list[float] = []
-    for previous, current in zip(closes[-window - 1:-1], closes[-window:]):
-        if previous <= 0 or current <= 0:
-            return None
-        log_returns.append(__import__("math").log(current / previous))
+    log_returns = [
+        log(current / previous)
+        for previous, current in zip(closes[-window - 1:-1], closes[-window:])
+        if previous > 0 and current > 0
+    ]
+    if len(log_returns) != window:
+        return None
     mean = sum(log_returns) / len(log_returns)
     variance = sum((value - mean) ** 2 for value in log_returns) / (len(log_returns) - 1)
     return sqrt(variance * annualization)
