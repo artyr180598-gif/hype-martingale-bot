@@ -18,8 +18,8 @@ Historical datasets are stored after normalization. Dataset rows retain source t
 
 ## WebSocket resilience
 
-Bybit public linear streams use the official V5 public linear endpoint. The adapter sends heartbeat messages and reconnects with exponential backoff. Bybit documents public linear streams for USDT/USDC perpetuals and recommends a heartbeat/reconnect approach. citeturn0search0turn0search1turn0search2
+Bybit public linear streams use the official V5 public linear endpoint. The adapter sends heartbeat messages and reconnects with exponential backoff. The official adapter research is recorded in `docs/RESEARCH.md`.
 
 ## Order book
 
-Order book consumers must process the initial snapshot and subsequent deltas according to the venue's documented sequencing rules. A new snapshot resets local state. citeturn0search6
+Order book consumers must process the initial snapshot and subsequent deltas according to the venue's documented sequencing rules. A new snapshot resets local state.
