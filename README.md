@@ -3,7 +3,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Code Style](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Type Checker](https://img.shields.io/badge/type%20checker-mypy-blue.svg)](https://mypy-lang.org/)
-[![Testing](https://img.shields.io/badge/tests-47%20passed-brightgreen.svg)]()
+[![Testing](https://img.shields.io/badge/tests-50%20passed-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)]()
 
 A professional, institutional-grade quantitative cryptocurrency futures analytics, signal generation, risk management, and paper trading platform with an interactive Telegram interface and FastAPI REST API.
