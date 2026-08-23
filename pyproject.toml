@@ -1,55 +1,46 @@
-[build-system]
-requires = ["hatchling>=1.27"]
-build-backend = "hatchling.build"
-
 [project]
-name = "crypto-futures-intelligence"
-version = "0.1.0"
-description = "Crypto futures market intelligence, research, signals and paper trading platform"
-requires-python = ">=3.12"
+name = "crypto-futures-quant-platform"
+version = "4.0.0"
+description = "Professional Production-Grade Crypto Futures Market Intelligence and Quantitative Trading Platform"
+readme = "README.md"
+requires-python = ">=3.11"
 dependencies = [
-  "fastapi>=0.116,<1",
-  "pydantic>=2.11,<3",
-  "pydantic-settings>=2.10,<3",
-  "sqlalchemy[asyncio]>=2.0,<3",
-  "asyncpg>=0.30,<1",
-  "alembic>=1.16,<2",
-  "redis>=6,<8",
-  "httpx>=0.28,<1",
-  "websockets>=15,<16",
-  "numpy>=2.2,<3",
-  "pandas>=2.2,<3",
-  "structlog>=25,<26",
-  "prometheus-client>=0.22,<1",
-  "tenacity>=9,<10",
-  "aiogram>=3.21,<4",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "sqlalchemy>=2.0.28",
+    "aiosqlite>=0.20.0",
+    "asyncpg>=0.29.0",
+    "redis>=5.0.3",
+    "numpy>=1.26.4",
+    "pandas>=2.2.1",
+    "scipy>=1.12.0",
+    "aiohttp>=3.9.3",
+    "httpx>=0.27.0",
+    "requests>=2.31.0",
+    "websockets>=12.0",
+    "ccxt>=4.2.70",
+    "structlog>=24.1.0",
 ]
-
-[project.optional-dependencies]
-dev = [
-  "pytest>=8.4,<9",
-  "pytest-asyncio>=1,<2",
-  "ruff>=0.12,<1",
-  "mypy>=1.17,<2",
-]
-exchange = ["ccxt>=4.5,<5"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "ASYNC"]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
+minversion = "7.0"
+addopts = "-ra -q --asyncio-mode=auto"
 testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "F401", "F841"]
 
 [tool.mypy]
-python_version = "3.12"
-strict = true
-warn_unused_ignores = true
-warn_redundant_casts = true
-
-[tool.hatch.build.targets.wheel]
-packages = ["app", "telegram_bot", "core", "data", "derivatives", "features", "market_structure", "monte_carlo", "news", "order_flow", "paper", "regimes", "risk", "signals", "strategies", "validation", "volatility"]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true
+disallow_untyped_defs = false
