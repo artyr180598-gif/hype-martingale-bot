@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  # TimescaleDB / PostgreSQL Database
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: quant_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: quant_platform
+      POSTGRES_USER: quant_user
+      POSTGRES_PASSWORD: quant_password_secure
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quant_user -d quant_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache & Pub/Sub
+  redis:
+    image: redis:7-alpine
+    container_name: quant_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Quantitative Intelligence Engine & Telegram Bot
+  quant_engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quant_engine
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://quant_user:quant_password_secure@postgres:5432/quant_platform
+      - REDIS_URL=redis://redis:6379/0
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_ALERT_CHAT_ID=${TELEGRAM_ALERT_CHAT_ID:-}
+      - BINANCE_API_KEY=${BINANCE_API_KEY:-}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET:-}
+      - BYBIT_API_KEY=${BYBIT_API_KEY:-}
+      - BYBIT_API_SECRET=${BYBIT_API_SECRET:-}
+      - LOG_LEVEL=INFO
+      - JSON_LOGS=true
+      - ENABLE_LIVE_TRADING=false
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+
+volumes:
+  postgres_data:
+  redis_data:
