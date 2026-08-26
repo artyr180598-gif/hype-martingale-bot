@@ -1,51 +1,42 @@
-.PHONY: help install test test-cov lint format check run-bot run-api docker-up docker-down clean
+.PHONY: help install test lint check format run run-api run-scan analyze clean
 
 help:
-	@echo "Available commands:"
-	@echo "  make install     - Install development dependencies"
-	@echo "  make test        - Run test suite with pytest"
-	@echo "  make test-cov    - Run tests with coverage report"
-	@echo "  make lint        - Run ruff linter & mypy static type checker"
-	@echo "  make format      - Autoformat code with ruff"
-	@echo "  make check       - Run all checks (lint + test)"
-	@echo "  make run-bot     - Run the Telegram bot runner standalone"
-	@echo "  make run-api     - Run FastAPI development server with uvicorn"
-	@echo "  make docker-up   - Build and start full stack via docker-compose"
-	@echo "  make docker-down - Stop docker-compose services"
-	@echo "  make clean       - Remove cache and temporary artifacts"
+	@echo "HYPE Advisor — аналитический крипто-советник"
+	@echo ""
+	@echo "  make install     - установить зависимости"
+	@echo "  make test        - запустить тесты"
+	@echo "  make lint        - ruff"
+	@echo "  make check       - lint + тесты"
+	@echo "  make run         - полный режим (дашборд + сканер + наблюдение + Telegram)"
+	@echo "  make run-api     - только веб-дашборд (порт 8000)"
+	@echo "  make run-scan    - разовый скан скрытых монет"
+	@echo "  make analyze SYM=SOLUSDT - разовый анализ монеты"
+	@echo "  make clean       - очистить кэши"
 
 install:
 	pip install -r requirements.txt
 
 test:
-	PYTHONPATH=. pytest -v
-
-test-cov:
-	PYTHONPATH=. pytest --cov=src --cov-report=term-missing tests/
+	pytest tests/ -q
 
 lint:
 	ruff check .
-	mypy src --explicit-package-bases
-
-format:
-	ruff format .
 
 check: lint test
 
-run-bot:
-	python -m src.bot.runner
+run:
+	python main.py
 
 run-api:
-	uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
+	python main.py api
 
-docker-up:
-	docker-compose up -d --build
+run-scan:
+	python main.py scan
 
-docker-down:
-	docker-compose down
+analyze:
+	python main.py analyze $(SYM)
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type d -name ".pytest_cache" -exec rm -rf {} +
-	find . -type d -name ".mypy_cache" -exec rm -rf {} +
 	find . -type d -name ".ruff_cache" -exec rm -rf {} +

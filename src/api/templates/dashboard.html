@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ app_name }} — дашборд</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #2d333b; --text: #e6edf3;
+    --muted: #8b949e; --green: #3fb950; --red: #f85149; --amber: #d29922; --blue: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 16px 20px 60px; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0; }
+  .badge { padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .live { background: #12261b; color: var(--green); border: 1px solid var(--green); }
+  .demo { background: #3a2a12; color: var(--amber); border: 1px solid var(--amber); }
+  .sub { color: var(--muted); font-size: 13px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+           padding: 14px 16px; margin-bottom: 16px; }
+  .panel h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .num { text-align: right; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+  .t-long { background: #12261b; color: var(--green); }
+  .t-short { background: #3a1414; color: var(--red); }
+  .t-wait { background: #252b33; color: var(--muted); }
+  .score { font-weight: 700; }
+  .s80 { color: #7ee787; } .s68 { color: var(--green); } .s55 { color: var(--amber); }
+  .s40 { color: var(--muted); } .s0 { color: #6e7681; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #10151c; }
+  .card .sym { font-weight: 700; }
+  .card .det { color: var(--muted); font-size: 12px; }
+  .meta { color: var(--muted); font-size: 12px; }
+  ul { margin: 0; padding-left: 18px; }
+  li { margin-bottom: 4px; font-size: 13px; }
+  a { color: var(--blue); text-decoration: none; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+  .empty { color: var(--muted); font-style: italic; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🤖 {{ app_name }}</h1>
+    <span class="badge {{ 'live' if not demo else 'demo' }}">
+      {{ 'LIVE — реальные данные бирж' if not demo else 'DEMO — синтетический рынок' }}
+    </span>
+    <span class="sub">v{{ version }} · обновление каждые 60 сек</span>
+  </header>
+
+  {% if demo %}
+  <div class="panel" style="border-color: var(--amber)">
+    <span style="color: var(--amber)">⚠️ Биржи недоступны из этой среды — включён демо-режим с синтетическим рынком.
+    Советы и сигналы в демо-режиме не являются реальными. На Railway бот автоматически работает с реальными данными Bybit/Binance.</span>
+  </div>
+  {% endif %}
+
+  {% if report %}
+  <div class="panel">
+    <h2>🔎 Последний скан рынка <span class="meta">{{ report.mode|upper }} · {{ report.total_instruments }} инструментов · {{ report.candidates }} кандидатов · {{ report.analyzed }} в глубоком анализе · {{ report.duration_sec }}с</span></h2>
+    {% if gems %}
+    <div class="cards">
+      {% for g in gems %}
+      <div class="card">
+        <div class="sym">{{ g.symbol }}</div>
+        <div class="score {{ 's80' if g.score >= 80 else ('s68' if g.score >= 68 else ('s55' if g.score >= 55 else 's0')) }}">{{ g.score }}/100</div>
+        <div class="det">{{ g.direction }} · 24ч: {{ '%.1f'|format(g.price_24h_pct) }}%</div>
+        <div class="det">{{ g.reason[:70] }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">Пока ничего выдающегося не найдено.</div>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="panel"><span class="empty">Скан рынка ещё не запускался — запустите через Telegram /scan или API POST /api/scan.</span></div>
+  {% endif %}
+
+  <div class="panel">
+    <h2>👁 Наблюдение ({{ watch|length }}) <span class="meta">{{ watchlist|join(', ') }}</span></h2>
+    {% if watch %}
+    <table>
+      <tr><th>Монета</th><th>Направление</th><th class="num">Рейтинг</th><th class="num">Цена</th>
+          <th class="num">24ч</th><th class="num">Уверенность</th><th>План</th></tr>
+      {% for r in watch %}
+      <tr>
+        <td class="mono">{{ r.symbol }}</td>
+        <td><span class="tag {{ 't-long' if r.direction == 'LONG' else ('t-short' if r.direction == 'SHORT' else 't-wait') }}">{{ r.direction }}</span></td>
+        <td class="num score {{ 's80' if r.score >= 80 else ('s68' if r.score >= 68 else ('s55' if r.score >= 55 else 's0')) }}">{{ r.score }}</td>
+        <td class="num mono">{{ '%.6g'|format(r.price) }}</td>
+        <td class="num {{ 's80' if r.price_24h_pct >= 0 else 't-short' }}" style="color:{{ 'var(--green)' if r.price_24h_pct >= 0 else 'var(--red)' }}">{{ '%+.1f'|format(r.price_24h_pct) }}%</td>
+        <td class="num">{{ (r.confidence * 100)|round|int }}%</td>
+        <td class="meta">
+          {% if r.plan %}вход {{ '%.5g'|format(r.plan.entry_zone[0]) }} · стоп {{ '%.5g'|format(r.plan.stop_loss) }} · R:R {{ r.plan.rr }}
+          <a href="/api/chart/{{ r.symbol }}">график</a>{% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <div class="empty">Наблюдение пустое — дождитесь первого цикла или добавьте монеты через /add.</div>
+    {% endif %}
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <h2>📊 Бумажные позиции (сопровождение советов)</h2>
+      {% if positions %}
+      <ul>
+        {% for p in positions %}
+        <li><span class="mono">{{ p.symbol }}</span> {{ p.side }} · вход {{ '%.6g'|format(p.entry) }} · стоп {{ '%.6g'|format(p.stop_loss) }}
+            · <span style="color:{{ 'var(--green)' if p.status == 'open' else 'var(--muted)' }}">{{ p.status }}</span>
+            {% if p.status == 'closed' and p.pnl_pct is not none %} · PnL {{ '%+.2f'|format(p.pnl_pct) }}%{% endif %}</li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty">Открытых позиций нет.</div>
+      {% endif %}
+    </div>
+    <div class="panel">
+      <h2>📰 Новости</h2>
+      {% if news %}
+      <ul>
+        {% for n in news[:8] %}
+        <li>{{ n.title[:110] }} <span class="meta">{{ n.source }}</span></li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty">Новости появятся после первого скана.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="meta" style="margin-top: 20px">
+    API: <a href="/docs">/docs</a> · JSON: /api/status, /api/watch, /api/gems, /api/signal/{{ '{symbol}' }}, /api/chart/{{ '{symbol}' }}
+  </div>
+</div>
+<script>setTimeout(() => location.reload(), 60000);</script>
+</body>
+</html>
