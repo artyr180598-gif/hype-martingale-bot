@@ -1,5 +1,10 @@
 __pycache__/
 *.pyc
-bot.log
-/tmp/blackhorn/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env
+data/
+*.log
 *.tmp

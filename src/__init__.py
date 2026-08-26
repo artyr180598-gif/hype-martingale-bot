@@ -1,1 +1,3 @@
-"""Quantitative Crypto Futures Intelligence Platform."""
+"""HYPE Advisor — профессиональный крипто-советник и сканер рынка."""
+
+__version__ = "5.0.0"

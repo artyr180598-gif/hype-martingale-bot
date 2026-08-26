@@ -1,58 +1,81 @@
 """
-FastAPI Application Factory.
+FastAPI-приложение: JSON API + HTML-дашборд.
 """
-from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from __future__ import annotations
 
-from src.api.middleware import ObservabilityMiddleware
-from src.api.routes import ai, backtest, bot_sim, dashboard, health, market, paper, signals
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.templating import Jinja2Templates
+
+from src.api.routes import router
 from src.config.settings import settings
-from src.database.connection import init_db
+from src.core.logging import get_logger
+
+logger = get_logger("api.app")
+
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+app = FastAPI(
+    title="HYPE Advisor",
+    version=settings.APP_VERSION,
+    description="Профессиональный крипто-советник: сканер рынка, поиск скрытых монет, "
+    "теханализ, волны, волатильность, планы входа/выхода. Бот не торгует.",
+)
+
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+app.include_router(router)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    await init_db()
-    yield
-    # Shutdown
-
-
-def create_app() -> FastAPI:
-    app = FastAPI(
-        title="Crypto Futures Quantitative Intelligence Platform API",
-        description="Production-grade API for crypto perpetual futures analytics, strategy signals, backtesting, and risk management.",
-        version=settings.APP_VERSION,
-        docs_url="/docs",
-        redoc_url="/redoc",
-        lifespan=lifespan,
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard(request: Request):
+    ctx = _ctx()
+    ctx.ensure_services()
+    watch = []
+    if ctx.watcher:
+        watch = [r.to_dict() for r in ctx.watcher.get_results()]
+    gems = ctx.store.latest_gems(15)
+    news = ctx.store.recent_news(12)
+    report = ctx.scanner._last_report.to_dict() if ctx.scanner._last_report else None
+    positions = ctx.store.positions()
+    demo = ctx.mode != "live"
+    return templates.TemplateResponse(
+        request,
+        "dashboard.html",
+        {
+            "mode": ctx.mode.upper(),
+            "demo": demo,
+            "app_name": settings.APP_NAME,
+            "version": settings.APP_VERSION,
+            "watch": watch,
+            "gems": gems,
+            "news": news,
+            "report": report,
+            "positions": positions,
+            "watchlist": list(ctx.watcher.watchlist) if ctx.watcher else settings.watchlist,
+        },
     )
 
-    # CORS
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+
+@app.get("/health", include_in_schema=False)
+async def health() -> JSONResponse:
+    from src.core.context import get_context
+
+    ctx = get_context()
+    return JSONResponse(
+        {
+            "status": "ok",
+            "app": settings.APP_NAME,
+            "version": settings.APP_VERSION,
+            "mode": ctx.mode,
+            "started": ctx.started,
+        }
     )
 
-    # Observability
-    app.add_middleware(ObservabilityMiddleware)
 
-    # Register Routers
-    app.include_router(dashboard.router)
-    app.include_router(health.router)
-    app.include_router(market.router)
-    app.include_router(signals.router)
-    app.include_router(backtest.router)
-    app.include_router(paper.router)
-    app.include_router(ai.router)
-    app.include_router(bot_sim.router)
+def _ctx():
+    from src.core.context import get_context
 
-    return app
-
-
-app = create_app()
+    return get_context()
