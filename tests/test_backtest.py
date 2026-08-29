@@ -87,7 +87,7 @@ def test_closed_upto_hides_the_open_bar():
 # ═══════════════════════════════════════════════════════════════
 #  СИМУЛЯЦИЯ СДЕЛКИ: заранее известные исходы
 # ═══════════════════════════════════════════════════════════════
-CFG_CLEAN = BacktestConfig(slippage_pct=0.0, fee_rate=0.0, limit_wait_bars=5)
+CFG_CLEAN = BacktestConfig(slippage_pct=0.0, fee_rate=0.0, limit_wait_bars=5, trail_after_t1=True)
 
 
 def test_long_straight_up_hits_all_targets():
@@ -164,16 +164,50 @@ def test_stop_beats_target_in_the_same_bar():
     assert t.r_multiple == pytest.approx(-1.0)
 
 
-def test_breakeven_stop_protects_after_first_target():
-    """После цели 1 стоп уходит в безубыток — разворот даёт 0, а не −1R."""
-    df = make_df([100.0, 105.0, 112.0, 108.0, 100.0, 95.0, 92.0, 91.0])
+_REVERSAL = [100.0, 105.0, 112.0, 108.0, 100.0, 95.0, 92.0, 91.0]
+
+
+def _reversal_df():
+    """Цель 1 достигается на баре 2, затем разворот вниз."""
+    df = make_df(_REVERSAL)
     df.loc[:, "high"] = df[["open", "close"]].max(axis=1) + 0.5
     df.loc[:, "low"] = df[["open", "close"]].min(axis=1) - 0.5
-    t = simulate_trade("T", "LONG", plan(), df, 0, int(df["ts"].iloc[0]), CFG_CLEAN)
+    return df
+
+
+def test_breakeven_stop_without_trailing():
+    """Без трейлинга стоп после цели 1 встаёт ровно в безубыток: остаток выходит в 0."""
+    cfg = BacktestConfig(
+        slippage_pct=0.0, fee_rate=0.0, limit_wait_bars=5, trail_after_t1=False
+    )
+    t = simulate_trade("T", "LONG", plan(), _reversal_df(), 0, START_TS, cfg)
     assert t is not None
     assert t.exit_reason == "breakeven"
-    # 0.5R за первую цель, остаток вышел в 0
-    assert t.r_multiple == pytest.approx(0.5)
+    assert t.r_multiple == pytest.approx(0.5)   # только первая цель
+
+
+def test_trailing_stop_locks_profit_after_first_target():
+    """
+    С трейлингом тот же разворот фиксирует прибыль, а не ноль.
+    Парный тест к предыдущему: различаются они только флагом trail_after_t1.
+    """
+    t = simulate_trade("T", "LONG", plan(), _reversal_df(), 0, START_TS, CFG_CLEAN)
+    assert t is not None
+    assert t.exit_reason == "trailing"
+    assert t.r_multiple > 0.5, "трейлинг обязан дать больше, чем одна первая цель"
+
+
+def test_trailing_uses_only_closed_bars():
+    """
+    Стоп на баре j строится по барам <= j-1. Если бы трейлинг брал high
+    текущего бара, он бы «догонял» собственную цену и завышал результат.
+    """
+    df = _reversal_df()
+    t = simulate_trade("T", "LONG", plan(), df, 0, START_TS, CFG_CLEAN)
+    # выход на баре 3; стоп не может быть выше максимума баров 1..2
+    exit_bar = next(i for i in range(len(df)) if int(df["ts"].iloc[i]) == t.exit_ts)
+    prior_high = float(df["high"].iloc[entry_bar(df, t): exit_bar].max())
+    assert t.exit_price <= prior_high
 
 
 def test_entry_not_filled_within_wait_window():
@@ -430,12 +464,38 @@ def test_skip_reason_rejects_tight_stop_before_rr():
     assert bt._skip_reason(res_w) is None
 
 
+@pytest.mark.asyncio
+async def test_no_trade_has_target_on_the_wrong_side_of_entry():
+    """
+    Регрессия: R:R в плане считался от нижнего края зоны входа, а лимитник
+    исполняется по верхнему. На широкой зоне цель 1 у LONG оказывалась НИЖЕ
+    цены входа — сделка закрывалась в минус при формально плюсовом плане.
+    """
+    closes = 100.0 * (1.0012 ** np.arange(400)) * (1 + 0.03 * np.sin(np.arange(400) / 6.0))
+    df = make_df(closes.tolist(), noise=0.004)
+    res = await _BacktesterRunner(_engine(), _cfg(min_rr=1.0)).run("BTCUSDT", df)
+    assert res.trades, "нужны сделки, чтобы проверить план"
+    for t in res.trades:
+        if t.direction == "LONG":
+            assert t.targets[0] > t.entry_price, (
+                f"у LONG цель 1 {t.targets[0]} не выше входа {t.entry_price}"
+            )
+        else:
+            assert t.targets[0] < t.entry_price, (
+                f"у SHORT цель 1 {t.targets[0]} не ниже входа {t.entry_price}"
+            )
+
+
 def test_backtest_config_defaults_are_conservative():
     cfg = BacktestConfig()
     assert cfg.fee_rate > 0
     assert cfg.slippage_pct > 0
     assert cfg.min_rr >= 1.5
     assert cfg.warmup_bars >= 100
+
+
+def entry_bar(df, trade) -> int:
+    return next(i for i in range(len(df)) if int(df["ts"].iloc[i]) == trade.entry_ts)
 
 
 def _BacktesterRunner(engine, cfg):

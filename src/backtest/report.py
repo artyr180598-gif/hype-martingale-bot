@@ -93,6 +93,7 @@ def backtest_report(result) -> str:
         ru = {
             "target": "цель", "stop_loss": "стоп", "breakeven": "безубыток",
             "timeout": "тайм-аут", "gap_stop": "гэп сквозь стоп",
+            "trailing": "трейлинг",
         }
         parts = [f"{ru.get(k, k)} {v}" for k, v in sorted(m["exit_reasons"].items(), key=lambda x: -x[1])]
         lines.append("Выходы: " + " · ".join(parts))

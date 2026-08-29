@@ -68,6 +68,17 @@ class BacktestConfig:
     min_confidence: float = 0.45   # фильтр по уверенности сценария
     allow_short: bool = True
     staged_exits: bool = True      # частичные выходы; иначе всё на цели 1
+    # Трейлинг после цели 1: тянем стоп за ценой на trail_atr_mult × ATR,
+    # обновляя его по ЗАКРЫТЫМ барам (стоп на баре j считается из баров <= j-1,
+    # иначе подглядывание в будущее).
+    #
+    # По умолчанию ВЫКЛЮЧЕН: A/B-прогон на BTC/1h дал +0.060R без трейлинга,
+    # −0.012R при 2.5 ATR и −0.040R при 1.5 ATR, то есть пользы нет. Держим
+    # как опцию — на других рынках/периодах вывод может оказаться иным, но
+    # включать его надо только по результату прогона на реальных данных.
+    trail_after_t1: bool = False
+    trail_atr_mult: float = 3.5
+    atr_period: int = 14
     one_trade_at_a_time: bool = True
 
     def to_dict(self) -> dict:
@@ -78,6 +89,7 @@ class BacktestConfig:
             "slippage_pct": self.slippage_pct, "min_rr": self.min_rr,
             "cooldown_bars": self.cooldown_bars,
             "max_cost_r": self.max_cost_r, "min_stop_pct": self.min_stop_pct,
+            "trail_after_t1": self.trail_after_t1, "trail_atr_mult": self.trail_atr_mult,
             "min_confidence": self.min_confidence, "allow_short": self.allow_short,
             "staged_exits": self.staged_exits,
         }
@@ -260,14 +272,31 @@ def simulate_trade(
     exit_reason = "timeout"
     exit_price = None
     be_moved = False
+    trailed = False
 
     weights = TRANCHE_WEIGHTS if (cfg.staged_exits and len(targets) >= 3) else (1.0,)
     active_targets = targets[: len(weights)]
     done = [False] * len(active_targets)
+    atr = atr_series(future, cfg.atr_period)
+    # экстремумы ЗАКРЫТЫХ баров: обновляются в конце итерации, поэтому
+    # стоп на баре j строится только по информации до бара j
+    highest = float(future.iloc[entry_idx]["high"])
+    lowest = float(future.iloc[entry_idx]["low"])
 
     for j in range(entry_idx, min(entry_idx + cfg.max_hold_bars + 1, len(future))):
         bar = future.iloc[j]
         hi, lo = float(bar["high"]), float(bar["low"])
+
+        # ── трейлинг по закрытым барам: тянем стоп за ценой после цели 1 ──
+        if be_moved and cfg.trail_after_t1 and j > entry_idx:
+            a = float(atr[j - 1])
+            if a > 0:
+                trail = (highest - cfg.trail_atr_mult * a) if is_long else \
+                        (lowest + cfg.trail_atr_mult * a)
+                better = (trail > stop) if is_long else (trail < stop)
+                if better:
+                    stop = trail
+                    trailed = True
 
         # ── сначала проверяем стоп (пессимистично: худший исход внутри бара) ──
         stopped = (lo <= stop) if is_long else (hi >= stop)
@@ -275,7 +304,13 @@ def simulate_trade(
             fill = stop * (1 - slip) if is_long else stop * (1 + slip)
             r_total += _tranche_r(remaining, entry_price, fill, risk, sign, cfg.fee_rate)
             tranches.append({"weight": remaining, "price": fill, "reason": "stop"})
-            exit_idx, exit_price, exit_reason = j, fill, "stop_loss" if not be_moved else "breakeven"
+            if not be_moved:
+                exit_reason = "stop_loss"
+            elif trailed:
+                exit_reason = "trailing"
+            else:
+                exit_reason = "breakeven"
+            exit_idx, exit_price = j, fill
             remaining = 0.0
             break
 
@@ -301,6 +336,9 @@ def simulate_trade(
                 break
         if remaining <= 1e-9:
             break
+
+        highest = max(highest, hi)
+        lowest = min(lowest, lo)
 
     if remaining > 1e-9:
         last_idx = min(entry_idx + cfg.max_hold_bars, len(future) - 1)
@@ -332,6 +370,23 @@ def simulate_trade(
         confidence=confidence,
         tranches=tranches,
     )
+
+
+def atr_series(df: pd.DataFrame, period: int = 14) -> np.ndarray:
+    """True Range, сглаженный методом Уайлдера. Значение в баре i — по бары <= i."""
+    hi = df["high"].to_numpy(dtype=float)
+    lo = df["low"].to_numpy(dtype=float)
+    cl = df["close"].to_numpy(dtype=float)
+    prev = np.concatenate(([cl[0]], cl[:-1]))
+    tr = np.maximum(hi - lo, np.maximum(np.abs(hi - prev), np.abs(lo - prev)))
+    out = np.empty_like(tr)
+    if len(tr) == 0:
+        return out
+    out[0] = tr[0]
+    alpha = 1.0 / max(period, 1)
+    for i in range(1, len(tr)):
+        out[i] = alpha * tr[i] + (1 - alpha) * out[i - 1]
+    return out
 
 
 def cost_in_r(entry: float, stop: float, cfg: "BacktestConfig") -> float:
