@@ -15,3 +15,11 @@ class AnalysisError(AdvisorError):
 
 class NotEnoughData(AnalysisError):
     """Не хватает свечей для анализа."""
+
+
+class UnknownSymbol(DataSourceError):
+    """Инструмент не найден ни на одной из бирж источника."""
+
+
+class RateLimitError(DataSourceError):
+    """Биржа ответила 429: превышен лимит запросов."""

@@ -96,3 +96,35 @@ def test_scan_endpoint(api_settings):
     assert body["total_instruments"] > 0
     r2 = client.get("/api/scan")
     assert r2.status_code == 200
+
+
+def test_spectrum_endpoint(api_settings):
+    client = TestClient(app)
+    r = client.get("/api/spectrum/SOLUSDT")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["symbol"] == "SOLUSDT"
+    assert body["direction"] in {"LONG", "SHORT", "WAIT"}
+    assert len(body["timeframes"]) >= 3
+    assert "group_scores" in body and "factors" in body
+
+
+def test_trade_card_endpoint(api_settings):
+    client = TestClient(app)
+    r = client.get("/api/trade-card/SOLUSDT", params={"deposit": 500, "risk_pct": 1, "exchange": "bybit"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["symbol"] == "SOLUSDT"
+    assert body["exchange"] == "bybit"
+    assert isinstance(body["steps"], list)
+    if body["side"] in ("LONG", "SHORT"):
+        assert body["deposit_usd"] == 500
+        assert len(body["steps"]) >= 8
+
+
+def test_spectrum_chart_png(api_settings):
+    client = TestClient(app)
+    r = client.get("/api/spectrum-chart/BTCUSDT")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"

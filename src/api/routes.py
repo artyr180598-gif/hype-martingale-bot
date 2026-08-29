@@ -109,6 +109,76 @@ async def signal(symbol: str) -> dict:
     return res.to_dict()
 
 
+@router.get("/spectrum/{symbol}")
+async def spectrum(symbol: str) -> dict:
+    """Полный спектральный анализ: 5 таймфреймов × 8 групп факторов."""
+    from src.analysis.spectrum import SpectrumAnalyzer
+
+    ctx = get_context()
+    ctx.ensure_services()
+    symbol = symbol.upper()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+    try:
+        news = await ctx.source.get_news(20)
+        report = await SpectrumAnalyzer(ctx.source, ctx.settings).analyze(symbol, news)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return report.to_dict()
+
+
+@router.get("/trade-card/{symbol}")
+async def trade_card(
+    symbol: str,
+    deposit: float | None = None,
+    risk_pct: float | None = None,
+    leverage: int | None = None,
+    exchange: str = "bybit",
+    market: str = "futures",
+) -> dict:
+    """Карточка сделки: объём позиции, плечо, пошаговая инструкция."""
+    from src.analysis.advisor import TradeAdvisor
+
+    ctx = get_context()
+    ctx.ensure_services()
+    symbol = symbol.upper()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+    try:
+        res = await ctx.engine.analyze(symbol, refresh=True)
+        card = await TradeAdvisor(ctx.source, ctx.settings).build(
+            res,
+            deposit_usd=deposit,
+            risk_pct=risk_pct,
+            leverage=leverage,
+            exchange=exchange,
+            market=market,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return card.to_dict()
+
+
+@router.get("/spectrum-chart/{symbol}")
+async def spectrum_chart(symbol: str) -> Response:
+    from src.analysis.spectrum import SpectrumAnalyzer
+    from src.charts.spectrum import chart_spectrum
+
+    ctx = get_context()
+    ctx.ensure_services()
+    symbol = symbol.upper()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+    try:
+        report = await SpectrumAnalyzer(ctx.source, ctx.settings).analyze(symbol)
+        path = ctx.settings.chart_dir / f"{symbol}_spectrum.png"
+        chart_spectrum(report, path)
+        content = path.read_bytes()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return Response(content=content, media_type="image/png")
+
+
 @router.get("/chart/{symbol}")
 async def chart(symbol: str) -> Response:
     ctx = get_context()
