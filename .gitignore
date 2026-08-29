@@ -12,5 +12,7 @@ data/
 # the entire src/data/** package to be silently excluded from commits.
 !src/data/
 !src/data/**
+# ...но кэш байткода внутри src/data игнорируем (правило выше его перехватывает)
+src/data/__pycache__/
 *.log
 *.tmp

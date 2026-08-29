@@ -34,6 +34,7 @@ def _ctx():
 
 async def run_scan() -> int:
     ctx = _ctx()
+    await ctx.ensure_ready()
     report = await ctx.scanner.scan()
     print("\n" + "=" * 66)
     print(f"🔎 СКАН РЫНКА — режим {report.mode.upper()}")
@@ -55,8 +56,69 @@ async def run_scan() -> int:
     return 0
 
 
+async def run_spectrum(symbol: str) -> int:
+    """Разовый полный спектральный анализ монеты."""
+    from src.analysis.spectrum import SpectrumAnalyzer
+
+    ctx = _ctx()
+    await ctx.ensure_ready()
+    analyzer = SpectrumAnalyzer(ctx.source, settings)
+    news = await ctx.source.get_news(20)
+    rep = await analyzer.analyze(symbol.upper(), news)
+    print("\n" + "=" * 66)
+    print(rep.summary)
+    print("-" * 66)
+    for line in rep.bars():
+        print("  " + line.replace("<code>", "").replace("</code>", ""))
+    print("-" * 66)
+    for t in rep.timeframes:
+        print(f"  {t.timeframe:<4} {t.score:+.2f}  {t.note}")
+    print("=" * 66)
+    return 0
+
+
+async def run_plan(symbol: str, deposit: float | None = None) -> int:
+    """Карточка сделки: объём позиции и пошаговая инструкция."""
+    from src.analysis.advisor import TradeAdvisor
+
+    ctx = _ctx()
+    await ctx.ensure_ready()
+    res = await ctx.engine.analyze(symbol.upper(), refresh=True)
+    advisor = TradeAdvisor(ctx.source, settings)
+    card = await advisor.build(res, deposit_usd=deposit)
+    print("\n" + "=" * 66)
+    print(card.to_text().replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
+    print("=" * 66)
+    return 0
+
+
+async def run_backtest(
+    symbol: str, days: float = 30.0, tf: str = "1h", bars: int | None = None, step: int = 1
+) -> int:
+    """Прогон советника по истории: сколько бы он угадал."""
+    from src.backtest.engine import BacktestConfig
+    from src.backtest.report import backtest_report
+    from src.backtest.service import run_backtest as _bt
+
+    ctx = _ctx()
+    await ctx.ensure_ready()
+    cfg = BacktestConfig(entry_tf=tf, medium_tf=_MEDIUM.get(tf, "4h"), macro_tf="1d",
+                         warmup_bars=200, step=step)
+    print(f"\nСчитаю бэктест {symbol.upper()} на {tf} (источник: {ctx.mode})…")
+    res = await _bt(ctx.source, ctx.engine, symbol.upper(), cfg, period_days=days, bars=bars)
+    text = backtest_report(res).replace("<b>", "").replace("</b>", "")
+    print("\n" + "=" * 66)
+    print(text.replace("<code>", "").replace("</code>", ""))
+    print("=" * 66)
+    return 0
+
+
+_MEDIUM = {"5m": "15m", "15m": "1h", "30m": "2h", "1h": "4h", "4h": "1d"}
+
+
 async def run_analyze(symbol: str) -> int:
     ctx = _ctx()
+    await ctx.ensure_ready()
     res = await ctx.engine.analyze(symbol.upper(), refresh=True)
     d = res.to_dict()
     print("\n" + "=" * 66)
@@ -83,6 +145,7 @@ async def run_analyze(symbol: str) -> int:
 
 async def run_watch_only() -> int:
     ctx = _ctx()
+    await ctx.ensure_ready()
     watcher = ctx.watcher
     await watcher.start()
     try:
@@ -112,6 +175,7 @@ async def _bg_tasks(ctx, notify) -> None:
 async def run_all() -> int:
     ctx = _ctx()
     ctx.started = True
+    await ctx.ensure_ready()
 
     from src.notify.telegram import TelegramAdvisorBot
 
@@ -163,9 +227,17 @@ async def run_all() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="HYPE Advisor — крипто-советник")
-    parser.add_argument("command", nargs="?", default="all", help="all | scan | watch | api | analyze")
-    parser.add_argument("symbol", nargs="?", default="", help="символ для analyze (например SOLUSDT)")
+    parser.add_argument(
+        "command", nargs="?", default="all",
+        help="all | scan | watch | api | analyze | spectrum | plan | backtest",
+    )
+    parser.add_argument("symbol", nargs="?", default="", help="символ (например SOLUSDT)")
     parser.add_argument("--port", type=int, default=None, help="порт API")
+    parser.add_argument("--deposit", type=float, default=None, help="депозит в USDT для карточки сделки")
+    parser.add_argument("--days", type=float, default=30.0, help="период бэктеста в днях")
+    parser.add_argument("--tf", default="1h", help="таймфрейм входа для бэктеста (15m/1h/4h)")
+    parser.add_argument("--bars", type=int, default=None, help="глубина истории для бэктеста (перебивает --days)")
+    parser.add_argument("--step", type=int, default=1, help="оценивать каждый N-й бар")
     args = parser.parse_args()
 
     setup_logging(settings.LOG_LEVEL)
@@ -181,6 +253,21 @@ def main() -> int:
             print("Укажите символ: python main.py analyze SOLUSDT")
             return 2
         return asyncio.run(run_analyze(args.symbol))
+    if cmd == "spectrum":
+        if not args.symbol:
+            print("Укажите символ: python main.py spectrum SOLUSDT")
+            return 2
+        return asyncio.run(run_spectrum(args.symbol))
+    if cmd == "plan":
+        if not args.symbol:
+            print("Укажите символ: python main.py plan SOLUSDT")
+            return 2
+        return asyncio.run(run_plan(args.symbol, args.deposit))
+    if cmd == "backtest":
+        if not args.symbol:
+            print("Укажите символ: python main.py backtest BTCUSDT --days 30 --tf 1h")
+            return 2
+        return asyncio.run(run_backtest(args.symbol, args.days, args.tf, args.bars, args.step))
     if cmd == "watch":
         return asyncio.run(run_watch_only())
     if cmd == "api":
@@ -190,7 +277,8 @@ def main() -> int:
         return 0
     if cmd == "all":
         return asyncio.run(run_all())
-    print(f"Неизвестная команда: {args.command}. Доступно: all, scan, watch, api, analyze")
+    print(f"Неизвестная команда: {args.command}. "
+          f"Доступно: all, scan, watch, api, analyze, spectrum, plan, backtest")
     return 2
 
 

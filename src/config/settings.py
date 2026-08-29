@@ -5,7 +5,7 @@
 import os
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,13 +40,25 @@ class Settings(BaseSettings):
 
     # ── БИРЖИ / ДАННЫЕ ─────────────────────────────────────────
     MARKET_DATA_MODE: str = "auto"  # auto | live | demo
-    BYBIT_API_KEY: str = ""
-    BYBIT_API_SECRET: str = ""
+    BYBIT_API_KEY: str = Field(
+        default="", validation_alias=AliasChoices("BYBIT_API_KEY", "BYBIT_KEY", "BYBIT_APIKEY")
+    )
+    BYBIT_API_SECRET: str = Field(
+        default="", validation_alias=AliasChoices("BYBIT_API_SECRET", "BYBIT_SECRET")
+    )
     BYBIT_TESTNET: bool = False
-    BINANCE_API_KEY: str = ""
-    BINANCE_API_SECRET: str = ""
-    MEXC_API_KEY: str = ""
-    MEXC_API_SECRET: str = ""
+    BINANCE_API_KEY: str = Field(
+        default="", validation_alias=AliasChoices("BINANCE_API_KEY", "BINANCE_KEY")
+    )
+    BINANCE_API_SECRET: str = Field(
+        default="", validation_alias=AliasChoices("BINANCE_API_SECRET", "BINANCE_SECRET")
+    )
+    MEXC_API_KEY: str = Field(
+        default="", validation_alias=AliasChoices("MEXC_API_KEY", "MEXC_KEY")
+    )
+    MEXC_API_SECRET: str = Field(
+        default="", validation_alias=AliasChoices("MEXC_API_SECRET", "MEXC_SECRET")
+    )
     COINGECKO_API_KEY: str = ""
     HTTP_TIMEOUT_SECONDS: float = 12.0
     HTTP_MAX_RETRIES: int = 3
@@ -72,6 +84,25 @@ class Settings(BaseSettings):
     MAX_LEVERAGE: int = 10
     MIN_RISK_REWARD: float = 1.8
     MAX_POSITION_PCT: float = 15.0
+
+    # ── НАСТРОЙКИ СДЕЛКИ ДЛЯ КАРТОЧКИ (можно менять в боте) ────
+    # Депозит нужен, чтобы посчитать «сколько купить в USDT и в монетах».
+    DEFAULT_DEPOSIT_USD: float = Field(
+        default=500.0, validation_alias=AliasChoices("DEFAULT_DEPOSIT_USD", "DEPOSIT_USD", "BALANCE_USD")
+    )
+    DEFAULT_EXCHANGE: str = Field(
+        default="bybit", validation_alias=AliasChoices("DEFAULT_EXCHANGE", "EXCHANGE")
+    )  # bybit | binance
+    DEFAULT_MARKET: str = "futures"   # futures | spot
+    DEFAULT_LEVERAGE: int | None = None  # None = считать по волатильности
+
+    @field_validator("DEFAULT_LEVERAGE", mode="before")
+    @classmethod
+    def _empty_leverage_is_none(cls, v):
+        """Пустая строка в .env (DEFAULT_LEVERAGE=) означает «авто», а не ошибку."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return v
 
     # ── ХРАНЕНИЕ ──────────────────────────────────────────────
     DATA_DIR: Path = Field(default_factory=_data_dir_default)
