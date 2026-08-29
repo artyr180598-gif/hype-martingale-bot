@@ -196,20 +196,58 @@ class AnalysisEngine:
         df_macro = await self.source.get_klines(symbol, MACRO_TF, 160)
         if len(df_entry) < MIN_BARS:
             raise NotEnoughData(f"{symbol}: всего {len(df_entry)} баров на {ENTRY_TF}")
+        return self.analyze_frames(
+            symbol,
+            df_entry,
+            df_medium,
+            df_macro,
+            ticker=await self._safe_ticker(symbol),
+            funding_hist=await self._safe_funding(symbol),
+            liquidations=await self._safe_liquidations(symbol),
+        )
+
+    def analyze_frames(
+        self,
+        symbol: str,
+        df_entry: pd.DataFrame,
+        df_medium: pd.DataFrame,
+        df_macro: pd.DataFrame,
+        ticker: Ticker | None = None,
+        funding_hist: list | None = None,
+        liquidations: list[Liquidation] | None = None,
+        timeframe_main: str = ENTRY_TF,
+    ) -> AnalysisResult:
+        """
+        Анализ на готовых срезах данных — единственный путь к честному бэктесту:
+        вызывающий сам решает, какие бары считать «прошлым». Live-режим и
+        бэктест используют один и тот же код, поэтому расхождения логики быть
+        не может (backtest/live parity, как в nautilus_trader).
+        """
+        if len(df_entry) < MIN_BARS:
+            raise NotEnoughData(f"{symbol}: всего {len(df_entry)} баров на {timeframe_main}")
+        funding_hist = funding_hist or []
+        liquidations = liquidations or []
 
         fe = compute_all(df_entry)
-        fm = compute_all(df_medium)
-        fa = compute_all(df_macro)
+        fm = compute_all(df_medium) if len(df_medium) >= MIN_BARS else fe
+        fa = compute_all(df_macro) if len(df_macro) >= 30 else fm
 
         price = float(fe["close"].iloc[-1])
         atr = float(fe["atr_14"].iloc[-1])
 
-        # ── Рыночный контекст (тикер) ──
-        ticker = await self._safe_ticker(symbol)
-        price_24h_pct = ticker.price_24h_pct if ticker else float(fe["roc_20"].iloc[-1]) * 3
-        turnover_24h = ticker.turnover_24h if ticker else 0.0
-        volume_24h = ticker.volume_24h if ticker else 0.0
-        funding_rate = ticker.funding_rate if ticker else None
+        # ── Рыночный контекст ──
+        # В бэктесте тикера нет: считаем суточные метрики из самих свечей,
+        # чтобы не подглядывать в будущее.
+        if ticker is None:
+            price_24h_pct = self._history_24h_pct(fe)
+            turnover_24h = self._history_turnover(fe)
+            volume_24h = float(fe["volume"].tail(96).sum())
+            funding_rate = None
+        else:
+            price_24h_pct = ticker.price_24h_pct
+            turnover_24h = ticker.turnover_24h
+            volume_24h = ticker.volume_24h
+            funding_rate = ticker.funding_rate
 
         # ── Компоненты анализа ──
         structure = market_structure(fe)
@@ -217,10 +255,7 @@ class AnalysisEngine:
         mom = momentum(fe)
         ell = elliott(fm)
 
-        funding_hist = await self._safe_funding(symbol)
         funding_trend = self._funding_trend(funding_hist)
-
-        liquidations = await self._safe_liquidations(symbol)
         liq_note = self._liquidations_note(liquidations)
 
         # ── План входа/выхода ──
@@ -259,7 +294,7 @@ class AnalysisEngine:
         return AnalysisResult(
             symbol=symbol,
             ts_ms=now_ms(),
-            timeframe_main=ENTRY_TF,
+            timeframe_main=timeframe_main,
             price=price,
             price_24h_pct=round(price_24h_pct, 2),
             turnover_24h=turnover_24h,
@@ -288,6 +323,25 @@ class AnalysisEngine:
             fib=fib,
             is_demo=self.source.is_demo,
         )
+    # ── Метрики из истории (для бэктеста, без внешнего тикера) ──
+    @staticmethod
+    def _history_24h_pct(fe: pd.DataFrame) -> float:
+        """Изменение за ~24ч: берём столько баров, сколько даёт фрейм."""
+        close = fe["close"]
+        n = min(len(close) - 1, 96)
+        if n <= 0:
+            return 0.0
+        prev = float(close.iloc[-1 - n])
+        if prev <= 0:
+            return 0.0
+        return (float(close.iloc[-1]) - prev) / prev * 100.0
+
+    @staticmethod
+    def _history_turnover(fe: pd.DataFrame) -> float:
+        """Оборот за ~24ч в quote (close × volume)."""
+        tail = fe.tail(min(len(fe), 96))
+        return float((tail["close"] * tail["volume"]).sum())
+
     # ── Вспомогательные загрузки (с fallback) ──
     async def _safe_ticker(self, symbol: str) -> Ticker | None:
         try:

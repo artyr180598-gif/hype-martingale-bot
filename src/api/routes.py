@@ -39,6 +39,39 @@ async def watch_list() -> dict:
     return {"count": len(results), "results": [r.to_dict() for r in results]}
 
 
+@router.get("/backtest/{symbol}")
+async def backtest(
+    symbol: str,
+    days: float = Query(30.0, ge=1, le=365),
+    tf: str = Query("1h", pattern="^(5m|15m|30m|1h|4h)$"),
+    bars: int | None = Query(None, ge=300, le=20000),
+    step: int = Query(1, ge=1, le=48),
+    min_rr: float = Query(1.5, ge=0.1, le=10),
+    allow_short: bool = Query(True),
+) -> dict:
+    """
+    Прогон советника по истории: те же `analyze_frames`, что и в живом режиме.
+    Метрики — в R (кратностях риска), поэтому сравнимы между монетами.
+    """
+    from src.backtest.engine import BacktestConfig
+    from src.backtest.report import backtest_report
+    from src.backtest.service import run_backtest
+
+    ctx = get_context()
+    await ctx.ensure_ready()
+    medium = {"5m": "15m", "15m": "1h", "30m": "2h", "1h": "4h", "4h": "1d"}.get(tf, "4h")
+    cfg = BacktestConfig(entry_tf=tf, medium_tf=medium, macro_tf="1d",
+                         warmup_bars=200, step=step, min_rr=min_rr, allow_short=allow_short)
+    try:
+        res = await run_backtest(ctx.source, ctx.engine, symbol.upper(), cfg,
+                                 period_days=days, bars=bars)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    d = res.to_dict()
+    d["report_text"] = backtest_report(res)
+    return d
+
+
 @router.get("/watch/{symbol}")
 async def watch_one(symbol: str, refresh: bool = False) -> dict:
     ctx = get_context()
@@ -107,6 +140,76 @@ async def signal(symbol: str) -> dict:
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=404, detail=str(e)) from e
     return res.to_dict()
+
+
+@router.get("/spectrum/{symbol}")
+async def spectrum(symbol: str) -> dict:
+    """Полный спектральный анализ: 5 таймфреймов × 8 групп факторов."""
+    from src.analysis.spectrum import SpectrumAnalyzer
+
+    ctx = get_context()
+    ctx.ensure_services()
+    symbol = symbol.upper()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+    try:
+        news = await ctx.source.get_news(20)
+        report = await SpectrumAnalyzer(ctx.source, ctx.settings).analyze(symbol, news)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return report.to_dict()
+
+
+@router.get("/trade-card/{symbol}")
+async def trade_card(
+    symbol: str,
+    deposit: float | None = None,
+    risk_pct: float | None = None,
+    leverage: int | None = None,
+    exchange: str = "bybit",
+    market: str = "futures",
+) -> dict:
+    """Карточка сделки: объём позиции, плечо, пошаговая инструкция."""
+    from src.analysis.advisor import TradeAdvisor
+
+    ctx = get_context()
+    ctx.ensure_services()
+    symbol = symbol.upper()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+    try:
+        res = await ctx.engine.analyze(symbol, refresh=True)
+        card = await TradeAdvisor(ctx.source, ctx.settings).build(
+            res,
+            deposit_usd=deposit,
+            risk_pct=risk_pct,
+            leverage=leverage,
+            exchange=exchange,
+            market=market,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return card.to_dict()
+
+
+@router.get("/spectrum-chart/{symbol}")
+async def spectrum_chart(symbol: str) -> Response:
+    from src.analysis.spectrum import SpectrumAnalyzer
+    from src.charts.spectrum import chart_spectrum
+
+    ctx = get_context()
+    ctx.ensure_services()
+    symbol = symbol.upper()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+    try:
+        report = await SpectrumAnalyzer(ctx.source, ctx.settings).analyze(symbol)
+        path = ctx.settings.chart_dir / f"{symbol}_spectrum.png"
+        chart_spectrum(report, path)
+        content = path.read_bytes()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return Response(content=content, media_type="image/png")
 
 
 @router.get("/chart/{symbol}")

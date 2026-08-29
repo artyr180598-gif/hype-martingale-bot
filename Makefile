@@ -1,4 +1,4 @@
-.PHONY: help install test lint check format run run-api run-scan analyze clean
+.PHONY: help install test lint check format run run-api run-scan analyze spectrum plan backtest clean
 
 help:
 	@echo "HYPE Advisor — аналитический крипто-советник"
@@ -11,6 +11,9 @@ help:
 	@echo "  make run-api     - только веб-дашборд (порт 8000)"
 	@echo "  make run-scan    - разовый скан скрытых монет"
 	@echo "  make analyze SYM=SOLUSDT - разовый анализ монеты"
+	@echo "  make spectrum SYM=SOLUSDT - полный спектральный анализ"
+	@echo "  make plan SYM=SOLUSDT DEPOSIT=500 - карточка сделки для новичка"
+	@echo "  make backtest SYM=BTCUSDT DAYS=30 TF=1h - прогон советника по истории"
 	@echo "  make clean       - очистить кэши"
 
 install:
@@ -35,6 +38,15 @@ run-scan:
 
 analyze:
 	python main.py analyze $(SYM)
+
+spectrum:
+	python main.py spectrum $(SYM)
+
+plan:
+	python main.py plan $(SYM) --deposit $(or $(DEPOSIT),500)
+
+backtest:
+	python main.py backtest $(or $(SYM),BTCUSDT) --days $(or $(DAYS),30) --tf $(or $(TF),1h) --step $(or $(STEP),1)
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +

@@ -103,6 +103,9 @@
         <td class="meta">
           {% if r.plan %}вход {{ '%.5g'|format(r.plan.entry_zone[0]) }} · стоп {{ '%.5g'|format(r.plan.stop_loss) }} · R:R {{ r.plan.rr }}
           <a href="/api/chart/{{ r.symbol }}">график</a>{% else %}—{% endif %}
+          · <a href="/api/spectrum/{{ r.symbol }}">спектр</a>
+          · <a href="/api/spectrum-chart/{{ r.symbol }}">карта</a>
+          · <a href="/api/trade-card/{{ r.symbol }}?deposit=500">карточка сделки</a>
         </td>
       </tr>
       {% endfor %}
@@ -142,7 +145,10 @@
   </div>
 
   <div class="meta" style="margin-top: 20px">
-    API: <a href="/docs">/docs</a> · JSON: /api/status, /api/watch, /api/gems, /api/signal/{{ '{symbol}' }}, /api/chart/{{ '{symbol}' }}
+    API: <a href="/docs">/docs</a> · JSON: /api/status, /api/watch, /api/gems,
+    /api/signal/{{ '{symbol}' }}, /api/spectrum/{{ '{symbol}' }},
+    /api/trade-card/{{ '{symbol}' }}?deposit=500, /api/chart/{{ '{symbol}' }},
+    /api/spectrum-chart/{{ '{symbol}' }}
   </div>
 </div>
 <script>setTimeout(() => location.reload(), 60000);</script>
