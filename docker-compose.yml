@@ -4,13 +4,18 @@ services:
     container_name: hype-advisor
     env_file:
       - .env
+    environment:
+      PORT: ${PORT:-8000}
+      RUN_V2: ${RUN_V2:-false}
+      V2_COMMAND: ${V2_COMMAND:-serve}
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:${PORT:-8000}"
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    command: ["./entrypoint.sh"]
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:${PORT:-8000}/health"]
       interval: 30s
       timeout: 5s
       retries: 3

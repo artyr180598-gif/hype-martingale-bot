@@ -7,6 +7,7 @@ HYPE Advisor — профессиональный крипто-советник.
   python main.py analyze SYM — разовый анализ монеты
   python main.py watch      — только фоновое наблюдение
   python main.py api        — только веб-дашборд/API
+  python main.py v2 …       — делегировать в новую архитектуру (v2.cli)
 
 Бот НЕ торгует: он мониторит, анализирует и советует.
 """
@@ -226,6 +227,12 @@ async def run_all() -> int:
 
 
 def main() -> int:
+    # python main.py v2 [args...] — до argparse, чтобы «v2» не стал неизвестной командой
+    if len(sys.argv) > 1 and str(sys.argv[1]).lower() == "v2":
+        from v2.cli import main as v2_main
+
+        return v2_main(sys.argv[2:])
+
     parser = argparse.ArgumentParser(description="HYPE Advisor — крипто-советник")
     parser.add_argument(
         "command", nargs="?", default="all",

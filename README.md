@@ -4,7 +4,10 @@
 > Асинхронный ввод/вывод с WebSocket, **трёхуровневый сканер**
 > (объём за 5 минут → скам-фильтр по холдерам/LP/контракту → ончейн-профиль
 > деплоера), динамические стоп/цель от **ATR**, Markdown-отчёты с вердиктом и
-> пояснением каждой цифры. Запуск: `python -m v2 scan`, `python -m v2 analyze AURORA`.
+> пояснением каждой цифры. Запуск: `python -m v2 scan`, `python -m v2 analyze AURORA`,
+> либо `python main.py v2 …`. При деплое версия выбирается переменной `RUN_V2`
+> (см. `entrypoint.sh`). В Telegram-боте v2 кнопки «🆕 Движок: v2» / «🧮 Движок: v1»
+> переключают движок анализа для чата.
 > Текущая версия ниже (`src/`, `main.py`) сохранена как есть и продолжает работать.
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
@@ -331,15 +334,27 @@ python main.py            # дашборд + сканер + наблюдение
    Поддерживаются оба варианта имён: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_TOKEN`,
    `BYBIT_API_KEY`/`BYBIT_KEY`, `BYBIT_API_SECRET`/`BYBIT_SECRET`.
 3. **`PORT` задавать не нужно** — Railway инжектит его сам, настройки его подхватят.
+   Healthcheck стучится на `${PORT:-8000}/health`.
 4. Нажми **Deploy**. В логах должно быть:
    ```
    Источник данных активен: mode=bybit
    Telegram-бот запущен
    ```
 
-**Procfile** сейчас: `web: python main.py` — так Railway выдаст публичный домен
+**Procfile** сейчас: `web: ./entrypoint.sh` — так Railway выдаст публичный домен
 для дашборда, а Telegram-бот работает в том же процессе. Если домен не нужен,
-поменяй на `worker: python main.py`.
+поменяй на `worker: ./entrypoint.sh`.
+
+Какую версию поднимает контейнер, задают переменные:
+
+| Переменная | По умолчанию | Значение |
+|-----------|--------------|----------|
+| `RUN_V2` | `false` | `true` — `python -m v2 ${V2_COMMAND:-serve}`; иначе `python main.py` |
+| `V2_COMMAND` | `serve` | команда v2: `serve` / `bot` / `watch` / `scan` / `status` |
+| `PORT` | `8000` | порт HTTP; Railway задаёт сам |
+
+Локально то же самое: `docker compose up`, `RUN_V2=true docker compose up`,
+или без Docker — `python main.py v2 serve --data-mode demo`.
 
 ⚠️ **Файловая система Railway эфемерная**: при редеплое SQLite (`./data`) очищается.
 Настройки депозита и журнал позиций сбросятся. Чтобы этого избежать, подключи
@@ -369,6 +384,8 @@ python main.py scan             # разовый скан скрытых мон�
 python main.py watch            # только фоновое наблюдение
 python main.py api              # только веб-дашборд
 python main.py api --port 9000  # дашборд на другом порту
+python main.py v2 scan          # делегировать в v2 (то же, что python -m v2 scan)
+python main.py v2 analyze AURORA --data-mode demo
 ```
 
 ---
@@ -415,6 +432,9 @@ Swagger: `/docs`.
 | `WATCHLIST_SYMBOLS` | 10 majors | список наблюдения |
 | `WATCH_INTERVAL_SECONDS` | `600` | интервал наблюдения |
 | `SCAN_INTERVAL_SECONDS` | `1800` | интервал скана рынка |
+| `RUN_V2` | `false` | `true` — деплой поднимает v2 через `entrypoint.sh` |
+| `V2_COMMAND` | `serve` | команда v2 при `RUN_V2=true` (`serve` / `bot` / `watch` / `scan`) |
+| `PORT` | `8000` | порт HTTP (Railway инжектит сам; healthcheck — `${PORT:-8000}`) |
 
 ---
 
