@@ -19,6 +19,7 @@ Telegram-бот советника (aiogram 3) — управление кноп
 from __future__ import annotations
 
 import json
+import re
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
@@ -31,7 +32,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
 )
 
 from src.analysis.advisor import BEGINNER_GUIDE, EXCHANGES, MARKETS, TradeAdvisor
@@ -86,9 +89,20 @@ class Prefs:
 # ════════════════════════════════════════════════════════════════
 #  КЛАВИАТУРЫ
 # ════════════════════════════════════════════════════════════════
+ENGINE_V1 = "v1"
+ENGINE_V2 = "v2"
+ENGINE_BTN_V2 = "🆕 Движок: v2"
+ENGINE_BTN_V1 = "🧮 Движок: v1"
+DEFAULT_ENGINE = ENGINE_V1
+
+
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(text=ENGINE_BTN_V2, callback_data="engine:v2"),
+                InlineKeyboardButton(text=ENGINE_BTN_V1, callback_data="engine:v1"),
+            ],
             [
                 InlineKeyboardButton(text="📊 Наблюдение", callback_data="menu:watch"),
                 InlineKeyboardButton(text="🔎 Скан рынка", callback_data="menu:scan"),
@@ -107,6 +121,17 @@ def kb_main() -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton(text="🧭 Меню", callback_data="menu:home")],
         ]
+    )
+
+
+def kb_engine_reply() -> ReplyKeyboardMarkup:
+    """Постоянная reply-клавиатура с кнопками переключения движка."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=ENGINE_BTN_V2), KeyboardButton(text=ENGINE_BTN_V1)]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
     )
 
 
@@ -402,6 +427,7 @@ class TelegramAdvisorBot:
         self.dp: Dispatcher | None = None
         self.router = Router()
         self.running = False
+        self._v2_core = None
         if settings.TELEGRAM_BOT_TOKEN:
             self.bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, default_parse_mode=ParseMode.HTML)
             self.dp = Dispatcher()
@@ -433,6 +459,71 @@ class TelegramAdvisorBot:
 
     def _save_prefs(self, chat_id: int, prefs: Prefs) -> None:
         self._ctx().store.set_state(f"prefs:{chat_id}", json.dumps(prefs.to_dict()))
+
+    # ── движок v1/v2 ────────────────────────────────────────────
+    def _engine(self, chat_id: int) -> str:
+        """Движок для чата. По умолчанию v1 (не ломаем текущий CEX-UX)."""
+        raw = self._ctx().store.get_state(f"engine:{chat_id}", DEFAULT_ENGINE)
+        return raw if raw in (ENGINE_V1, ENGINE_V2) else DEFAULT_ENGINE
+
+    def _set_engine(self, chat_id: int, engine: str) -> bool:
+        engine = (engine or "").strip().lower()
+        if engine not in (ENGINE_V1, ENGINE_V2):
+            return False
+        self._ctx().store.set_state(f"engine:{chat_id}", engine)
+        return True
+
+    def _engine_text(self, chat_id: int) -> str:
+        engine = self._engine(chat_id)
+        if engine == ENGINE_V2:
+            return (
+                "🆕 Движок: <b>v2</b> (сканер, скам-фильтр, DEX/ончейн)\n\n"
+                "Пришли адрес токена (0x…/минт) или символ вроде AURORA, "
+                "или /signal|/analyze — я разберу."
+            )
+        return (
+            "🧮 Движок: <b>v1</b> (CEX-советник)\n\n"
+            "v1 понимает только биржевые символы вроде SOLUSDT. "
+            "DEX/ончейн-адреса работают только в v2."
+        )
+
+    async def _handle_v2_text(self, msg: Message | CallbackQuery, text: str) -> None:
+        """Свободный текст и /signal|/analyze в режиме v2 идут в AssistantCore."""
+        target = msg.message if isinstance(msg, CallbackQuery) else msg
+        chat_id = target.chat.id
+        try:
+            core = self._get_v2_core()
+            # синхронизируем выбор движка с UI-переключателем v1-бота
+            engine = self._engine(chat_id)
+            if engine in (ENGINE_V1, ENGINE_V2):
+                core.set_engine(chat_id, engine)
+            answer = await core.handle_message(text, chat_id=chat_id)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("v2 обработка не удалась")
+            answer = f"⚠️ Не удалось обработать в v2: {e}"
+        kb = kb_main()
+        await self._send_plain(target, answer, kb)
+
+    def _get_v2_core(self):
+        """Лениво поднимаем AssistantCore из v2.bot — только при выборе v2."""
+        if self._v2_core is None:
+            from v2.bot import AssistantCore
+            from v2.config import V2Config
+
+            s = self.settings
+            cfg = V2Config(
+                DATA_MODE=s.MARKET_DATA_MODE if s.MARKET_DATA_MODE in ("auto", "live", "demo") else "auto",
+                DEFAULT_DEPOSIT_USD=s.DEFAULT_DEPOSIT_USD,
+                RISK_PER_TRADE_PCT=s.RISK_PER_TRADE_PCT,
+                MAX_LEVERAGE=s.MAX_LEVERAGE,
+                MIN_RISK_REWARD=s.MIN_RISK_REWARD,
+                MAX_POSITION_PCT=s.MAX_POSITION_PCT,
+                LOG_LEVEL=s.LOG_LEVEL,
+                # один токен — один поллер: Telegram в v2-транспорте не стартуем
+                TELEGRAM_BOT_TOKEN="",
+            )
+            self._v2_core = AssistantCore(cfg)
+        return self._v2_core
 
     def _in_watch(self, symbol: str) -> bool:
         w = self._watcher()
@@ -523,6 +614,15 @@ class TelegramAdvisorBot:
                 safe = safe.replace("<code>", "").replace("</code>", "")
                 await target.answer(safe, reply_markup=kb)
 
+    async def _send_plain(self, msg: Message | CallbackQuery, text: str, kb: InlineKeyboardMarkup | None = None) -> None:
+        """Отправка без парсинга (v2-отчёты в Markdown, а не HTML)."""
+        target = msg.message if isinstance(msg, CallbackQuery) else msg
+        for chunk in _split(text):
+            try:
+                await target.answer(chunk, reply_markup=kb, parse_mode=None)
+            except TelegramBadRequest:
+                await target.answer(chunk, reply_markup=kb, parse_mode=None)
+
     # ────────────────────────────────────────────────────────────
     #  ХЕНДЛЕРЫ
     # ────────────────────────────────────────────────────────────
@@ -537,17 +637,56 @@ class TelegramAdvisorBot:
                 await ctx.ensure_ready()
             except Exception as e:  # noqa: BLE001
                 logger.warning("Источник данных не определён: %s", e)
+            engine = self._engine(msg.chat.id)
+            engine_label = "🆕 v2 (сканер, DEX/ончейн)" if engine == ENGINE_V2 else "🧮 v1 (CEX-советник)"
             text = (
                 f"🤖 <b>{self.settings.APP_NAME}</b> — профессиональный крипто-советник\n\n"
                 f"Я собираю данные с биржи (источник: <b>{ctx.mode.upper()}</b>), считаю 60+ индикаторов "
                 "на 5 таймфреймах, смотрю стакан, фандинг, ликвидации и новости — "
                 "и выдаю готовый план: куда входить, где стоп, где цели и сколько купить.\n\n"
+                "⚙️ <b>ПЕРЕКЛЮЧАТЕЛЬ ДВИЖКА</b>\n"
+                "Кнопки «🆕 Движок: v2» / «🧮 Движок: v1» переключают режим анализа для этого чата. "
+                f"Сейчас: {engine_label}. v2 понимает адреса токенов (0x…/минт) и символы, "
+                "v1 — только CEX-символы вроде SOLUSDT.\n\n"
                 "<b>Начни с кнопки «📊 Наблюдение»</b> — там список монет. "
                 "Нажми на монету, затем «🔬 Полный анализ» или «🎯 План входа».\n\n"
                 "⚙️ В настройках укажи свой депозит — тогда я посчитаю объём позиции в USDT и в монетах.\n\n"
                 "⚠️ Бот <b>не торгует</b> и не имеет доступа к твоему счёту. Это аналитика, не гарантия прибыли."
             )
+            # reply-клавиатура с переключателем держится внизу чата,
+            # inline-kb_main() — кнопки меню в самом сообщении
+            await msg.answer("Используй кнопки ниже или в меню.", reply_markup=kb_engine_reply())
             await msg.answer(text, reply_markup=kb_main())
+
+        # ── переключатель движка v1/v2 ──
+        @r.message(Command("engine"))
+        async def _engine_cmd(msg: Message, command: CommandObject) -> None:
+            arg = (command.args or "").strip().lower()
+            if arg in (ENGINE_V1, ENGINE_V2):
+                self._set_engine(msg.chat.id, arg)
+                await msg.answer(self._engine_text(msg.chat.id), reply_markup=kb_main())
+                return
+            await msg.answer(
+                f"⚙️ Сейчас движок: <b>{self._engine(msg.chat.id)}</b>. "
+                "Нажми «🆕 Движок: v2» или «🧮 Движок: v1», либо отправь /engine v1.",
+                reply_markup=kb_main(),
+            )
+
+        @r.callback_query(F.data.startswith("engine:"))
+        async def _engine_btn(call: CallbackQuery) -> None:
+            value = call.data.split(":", 1)[1]
+            chat_id = call.message.chat.id if call.message else 0
+            if not self._set_engine(chat_id, value):
+                await call.answer("Неизвестный движок")
+                return
+            await call.answer("Движок переключён")
+            await self._send(call, self._engine_text(chat_id), kb_main())
+
+        @r.message(F.text.in_([ENGINE_BTN_V2, ENGINE_BTN_V1]))
+        async def _engine_reply_btn(msg: Message) -> None:
+            value = ENGINE_V2 if msg.text == ENGINE_BTN_V2 else ENGINE_V1
+            self._set_engine(msg.chat.id, value)
+            await msg.answer(self._engine_text(msg.chat.id), reply_markup=kb_main())
 
         # ── команды для совместимости ──
         @r.message(Command("watch"))
@@ -564,6 +703,9 @@ class TelegramAdvisorBot:
 
         @r.message(Command("signal", "analyze"))
         async def _signal_cmd(msg: Message, command: CommandObject) -> None:
+            if self._engine(msg.chat.id) == ENGINE_V2:
+                await self._handle_v2_text(msg, command.args or "")
+                return
             sym = _norm_symbol(command.args)
             if not sym:
                 await msg.answer("Укажи монету: /signal SOL или /signal SOLUSDT")
@@ -877,6 +1019,27 @@ class TelegramAdvisorBot:
             await call.answer("Убрано из наблюдения")
             await self._send(call, f"🗑 <b>{sym}</b> убрана из наблюдения", kb_symbol(sym, False))
 
+        # ── свободный текст: в режиме v2 уходит в AssistantCore ──
+        @r.message()
+        async def _free_text(msg: Message) -> None:
+            engine = self._engine(msg.chat.id)
+            text = msg.text or ""
+            if engine == ENGINE_V2:
+                await self._handle_v2_text(msg, text)
+            elif _is_onchain_query(text):
+                # DEX/ончейн-адрес в режиме v1 — отказ, не переключаем движок сам
+                await msg.answer(
+                    "DEX/ончейн-анализ есть только в движке v2. "
+                    "Нажми «🆕 Движок: v2» или пришли биржевой символ вроде SOLUSDT.",
+                    reply_markup=kb_main(),
+                )
+            else:
+                symbol = _looks_like_symbol(text)
+                if symbol:
+                    # v1 понимает CEX-символы (SOLUSDT) и по свободному тексту
+                    await self._full_analysis(msg, symbol)
+                # прочий свободный текст в режиме v1 игнорируем, как и раньше
+
     # ────────────────────────────────────────────────────────────
     #  ДЕЙСТВИЯ
     # ────────────────────────────────────────────────────────────
@@ -1070,7 +1233,43 @@ class TelegramAdvisorBot:
             await self.dp.stop_polling()
         if self.bot:
             await self.bot.session.close()
+        if self._v2_core is not None:
+            try:
+                await self._v2_core.close()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("v2 core закрыт с ошибкой: %s", e)
+            self._v2_core = None
         self.running = False
+
+
+_ADDRESS_RE = re.compile(r"\b(0x[a-fA-F0-9]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})\b")
+_SYMBOL_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9]{0,14})(?:/?(?:USDT|USDC))?\s*$", re.IGNORECASE)
+
+
+def _looks_like_symbol(text: str | None) -> str:
+    """Достаёт CEX-тикер (SOL, SOLUSDT) из простого текста. Пусто, если не похоже."""
+    if not text:
+        return ""
+    m = _SYMBOL_RE.match(text)
+    if not m:
+        return ""
+    base = m.group(1).upper()
+    if len(base) < 2:  # одиночные буквы/цифры — не тикер
+        return ""
+    return f"{base}USDT" if not base.endswith(("USDT", "USDC")) else base
+
+
+def _is_onchain_query(text: str | None) -> bool:
+    """True, если текст — EVM-адрес 0x… или минт Solana, а не CEX-тикер."""
+    if not text:
+        return False
+    match = _ADDRESS_RE.search(text.strip())
+    if not match:
+        return False
+    candidate = match.group(1)
+    if candidate.startswith("0x"):
+        return True
+    return any(ch.isdigit() for ch in candidate)
 
 
 def _norm_symbol(raw: str | None) -> str:

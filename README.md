@@ -353,6 +353,12 @@ python main.py            # дашборд + сканер + наблюдение
 | `V2_COMMAND` | `serve` | команда v2: `serve` / `bot` / `watch` / `scan` / `status` |
 | `PORT` | `8000` | порт HTTP; Railway задаёт сам |
 
+`V2_COMMAND=serve` теперь поднимает **HTTP/дашборд и Telegram-кнопки
+«🆕 Движок: v2» / «🧮 Движок: v1» одновременно** (если задан `TELEGRAM_BOT_TOKEN`).
+Один токен — один поллер: `bot` остаётся отдельной командой без HTTP/healthcheck,
+а `serve` не запускает второй Telegram-процесс. Кнопки переключения движка есть и
+в v1-боте (`python main.py`), так что переключатель виден и без `RUN_V2=true`.
+
 Локально то же самое: `docker compose up`, `RUN_V2=true docker compose up`,
 или без Docker — `python main.py v2 serve --data-mode demo`.
 
@@ -433,7 +439,7 @@ Swagger: `/docs`.
 | `WATCH_INTERVAL_SECONDS` | `600` | интервал наблюдения |
 | `SCAN_INTERVAL_SECONDS` | `1800` | интервал скана рынка |
 | `RUN_V2` | `false` | `true` — деплой поднимает v2 через `entrypoint.sh` |
-| `V2_COMMAND` | `serve` | команда v2 при `RUN_V2=true` (`serve` / `bot` / `watch` / `scan`) |
+| `V2_COMMAND` | `serve` | команда v2 при `RUN_V2=true` (`serve` = HTTP + Telegram, `bot` = только Telegram) |
 | `PORT` | `8000` | порт HTTP (Railway инжектит сам; healthcheck — `${PORT:-8000}`) |
 
 ---

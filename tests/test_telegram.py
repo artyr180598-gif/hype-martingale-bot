@@ -83,6 +83,29 @@ def test_main_menu_has_backtest_entry():
     assert "menu:backtest" in data
 
 
+def test_main_menu_has_engine_switch():
+    """Первая строка kb_main() — кнопки переключения движка v1/v2."""
+    first_row = kb_main().inline_keyboard[0]
+    data = [btn.callback_data for btn in first_row]
+    texts = [btn.text for btn in first_row]
+    assert data == ["engine:v2", "engine:v1"]
+    assert "🆕 Движок: v2" in texts
+    assert "🧮 Движок: v1" in texts
+    # влезает в лимит callback_data 64 байта
+    for btn in first_row:
+        assert len(btn.callback_data) <= 64
+
+
+def test_kb_engine_reply_builds():
+    """Постоянная reply-клавиатура переключения движка собирается."""
+    from src.notify.telegram import ENGINE_BTN_V1, ENGINE_BTN_V2, kb_engine_reply
+
+    kb = kb_engine_reply()
+    assert kb.keyboard
+    row = kb.keyboard[0]
+    assert [btn.text for btn in row] == [ENGINE_BTN_V2, ENGINE_BTN_V1]
+
+
 def test_backtest_report_renders():
     """Отчёт собирается из метрик и содержит честные предупреждения."""
     from src.backtest.engine import BacktestConfig, BacktestResult
@@ -195,14 +218,15 @@ def test_bot_registers_all_handlers(tmp_path):
                      "_set_exchange", "_pick_exchange", "_set_market", "_pick_market",
                      "_symbol_menu", "_deep", "_plan", "_chart", "_spectrum_btn",
                      "_backtest_btn", "_backtest_menu",
-                     "_watch_add", "_watch_del"):
+                     "_watch_add", "_watch_del", "_engine_btn"):
         assert expected in cb_names, expected
 
     # команды и FSM-ввод настроек
     msg_names = {h.callback.__name__ for h in msg_handlers}
     for expected in ("_start", "_watch_cmd", "_scan_cmd", "_signal_cmd", "_chart_cmd",
                      "_positions", "_news", "_guide", "_add", "_del",
-                     "_get_deposit", "_get_risk", "_backtest_symbol"):
+                     "_get_deposit", "_get_risk", "_backtest_symbol",
+                     "_engine_cmd", "_engine_reply_btn", "_free_text"):
         assert expected in msg_names, expected
 
 
@@ -217,6 +241,52 @@ def test_bot_disabled_without_token(tmp_path):
     bot = TelegramAdvisorBot(s)
     assert bot.enabled is False
     assert bot.bot is None
+
+
+def _demo_bot(tmp_path):
+    from src.config.settings import Settings
+    from src.notify.telegram import TelegramAdvisorBot
+
+    s = Settings(
+        _env_file=None, MARKET_DATA_MODE="demo", DATA_DIR=tmp_path, DB_PATH=tmp_path / "t.db",
+        CHART_DIR=tmp_path / "charts", TELEGRAM_BOT_TOKEN="",
+    )
+    return TelegramAdvisorBot(s)
+
+
+def test_engine_defaults_and_switch(tmp_path):
+    """Движок по умолчанию v1, переключение сохраняется per-chat."""
+    from src.notify.telegram import ENGINE_V1, ENGINE_V2
+
+    bot = _demo_bot(tmp_path)
+    chat = 101
+    assert bot._engine(chat) == ENGINE_V1
+    assert bot._set_engine(chat, ENGINE_V2) is True
+    assert bot._engine(chat) == ENGINE_V2
+    assert bot._set_engine(chat, ENGINE_V1) is True
+    assert bot._engine(chat) == ENGINE_V1
+    # невалидное значение не меняет движок
+    assert bot._set_engine(chat, "zzz") is False
+    assert bot._engine(chat) == ENGINE_V1
+    # другой чат не затронут
+    assert bot._engine(202) == ENGINE_V1
+
+
+@pytest.mark.asyncio
+async def test_v2_core_is_lazy_and_handles_0x(tmp_path):
+    """AssistantCore поднимается лениво и в режиме v2 разбирает 0x-адрес."""
+    bot = _demo_bot(tmp_path)
+    chat = 303
+    assert bot._v2_core is None
+    core = bot._get_v2_core()
+    assert core is not None
+    assert bot._v2_core is core
+    answer = await core.handle_message(
+        "проанализируй 0x1f9840a85d5af5bf1d1762f925bdaddc4201f984", chat_id=chat
+    )
+    assert "🛡️ Безопасность" in answer or "Вердикт" in answer
+    await bot.stop()
+    assert bot._v2_core is None
 
 
 @pytest.mark.asyncio
