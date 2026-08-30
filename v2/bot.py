@@ -14,7 +14,8 @@
   «скан», «/scan»            → трёхуровневый скан рынка;
   «/status»                  → состояние бота, ошибки, метрики;
   «/buy AURORA»              → виртуальная сделка по уровням из отчёта;
-  «/help»                    → справка.
+  «/help»                    → справка;
+  «/engine»                  → какой движок выбран (v2 / v1) для этого чата.
 """
 
 from __future__ import annotations
@@ -60,8 +61,21 @@ HELP_TEXT = """🤖 **HYPE Advisor v2 — что я умею**
 
 🩺 `/status` — состояние бота: ошибки, провайдеры, метрики.
 
+🔄 `/engine` — какой движок сейчас выбран (v2 / v1).
+   Кнопки «🆕 Движок: v2» / «🧮 Движок: v1» переключают анализ для этого чата.
+
 ⚙️ Все фильтры настраиваются в .env (SCAN_L1_ENABLED, L2_MAX_TOP10_PCT, …).
 """
+
+ENGINE_V1 = "v1"
+ENGINE_V2 = "v2"
+DEFAULT_ENGINE = ENGINE_V2
+
+DEX_ONLY_IN_V2 = (
+    "DEX/ончейн-анализ есть только в движке v2. "
+    "v1 понимает исключительно CEX-символы вроде `SOLUSDT`.\n"
+    "Нажмите «🆕 Движок: v2» или пришлите биржевой тикер."
+)
 
 
 class AssistantCore:
@@ -77,14 +91,94 @@ class AssistantCore:
         self.executor = Executor(config, self.http)
         self.last_scan: ScanResult | None = None
         self.messages_handled = 0
+        # выбранный движок анализа: chat_id → "v1" | "v2" (по умолчанию v2)
+        self._engine_by_chat: dict[int | str, str] = {}
+        self._v1_engine = None
+        self._v1_source = None
 
     async def close(self) -> None:
         close = getattr(self.provider, "close", None)
         if close is not None:
             await close()
+        if self._v1_source is not None:
+            closer = getattr(self._v1_source, "close", None)
+            if closer is not None:
+                await closer()
+
+    def _chat_key(self, chat_id: int | str | None) -> int | str:
+        return 0 if chat_id is None else chat_id
+
+    def get_engine(self, chat_id: int | str | None = None) -> str:
+        """Текущий движок для чата. По умолчанию v2."""
+        return self._engine_by_chat.get(self._chat_key(chat_id), DEFAULT_ENGINE)
+
+    def set_engine(self, chat_id: int | str | None, engine: str) -> str:
+        """Сохранить выбор движка для чата и вернуть подтверждение."""
+        choice = (engine or "").strip().lower()
+        if choice not in (ENGINE_V1, ENGINE_V2):
+            return f"Неизвестный движок: `{engine}`. Доступно: v1, v2."
+        self._engine_by_chat[self._chat_key(chat_id)] = choice
+        if choice == ENGINE_V1:
+            return (
+                "🧮 Движок: **v1** (CEX-советник). Пришлите символ вроде `SOLUSDT`.\n"
+                "DEX/ончейн-адреса работают только в v2."
+            )
+        return "🆕 Движок: **v2** (сканер, скам-фильтр, ончейн)."
+
+    def engine_status_text(self, chat_id: int | str | None = None) -> str:
+        current = self.get_engine(chat_id)
+        label = "🆕 v2" if current == ENGINE_V2 else "🧮 v1"
+        return (
+            f"Сейчас выбран движок: **{current}** ({label}).\n"
+            "Кнопки: «🆕 Движок: v2» / «🧮 Движок: v1»."
+        )
+
+    async def handle_callback(self, callback_data: str, chat_id: int | str | None = None) -> str:
+        """Обработчик inline-кнопок. Тестируется без Telegram."""
+        data = (callback_data or "").strip()
+        if data.startswith("engine:"):
+            return self.set_engine(chat_id, data.split(":", 1)[1])
+        return f"Неизвестный callback: `{data}`"
+
+    async def _ensure_v1_engine(self):
+        """Лениво собирает v1 AnalysisEngine через build_source — только при выборе v1."""
+        if self._v1_engine is not None:
+            return self._v1_engine
+        from src.analysis.engine import AnalysisEngine as V1Engine
+        from src.config.settings import Settings
+        from src.data.collector import build_source
+
+        mode = self.config.DATA_MODE if self.config.DATA_MODE in ("auto", "live", "demo") else "demo"
+        settings = Settings(
+            _env_file=None,
+            MARKET_DATA_MODE=mode,
+            DEFAULT_DEPOSIT_USD=self.config.DEFAULT_DEPOSIT_USD,
+            RISK_PER_TRADE_PCT=self.config.RISK_PER_TRADE_PCT,
+            MAX_LEVERAGE=self.config.MAX_LEVERAGE,
+            MIN_RISK_REWARD=self.config.MIN_RISK_REWARD,
+            MAX_POSITION_PCT=self.config.MAX_POSITION_PCT,
+            TELEGRAM_BOT_TOKEN="",
+        )
+        source, _mode = build_source(settings)
+        self._v1_source = source
+        self._v1_engine = V1Engine(source, settings)
+        return self._v1_engine
+
+    async def analyze_v1_text(self, query: str) -> str:
+        """Отчёт v1-форматтером по CEX-символу (SOLUSDT)."""
+        engine = await self._ensure_v1_engine()
+        symbol = to_cex_symbol(query)
+        try:
+            result = await engine.analyze(symbol, refresh=True)
+        except Exception as exc:  # noqa: BLE001 — бот обязан ответить текстом
+            return (
+                f"⚠️ v1 не смог разобрать `{symbol}`: {exc}\n\n"
+                "v1 понимает только CEX-символы вроде `SOLUSDT`."
+            )
+        return format_v1_report(result)
 
     # ═══════════════════════════════════════════════════════════
-    async def handle_message(self, text: str) -> str:
+    async def handle_message(self, text: str, chat_id: int | str | None = None) -> str:
         """Точка входа для любого транспорта. Всегда возвращает текст."""
         self.messages_handled += 1
         raw = (text or "").strip()
@@ -97,12 +191,30 @@ class AssistantCore:
                 return HELP_TEXT
             if lowered in ("/status", "status", "статус", "состояние"):
                 return self.status_text()
+            if lowered.split()[0] in ("/engine", "engine", "движок"):
+                parts = raw.split()
+                if len(parts) >= 2 and parts[1].lower() in (ENGINE_V1, ENGINE_V2):
+                    return self.set_engine(chat_id, parts[1].lower())
+                return self.engine_status_text(chat_id)
             if lowered in ("/scan", "scan", "скан", "сканируй", "поиск монет", "ищи монеты"):
                 return await self.run_scan_text()
             if lowered.startswith("/buy"):
                 return await self.buy_text(raw[4:].strip())
             if lowered.startswith("/filters"):
                 return self.filters_text()
+
+            if self.get_engine(chat_id) == ENGINE_V1:
+                if is_onchain_query(raw):
+                    return DEX_ONLY_IN_V2
+                query = extract_query(raw)
+                if not query:
+                    return (
+                        "Не понял запрос. v1 понимает только CEX-символы вроде `SOLUSDT`.\n\n"
+                        "Примеры:\n• `SOLUSDT`\n• `проанализируй SOL`"
+                    )
+                if is_onchain_query(query):
+                    return DEX_ONLY_IN_V2
+                return await self.analyze_v1_text(query)
 
             query = extract_query(raw)
             if not query:
@@ -242,6 +354,67 @@ def extract_query(text: str) -> str:
     return best
 
 
+def is_onchain_query(text: str) -> bool:
+    """True, если запрос — EVM-адрес 0x… или mint Solana, а не CEX-тикер."""
+    if not text:
+        return False
+    match = ADDRESS_RE.search(text.strip())
+    if not match:
+        return False
+    candidate = match.group(1)
+    if candidate.startswith("0x"):
+        return True
+    return any(ch.isdigit() for ch in candidate)
+
+
+def to_cex_symbol(query: str) -> str:
+    """Нормализует запрос к CEX-паре (SOL → SOLUSDT)."""
+    symbol = (query or "").strip().upper().replace("/", "").replace("-", "")
+    if not symbol:
+        return ""
+    if symbol.endswith("USDT") or symbol.endswith("USDC"):
+        return symbol
+    return f"{symbol}USDT"
+
+
+def format_v1_report(result) -> str:
+    """Отчёт v1-форматтером (_short_card) без HTML-разметки Telegram."""
+    from src.notify.telegram import _short_card
+
+    html = _short_card(result)
+    text = (
+        html.replace("<b>", "**")
+        .replace("</b>", "**")
+        .replace("<i>", "_")
+        .replace("</i>", "_")
+        .replace("<code>", "`")
+        .replace("</code>", "`")
+        .replace("&amp;", "&")
+    )
+    return f"🧮 **Движок v1 (CEX)**\n\n{text}"
+
+
+def kb_engine(current: str = DEFAULT_ENGINE):
+    """Inline-клавиатура переключения движка — образец kb_main() из v1."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🆕 Движок: v2", callback_data="engine:v2"),
+                InlineKeyboardButton(text="🧮 Движок: v1", callback_data="engine:v1"),
+            ],
+        ]
+    )
+
+
+async def handle_engine_callback(
+    core: AssistantCore, callback_data: str, chat_id: int | str | None = None
+) -> str:
+    """Отдельный обработчик callback-кнопок движка. Тестируется без Telegram."""
+    return await core.handle_callback(callback_data, chat_id=chat_id)
+
+
 # ═══════════════════════════════════════════════════════════════
 #  TELEGRAM-ТРАНСПОРТ
 # ═══════════════════════════════════════════════════════════════
@@ -265,24 +438,40 @@ class TelegramTransport:
         if not self.enabled:
             logger.info("Telegram выключен (нет TELEGRAM_BOT_TOKEN)")
             return
-        from aiogram import Bot, Dispatcher
+        from aiogram import Bot, Dispatcher, F
         from aiogram.filters import CommandStart
-        from aiogram.types import Message
+        from aiogram.types import CallbackQuery, Message
 
         self._bot = Bot(token=self.config.TELEGRAM_BOT_TOKEN)
         self._dp = Dispatcher()
 
         @self._dp.message(CommandStart())
         async def _start(message: Message) -> None:  # pragma: no cover - транспорт
-            await message.answer(HELP_TEXT)
+            chat_id = message.chat.id
+            await message.answer(
+                HELP_TEXT,
+                reply_markup=kb_engine(self.core.get_engine(chat_id)),
+                disable_web_page_preview=True,
+            )
+
+        @self._dp.callback_query(F.data.startswith("engine:"))
+        async def _on_engine(call: CallbackQuery) -> None:  # pragma: no cover - транспорт
+            chat_id = call.message.chat.id if call.message else 0
+            answer = await handle_engine_callback(self.core, call.data or "", chat_id=chat_id)
+            await call.answer()
+            kb = kb_engine(self.core.get_engine(chat_id))
+            if call.message:
+                await call.message.answer(answer, reply_markup=kb, disable_web_page_preview=True)
 
         @self._dp.message()
         async def _on_message(message: Message) -> None:  # pragma: no cover - транспорт
             text = message.text or ""
-            answer = await self.core.handle_message(text)
+            chat_id = message.chat.id
+            answer = await self.core.handle_message(text, chat_id=chat_id)
+            kb = kb_engine(self.core.get_engine(chat_id))
             # Telegram ограничивает сообщение 4096 символами — режем по разделителям
             for chunk in _split(answer, 4000):
-                await message.answer(chunk, disable_web_page_preview=True)
+                await message.answer(chunk, disable_web_page_preview=True, reply_markup=kb)
 
         logger.info("Telegram-поллинг запущен")
         await self._dp.start_polling(self._bot)
