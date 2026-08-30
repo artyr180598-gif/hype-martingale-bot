@@ -1,5 +1,12 @@
 # HYPE Advisor — профессиональный крипто-советник (спот + фьючерсы)
 
+> ## 🆕 v2 — новая архитектура (каталог [`v2/`](v2/README.md))
+> Асинхронный ввод/вывод с WebSocket, **трёхуровневый сканер**
+> (объём за 5 минут → скам-фильтр по холдерам/LP/контракту → ончейн-профиль
+> деплоера), динамические стоп/цель от **ATR**, Markdown-отчёты с вердиктом и
+> пояснением каждой цифры. Запуск: `python -m v2 scan`, `python -m v2 analyze AURORA`.
+> Текущая версия ниже (`src/`, `main.py`) сохранена как есть и продолжает работать.
+
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-91%20passed-brightgreen.svg)]()
 [![Telegram](https://img.shields.io/badge/Telegram-кнопочный%20бот-2ca5e0.svg)]()

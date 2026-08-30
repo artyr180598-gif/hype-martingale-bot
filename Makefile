@@ -1,4 +1,5 @@
-.PHONY: help install test lint check format run run-api run-scan analyze spectrum plan backtest clean
+.PHONY: help install test lint check format run run-api run-scan analyze spectrum plan backtest clean \
+	v2-scan v2-analyze v2-watch v2-serve v2-bot v2-status v2-test v2-check
 
 help:
 	@echo "HYPE Advisor — аналитический крипто-советник"
@@ -14,13 +15,23 @@ help:
 	@echo "  make spectrum SYM=SOLUSDT - полный спектральный анализ"
 	@echo "  make plan SYM=SOLUSDT DEPOSIT=500 - карточка сделки для новичка"
 	@echo "  make backtest SYM=BTCUSDT DAYS=30 TF=1h - прогон советника по истории"
+	@echo ""
+	@echo "  ── v2 (новая архитектура: трёхуровневый сканер + скам-фильтр) ──"
+	@echo "  make v2-scan   - трёхуровневый скан рынка"
+	@echo "  make v2-analyze SYM=AURORA - полный разбор монеты"
+	@echo "  make v2-watch  - фоновый скан по расписанию"
+	@echo "  make v2-serve  - HTTP-API и дашборд (порт 8100)"
+	@echo "  make v2-bot    - Telegram-ассистент"
+	@echo "  make v2-status - активные фильтры и метрики"
+	@echo "  make v2-test   - тесты v2"
+	@echo "  make v2-check  - ruff + тесты v2"
 	@echo "  make clean       - очистить кэши"
 
 install:
 	pip install -r requirements.txt
 
 test:
-	pytest tests/ -q
+	pytest tests/ v2/tests -q
 
 lint:
 	ruff check .
@@ -52,3 +63,29 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type d -name ".pytest_cache" -exec rm -rf {} +
 	find . -type d -name ".ruff_cache" -exec rm -rf {} +
+
+# ── v2: новая архитектура (каталог v2/) ──────────────────────────
+v2-scan:
+	python -m v2 scan
+
+v2-analyze:
+	python -m v2 analyze $(or $(SYM),$(Q),AURORA) $(if $(DEPOSIT),--deposit $(DEPOSIT),)
+
+v2-watch:
+	python -m v2 watch
+
+v2-serve:
+	python -m v2 serve
+
+v2-bot:
+	python -m v2 bot
+
+v2-status:
+	python -m v2 status
+
+v2-test:
+	pytest v2/tests -q
+
+v2-check:
+	ruff check v2
+	pytest v2/tests -q
