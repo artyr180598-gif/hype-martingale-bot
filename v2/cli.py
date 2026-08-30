@@ -89,13 +89,21 @@ async def cmd_serve(core: AssistantCore, args) -> int:
     import uvicorn
 
     from v2.api import create_app
+    from v2.bot import TelegramTransport
 
     app = create_app(core.config, core)
     config = uvicorn.Server(
         uvicorn.Config(app, host=core.config.HOST, port=args.port or core.config.PORT, log_level="info")
     )
     _print(f"API запущен на http://{core.config.HOST}:{args.port or core.config.PORT}")
-    await config.serve()
+
+    transport = TelegramTransport(core.config, core)
+    if transport.enabled:
+        _print("Telegram-бот (v2) запущен рядом с HTTP — один токен, один поллер")
+        # HTTP живёт (healthcheck), Telegram-поллинг идёт параллельно
+        await asyncio.gather(config.serve(), transport.start())
+    else:
+        await config.serve()
     return 0
 
 

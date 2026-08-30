@@ -71,6 +71,9 @@ ENGINE_V1 = "v1"
 ENGINE_V2 = "v2"
 DEFAULT_ENGINE = ENGINE_V2
 
+ENGINE_BTN_V2 = "🆕 Движок: v2"
+ENGINE_BTN_V1 = "🧮 Движок: v1"
+
 DEX_ONLY_IN_V2 = (
     "DEX/ончейн-анализ есть только в движке v2. "
     "v1 понимает исключительно CEX-символы вроде `SOLUSDT`.\n"
@@ -191,6 +194,9 @@ class AssistantCore:
                 return HELP_TEXT
             if lowered in ("/status", "status", "статус", "состояние"):
                 return self.status_text()
+            # кнопки reply/инлайн-клавиатуры переключения движка
+            if raw in (ENGINE_BTN_V2, ENGINE_BTN_V1):
+                return self.set_engine(chat_id, ENGINE_V2 if raw == ENGINE_BTN_V2 else ENGINE_V1)
             if lowered.split()[0] in ("/engine", "engine", "движок"):
                 parts = raw.split()
                 if len(parts) >= 2 and parts[1].lower() in (ENGINE_V1, ENGINE_V2):
@@ -401,10 +407,23 @@ def kb_engine(current: str = DEFAULT_ENGINE):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🆕 Движок: v2", callback_data="engine:v2"),
-                InlineKeyboardButton(text="🧮 Движок: v1", callback_data="engine:v1"),
+                InlineKeyboardButton(text=ENGINE_BTN_V2, callback_data="engine:v2"),
+                InlineKeyboardButton(text=ENGINE_BTN_V1, callback_data="engine:v1"),
             ],
         ]
+    )
+
+
+def kb_engine_reply():
+    """Постоянная reply-клавиатура с кнопками переключения движка."""
+    from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=ENGINE_BTN_V2), KeyboardButton(text=ENGINE_BTN_V1)]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
     )
 
 
@@ -448,6 +467,12 @@ class TelegramTransport:
         @self._dp.message(CommandStart())
         async def _start(message: Message) -> None:  # pragma: no cover - транспорт
             chat_id = message.chat.id
+            # reply-клавиатура с переключателем держится внизу чата,
+            # inline-kb_engine() — кнопки в самом сообщении
+            await message.answer(
+                "Используй кнопки ниже или в меню.",
+                reply_markup=kb_engine_reply(),
+            )
             await message.answer(
                 HELP_TEXT,
                 reply_markup=kb_engine(self.core.get_engine(chat_id)),

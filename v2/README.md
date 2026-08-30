@@ -8,9 +8,14 @@ python -m v2 scan                     # трёхуровневый скан ры
 python -m v2 analyze 0x1f9840a85d…    # разбор монеты по адресу контракта
 python -m v2 analyze AURORA           # то же по символу
 python -m v2 watch                    # фоновый скан по расписанию
-python -m v2 serve                    # HTTP-API + мини-дашборд
-python -m v2 bot                      # Telegram-бот (нужен TELEGRAM_BOT_TOKEN)
+python -m v2 serve                    # HTTP-API + мини-дашборд + Telegram (если есть токен)
+python -m v2 bot                      # только Telegram-бот (нужен TELEGRAM_BOT_TOKEN)
 python -m v2 status                   # состояние, метрики, активные фильтры
+
+> **`serve` заодно поднимает Telegram.** Если задан `TELEGRAM_BOT_TOKEN`, команда
+> `serve` стартует HTTP/дашборд и Telegram-кнопки «🆕 Движок: v2» / «🧮 Движок: v1»
+> одновременно. Один токен — один поллер: `bot` остаётся отдельной командой без
+> HTTP, а `serve` не запускает второй Telegram-процесс.
 ```
 
 ---
