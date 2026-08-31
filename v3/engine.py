@@ -71,7 +71,7 @@ class FuturesSignalEngine:
         self._cache: dict[str, tuple[float, TradingSignal]] = {}
         self.reasoner = build_reasoner(self.cfg) if self.cfg.AI_ENABLED else None
 
-    async def analyze(self, symbol: str, refresh: bool = False) -> TradingSignal:
+    async def analyze(self, symbol: str, refresh: bool = False, deep: bool = True) -> TradingSignal:
         symbol = symbol.upper()
         key = f"{symbol}"
         if not refresh and key in self._cache:
@@ -80,12 +80,20 @@ class FuturesSignalEngine:
                 return cached
 
         started = time.time()
-        bundle = await self.data.build_bundle(symbol)
-        tf_map: dict[str, Any] = {}
+        bundle, fetches = await asyncio.gather(
+            self.data.build_bundle(symbol, deep=deep),
+            asyncio.gather(
+                *(self.data.klines(symbol, tf, self.cfg.ANALYSIS_BARS) for tf in self.cfg.timeframes),
+                return_exceptions=True,
+            ),
+        )
         now_ms = int(time.time() * 1000)
-        for tf in self.cfg.timeframes:
-            df = await self.data.klines(symbol, tf, self.cfg.ANALYSIS_BARS)
-            if len(df) >= min(40, self.cfg.MIN_BARS):
+        tf_map: dict[str, Any] = {}
+        for tf, df in zip(self.cfg.timeframes, fetches):
+            if isinstance(df, BaseException):
+                bundle.degraded.append(f"{tf}: fetch failed")
+                continue
+            if df is not None and len(df) >= min(40, self.cfg.MIN_BARS):
                 tf_map[tf] = df
                 # stale candle detection: the newest bar must start within the
                 # timeframe + max allowed age, otherwise the chart is stale.
@@ -110,13 +118,13 @@ class FuturesSignalEngine:
         metrics.record_analysis(symbol, signal.duration_sec)
         return signal
 
-    async def analyze_batch(self, symbols: list[str], concurrency: int = 6) -> list[TradingSignal]:
+    async def analyze_batch(self, symbols: list[str], concurrency: int = 6, deep: bool = True) -> list[TradingSignal]:
         sem = asyncio.Semaphore(max(1, concurrency))
 
         async def _one(sym: str) -> TradingSignal:
             async with sem:
                 try:
-                    return await self.analyze(sym, refresh=True)
+                    return await self.analyze(sym, refresh=True, deep=deep)
                 except Exception:  # noqa: BLE001
                     return TradingSignal(uid="", symbol=sym, ts_ms=0, direction="NO_TRADE", status="NO_TRADE", no_trade_reasons=["analysis failed"])
 
@@ -233,6 +241,11 @@ class FuturesSignalEngine:
         quality = score.total
         tier = tier_from_quality(quality, self.cfg) if direction in ("LONG", "SHORT") else "NONE"
 
+        data_age = bundle.data_age_seconds
+        stale = bool(
+            (data_age is not None and data_age > self.cfg.MAX_DATA_AGE_SECONDS)
+            or any("stale" in d for d in degraded)
+        )
         signal = TradingSignal(
             uid=signal_uid(bundle.symbol, bundle.ts_ms),
             symbol=bundle.symbol,
@@ -252,15 +265,17 @@ class FuturesSignalEngine:
             leverage=risk_brief.leverage,
             price=bundle.price,
             timeframe=self.cfg.ENTRY_TF,
-            horizon="1m-4h",
+            horizon=self.cfg.horizon,
             reasons=dedupe(reasons[:10]),
             risks=dedupe(risks[:8]),
             invalidation=levels.invalidation if levels is not None else "",
             no_trade_reasons=no_trade[:8],
-            features=features_dict(views, derivatives, orderflow, context, regime),
+            features=features_dict(views, derivatives, orderflow, context, regime, bundle.news_items),
             score_breakdown=score,
             risk_brief=risk_brief,
             is_demo=bundle.is_demo,
+            data_age_seconds=round(data_age, 1) if data_age is not None else None,
+            stale=stale,
             created_ms=time.time() * 1000,
             updated_ms=time.time() * 1000,
             duration_sec=round(time.time() - started, 2),
@@ -357,6 +372,7 @@ class FuturesSignalEngine:
         regime: RegimeSnapshot,
         started: float,
     ) -> TradingSignal:
+        age = bundle.data_age_seconds
         return TradingSignal(
             uid=signal_uid(bundle.symbol, bundle.ts_ms),
             symbol=bundle.symbol,
@@ -368,6 +384,8 @@ class FuturesSignalEngine:
             risks=degraded[:6],
             features={"degraded": degraded},
             is_demo=bundle.is_demo,
+            data_age_seconds=round(age, 1) if age is not None else None,
+            stale=any("stale" in d for d in degraded),
             duration_sec=round(time.time() - started, 2),
         )
 
@@ -439,14 +457,18 @@ def features_dict(
     orderflow,
     context: MarketContext,
     regime: RegimeSnapshot,
+    news: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "timeframes": [v.to_dict() for v in views],
         "derivatives": derivatives.to_dict(),
         "orderflow": orderflow.to_dict(),
         "context": context.to_dict(),
         "regime": regime.to_dict(),
     }
+    if news:
+        out["news"] = news
+    return out
 
 
 def dedupe(values: list[str]) -> list[str]:

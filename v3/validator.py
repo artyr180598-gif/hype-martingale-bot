@@ -36,6 +36,13 @@ def validate_signal(signal: TradingSignal, cfg: SignalConfig) -> list[str]:
         violations.append("entry zone invalid")
     if signal.is_demo:
         violations.append("demo data -- never publish as live")
+    if signal.stale:
+        violations.append("stale market data")
+    elif (
+        signal.data_age_seconds is not None
+        and signal.data_age_seconds > cfg.MAX_DATA_AGE_SECONDS
+    ):
+        violations.append(f"stale market data ({signal.data_age_seconds:.0f}s old)")
     return violations
 
 

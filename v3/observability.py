@@ -32,6 +32,7 @@ class HealthSnapshot:
     signals_saved: int = 0
     active_signals: int = 0
     outcomes: int = 0
+    auth_denials: int = 0
     latency_avg_ms: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,11 +51,16 @@ class RuntimeMetrics:
         self._last_error = ""
         self._mode = "unknown"
         self._data_ok = False
+        self._auth_denials = 0
 
     def mark_mode(self, mode: str, data_ok: bool) -> None:
         with self._lock:
             self._mode = mode
             self._data_ok = data_ok
+
+    def record_auth_denial(self) -> None:
+        with self._lock:
+            self._auth_denials += 1
 
     def record_analysis(self, symbol: str, duration_sec: float) -> None:
         with self._lock:
@@ -101,6 +107,7 @@ class RuntimeMetrics:
                 signals_saved=signals_saved,
                 active_signals=active_signals,
                 outcomes=outcomes,
+                auth_denials=self._auth_denials,
                 latency_avg_ms=round(avg_lat, 1),
             )
 

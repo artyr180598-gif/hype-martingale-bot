@@ -73,6 +73,8 @@ class Ticker:
     next_funding_ms: int | None = None
     open_interest: float | None = None
     open_interest_usd: float | None = None
+    mark_price: float | None = None
+    index_price: float | None = None
     ts_ms: int = 0
 
     @property

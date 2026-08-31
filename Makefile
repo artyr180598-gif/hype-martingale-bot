@@ -39,6 +39,9 @@ serve:
 scan:
 	python -m v3 scan --mode $(or $(MODE),beginner) --limit $(or $(LIMIT),250) --top $(or $(TOP),20)
 
+market:
+	python -m v3 market
+
 signal:
 	python -m v3 signal $(or $(SYM),BTCUSDT) --mode $(or $(MODE),beginner)
 

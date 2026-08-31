@@ -335,12 +335,24 @@ class DemoMarketSource:
                     funding_rate=funding,
                     open_interest=turnover * rng.uniform(0.25, 0.9) / max(close, 1e-9),
                     open_interest_usd=turnover * rng.uniform(0.25, 0.9),
+                    mark_price=round(close + spread / 2, 10),
+                    index_price=round(close, 10),
                     ts_ms=self._epoch,
                 )
             )
         return out
 
     # ── деривативы ──
+    async def get_account_ratio(self, symbol: str) -> float | None:
+        """Синтетический long-account ratio: тренд смещает баланс в длинные."""
+        symbol = symbol.upper()
+        tickers = await self.get_tickers([symbol])
+        if not tickers:
+            return None
+        t = tickers[0]
+        base = 0.5 + float(np.clip(t.price_24h_pct, -8, 8) / 100.0) * 1.6
+        return float(np.clip(base, 0.05, 0.95))
+
     async def get_funding(self, symbol: str, limit: int = 12) -> list[FundingEntry]:
         symbol = symbol.upper()
         if symbol not in UNIVERSE:

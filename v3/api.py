@@ -74,7 +74,7 @@ async def _lifespan(_app: FastAPI):
         await runtime.stop()
 
 
-app = FastAPI(title="HYPE v3 Futures Signal Intelligence", version="3.0.0", lifespan=_lifespan)
+app = FastAPI(title="HYPE v3 Futures Signal Intelligence", version="3.1.0", lifespan=_lifespan)
 
 
 @app.get("/health")
@@ -99,33 +99,76 @@ async def health() -> dict[str, Any]:
 
 @app.get("/api/v3/signal/{symbol}")
 async def signal(symbol: str, refresh: bool = True, _: None = Depends(require_api_token)) -> dict[str, Any]:
+    from v3.publisher import sanitize_for_publish
+
     sig = await runtime.engine.analyze(symbol.upper(), refresh=refresh)
+    sig, violations = sanitize_for_publish(sig, runtime.cfg)
+    if violations:
+        metrics.record_error("publish.blocked", f"{symbol}: {violations}")
     runtime.store.save_signal(sig)
     return sig.to_dict()
+
+
+@app.get("/api/v3/market")
+async def market() -> dict[str, Any]:
+    """Market-wide overview (BTC/ETH/global/movers) for "Мой рынок"."""
+    return await runtime.data.market_overview()
+
+
+@app.get("/api/v3/top")
+async def top(
+    direction: str = Query("", pattern="^(|LONG|SHORT)$"),
+    limit: int = Query(20, ge=1, le=50),
+    _: None = Depends(require_api_token),
+) -> dict[str, Any]:
+    """Setups from the last scan, filtered by direction and minimum quality."""
+    from v3.scanner import Scanner
+
+    tickers = await runtime.data.tickers()
+    scanner = Scanner(runtime.engine, runtime.cfg)
+    result = await scanner.run(tickers, limit=runtime.cfg.SCAN_LIMIT, top=runtime.cfg.SCAN_TOP)
+    for item in result.analyzed:
+        runtime.store.save_signal(item["signal"])
+    qmin = runtime.cfg.SCAN_SHOW_QUALITY_MIN
+    items = [
+        item["signal"].to_dict()
+        for item in scanner.best_setups(direction or None, quality_min=qmin)
+    ][:limit]
+    return {
+        "direction": direction or "ANY",
+        "quality_min": qmin,
+        "setups": items,
+        "ts_ms": now_ms(),
+    }
 
 
 @app.post("/api/v3/scan")
 async def scan(
     limit: int = Query(100, ge=1, le=500),
-    top: int = Query(10, ge=1, le=50),
+    top: int = Query(12, ge=1, le=50),
     _: None = Depends(require_api_token),
 ) -> dict[str, Any]:
+    from v3.publisher import sanitize_for_publish
     from v3.scanner import Scanner
 
     tickers = await runtime.data.tickers()
     scanner = Scanner(runtime.engine, runtime.cfg)
     result = await scanner.run(tickers, limit=limit, top=top)
     for item in result.analyzed:
-        runtime.store.save_signal(item["signal"])
+        sig, violations = sanitize_for_publish(item["signal"], runtime.cfg)
+        if violations:
+            metrics.record_error("publish.blocked", f"{item['signal'].symbol}: {violations}")
+        runtime.store.save_signal(sig)
     now = str(int(time.time() * 1000))
     runtime.store.set_state("last_scan_ms", now)
     runtime.store.set_state("v3_last_scan_ms", now)
     metrics.record_scan()
+    best = [item["signal"].to_dict() for item in scanner.best_setups()]
     return {
         **scanner.to_dict(),
         "mode": runtime.mode,
         "ts_ms": now_ms(),
-        "tradable": [item["signal"].to_dict() for item in result.analyzed if item["signal"].direction in ("LONG", "SHORT")][:top],
+        "tradable": best[:top],
     }
 
 
@@ -196,6 +239,16 @@ async def calibrate(
     syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     res = await calibrate(runtime.engine, syms, tf=tf, bars=bars, warmup=warmup, cfg=runtime.cfg)
     return res.to_dict()
+
+
+@app.get("/api/v3/glossary/{term}")
+async def glossary(term: str) -> dict[str, Any]:
+    from v3.tg.render import GLOSSARY
+
+    key = term.lower()
+    if key == "list":
+        return {"terms": sorted(GLOSSARY.keys() - {"list"})}
+    return {"term": key, "explanation": GLOSSARY.get(key, "unknown term")}
 
 
 @app.get("/api/v3/explain/{uid}")

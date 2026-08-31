@@ -10,9 +10,11 @@ trading are fully separated.
 ## Что входит в единый движок
 
 * automatic universe scan of USDT perpetuals (not a hard-coded watchlist);
-* explicit multi-timeframe pipeline (1m/5m/15m/1h/4h, configurable);
+* explicit two-stage pipeline: fast ticker scan → deep top-N (5m/15m/1h/4h/1d
+  by default, configurable `TIMEFRAMES`);
 * market-regime detection that changes interpretation of features;
-* derivatives analysis (funding, OI, liquidations) and order-flow/liquidity;
+* derivatives analysis (funding history, OI + 24h change, liquidations,
+  Bybit long/short account-ratio, mark/index) and order-flow/liquidity;
 * BTC/market context as a modifier (never a standalone trigger);
 * interpretable weighted scoring with stored breakdowns;
 * deterministic validation / `NO_TRADE` gate;
@@ -95,9 +97,11 @@ pip install -r requirements.txt
 
 # offline demo first
 MARKET_DATA_MODE=demo python -m v3 signal BTCUSDT
+MARKET_DATA_MODE=demo python -m v3 market
 MARKET_DATA_MODE=demo python -m v3 status
 
 # live/auto (public endpoints, no keys required)
+python -m v3 market
 python -m v3 scan
 python -m v3 signal SOLUSDT --mode pro
 python -m v3 signal SOLUSDT --mode beginner
@@ -229,7 +233,9 @@ monitoring stack later.
 
 ## Telegram
 
-Read-only v3 bot (never executes orders):
+Read-only v3 bot (never executes orders). The bot is **closed by default**:
+set `TELEGRAM_ALLOWED_USER_IDS` (comma-separated ids; fallback numeric
+`TELEGRAM_ADMIN_CHAT_ID`) — with an empty allow-list every user is rejected.
 
 ```bash
 python -m v3 bot            # needs TELEGRAM_BOT_TOKEN / TELEGRAM_TOKEN
@@ -237,9 +243,20 @@ python -m v3 watch          # background watch + scan + TP/SL outcome tracking
 python -m v3 watch BTCUSDT,ETHUSDT
 ```
 
-Commands: `/help`, `/status`, `/signal BTCUSDT`, `/signal BTCUSDT pro`,
-`/scan`, `/scan pro`, `/walkforward BTCUSDT [15m]`. Rendering lives in
-`v3/report.py` and `v3/telegram.py`.
+Interactive UI (inline keyboards, pagination, edit-in-place):
+
+* 🔎 СКАНИРОВАТЬ РЫНОК / 🧠 АНАЛИЗ РЫНКА — Stage1+Stage2 scan
+* 🔥 ЛУЧШИЕ LONG / 🔻 ЛУЧШИЕ SHORT / ⭐ ТОП ВОЗМОЖНОСТИ — filtered setups
+* 🔍 АНАЛИЗ МОНЕТЫ — coin picker + full card (`🔄 ОБНОВИТЬ`, `📈 PRO`)
+* 📊 МОЙ РЫНОК — market overview (BTC/ETH/global/F&G/movers)
+* ⚙️ НАСТРОЙКИ — per-user mode/deposit/risk (SQLite)
+* 📚 ПОМОЩЬ — glossary (RSI, ATR, ADX, BOS/CHoCH, funding, OI, R:R, ...)
+
+Commands still work: `/help`, `/status`, `/signal BTCUSDT`,
+`/signal BTCUSDT pro`, `/scan`, `/scan pro`, `/market`,
+`/walkforward BTCUSDT [15m]`. Rendering lives in `v3/report.py`,
+`v3/tg/render.py`; keyboards in `v3/tg/keyboards.py`; per-user settings in
+`v3/tg/settings.py`.
 
 ## API
 
@@ -267,6 +284,8 @@ Root `.env` and `v3/.env.example` are both read. Key variables:
   never commit `.env`.
 * The AI explanation layer (if added) must not modify market data or override
   the deterministic gate.
+* Telegram is closed (allow-list); every published signal passes
+  `v3.publisher.sanitize_for_publish` (Telegram/API/watcher).
 
 ## Limitations (honest)
 

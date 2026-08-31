@@ -1,71 +1,63 @@
-# HYPE Futures Signal Intelligence
+# HYPE — Crypto Market Intelligence & Trading Analysis Platform
 
-Единый production-движок для **USDT/USDC perpetual futures**: сканер вселенной,
-multi-timeframe анализ, regime detection, производные/funding/order-flow,
-детерминированный `LONG / SHORT / NO-TRADE` gate, explainable AI-слой,
-walk-forward валидация, lifecycle + SQLite, Telegram beginner/pro,
-observability и безопасный read-only API.
+Профессиональная аналитическая платформа для USDT/USDC perpetual futures с
+Telegram-интерфейсом. Не «бот с индикаторами», а система:
 
-> Бот **не торгует**. Это аналитический сигнальный слой; исполнение ордеров
-> полностью отделено и в этом движке не реализовано.
+```
+Market Data → Normalization → Scanner → Liquidity/Volume → Technical Analysis
+→ Market Structure → Derivatives → Volatility → Signal Engine → Risk Engine
+→ Confidence/Quality → AI Explanation → Telegram
+```
 
-## Что было объединено
+**Бот не торгует.** Это аналитический сигнальный слой: исполнение ордеров
+полностью отделено и здесь не реализовано. Все отчёты — статистическая оценка,
+а не гарантия результата.
 
-- **v1 (`src/`)** — сохранено как *общее ядро данных*: failover-источники
-  Bybit / Binance / MEXC, публичные тикеры/свечи/фандинг/стакан/новости,
-  демо-рынок, индикаторы и волновая структура. Всё остальное (старый
-  CEX-советник, API, дашборд, отдельный Telegram-бот, charts) удалено.
-- **v2 (`v2/`)** — старый DEX/микрокап-сканер удалён. Полезная идея
-  «трёхуровневый скан → junk-фильтр → глубокий анализ» перенесена в
-  `v3/scanner.py` для CEX-фьючерсов.
-- **v3 (`v3/`)** — единственный движок: `python -m v3 ...` и `python main.py ...`.
+---
 
 ## Возможности
 
-- **Автономный скан** USDT-perp без жёсткого watchlist: отсев мусора по
-  turnover/спреду, heat-ранжирование, глубокий анализ топ-N.
-- **Multi-timeframe** 1m/5m/15m/1h/4h (настраивается).
-- **Regime detection**, derivatives (funding, OI, liquidations), order flow,
-  BTC/global context.
-- **NO-TRADE — полноценная рекомендация**: движок объясняет, почему входить рано.
-- **AI explainability**: rule-based по умолчанию + опциональный OpenAI.
-  Слой **не может** изменить direction, entry/stop/targets, score или confidence.
-- **Stale-data gate**: ticker/свечи старше `MAX_DATA_AGE_SECONDS` → NO-TRADE.
-- **Walk-forward** с fees/slippage/funding и вердиктом стабильности.
-- **Калибровка порогов** on-sample (read-only отчёт).
-- **Signal lifecycle**: cooldown, max-active, TP1/TP2/TP3/SL исходы в SQLite.
-- **Telegram**: `/signal ... pro`, `/scan`, `/scan pro`, `/walkforward`, `/status`,
-  + уведомления watcher'а о сигналах и закрытиях.
-- **API**: `/health`, `/api/v3/*`, Swagger, опциональный `X-API-Token`.
-- **Observability**: latency, analyses, scans, errors в `/health` и `/status`.
+* 🔎 **Интерактивный Telegram UI**: главное меню, «Сканировать рынок»,
+  «Лучшие LONG/SHORT», «Топ возможности», «Анализ монеты», «Мой рынок»,
+  «Настройки», «Помощь»; пагинация, кнопки «Обновить», «PRO», «Назад»,
+  редактирование сообщений вместо спама.
+* 🔒 **Закрытый бот**: `TELEGRAM_ALLOWED_USER_IDS` (fallback — числовой
+  `TELEGRAM_ADMIN_CHAT_ID`); без allow-list доступ закрыт для всех.
+* 🧠 **Двухэтапный скан**: Stage 1 — быстрый отсев вселенной по
+  turnover/спреду/heat; Stage 2 — глубокий анализ топ-N с полным гейтом.
+* 📈 **Multi-timeframe**: `5m,15m,1h,4h,1d` (настраивается через `TIMEFRAMES`),
+  конфликт таймфреймов → `NO TRADE` с объяснением.
+* 🧪 **Индикаторы в контексте** (не «RSI<30 = BUY»): EMA/SMA, RSI, MACD, ATR,
+  ADX, Bollinger, Stochastic, VWAP, volume-z, OBV/CVD, squeeze, SuperTrend.
+* 🏗 **Market structure**: HH/HL/LH/LL, BOS/CHoCH (свинги + зигзаг),
+  поддержка/сопротивление, инвалидация по структуре.
+* 📉 **Derivatives**: funding (история/тренд), open interest (+ изменение за
+  24ч после накопления истории), ликвидации (прокси по крупным сделкам Bybit),
+  **Bybit Long/Short account-ratio** (публичный эндпоинт, 300s TTL) и
+  **mark/index** (из тикера, 0 доп. запросов); спред/глубина стакана,
+  imbalance, slippage-прокси.
+* 🧭 **Market regime + BTC/ETH контекст**: TRENDING_UP/DOWN, RANGING,
+  HIGH/LOW_VOLATILITY, BREAKOUT/BREAKDOWN, ACCUMULATION/DISTRIBUTION,
+  UNCERTAIN; контекст меняет интерпретацию, но не генерирует сигнал сам.
+* 🎯 **Entry plan**: entry zone (якорится на поддержку/VWAP), SL по ATR и
+  структуре, TP1/TP2/TP3, R:R, invalidation, risk brief (риск $, позиция,
+  плечо ≤ по волатильности, ликвидация).
+* ⛔ **NO TRADE — полноценная функция**: система не обязана выдавать сигнал.
+* 🕐 **Data freshness**: timestamp в каждом отчёте; устаревшие данные →
+  `⚠️ DATA STALE` и блокировка сигнала.
+* 📚 **Глоссарий**: кнопка «Что это?» объясняет RSI, ATR, ADX, BOS/CHoCH,
+  funding, OI, R:R, VWAP, regime простым языком.
+* ⚙️ **Настройки пользователя**: режим beginner/pro, депозит, риск на сделку
+  (хранятся в SQLite, ограничены безопасными границами).
+* 🧪 **Backtesting**: fees/slippage/funding, без look-ahead, метрики + разбивка
+  по направлению и market regime; walk-forward и read-only калибровка.
+* 🤖 **AI-слой только для объяснений**: rule-based по умолчанию, опциональный
+  OpenAI; не может изменить direction/levels/score.
+* ✅ **Надёжность**: TTL-кэши (tickers/klines/стакан/funding/ликвидции),
+  параллельный сбор bundle, ретраи с экспоненциальным backoff + `Retry-After`
+  на 429, failover Bybit → Binance → MEXC → demo, graceful degradation.
 
-## Архитектура
-
-```
-src/data/ (Bybit/Binance/MEXC failover + demo, indicators, models)
-src/analysis/waves.py (structure/volatility helpers)
-src/core/ + src/config/ (logging, time, errors, settings)
-        │
-        ▼
-v3.data.FuturesDataService   (validation, stale detection, normalisation)
-        │
-        ▼
-v3.analysis.*                (timeframes, regime, derivatives, orderflow, context, scoring, levels, risk)
-        │
-        ▼
-v3.engine.FuturesSignalEngine → deterministic NO-TRADE gate
-        │
-        ├── LONG / SHORT
-        └── WAIT / NO_TRADE
-        │
-        ▼
-v3.store + SignalLifecycle   (SQLite, cooldown, active book)
-        │
-        ▼
-v3.report / v3.telegram / v3.api / v3.cli
-```
-
-Подробности модулей: [`v3/README.md`](v3/README.md).
+---
 
 ## Быстрый старт
 
@@ -75,75 +67,93 @@ cd hype-martingale-bot
 
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env       # заполни TELEGRAM_BOT_TOKEN при необходимости
+cp .env.example .env         # заполните TELEGRAM_* при необходимости
+
+# офлайн-проверка (демо-рынок)
+MARKET_DATA_MODE=demo python -m v3 market
+MARKET_DATA_MODE=demo python -m v3 signal BTCUSDT
+
+# live/auto (публичные данные Bybit, ключи не нужны)
+python -m v3 signal SOLUSDT --mode pro
+python -m v3 scan --limit 250 --top 12
+python -m v3 market
 
 # полный движок: API + watcher + Telegram
-python -m v3 daemon
-
-# или по частям
-python -m v3 serve         # FastAPI
-python -m v3 watch         # lifecycle-наблюдатель
-python -m v3 bot           # Telegram-бот + watcher
+python -m v3 daemon            # (это и команда по умолчанию)
 ```
+
+> **Telegram-доступ**: задайте `TELEGRAM_BOT_TOKEN` и
+> `TELEGRAM_ALLOWED_USER_IDS=YOUR_TELEGRAM_USER_ID`. Узнать свой ID можно у
+> @userinfobot. Без allow-list бот отвечает «⛔ НЕТ ДОСТУПА» всем.
+
+## Telegram — что нажимать
+
+| Кнопка | Что делает |
+|---|---|
+| 🔎 СКАНИРОВАТЬ РЫНОК | Stage 1 скан вселенной → Stage 2 глубокий анализ |
+| 🔥 ЛУЧШИЕ LONG / 🔻 ЛУЧШИЕ SHORT | топ сетапы по направлению (quality-фильтр) |
+| ⭐ ТОП ВОЗМОЖНОСТИ | лучшие сетапы без фильтра направления |
+| 🔍 АНАЛИЗ МОНЕТЫ | выбор/ввод символа → полный отчёт |
+| 📊 МОЙ РЫНОК | BTC/ETH/глобальный/страх&жадность/гайнеры |
+| ⚙️ НАСТРОЙКИ | режим отчёта, депозит, риск на сделку |
+| 📚 ПОМОЩЬ | глоссарий «что это?» |
+
+После анализа: `🔄 ОБНОВИТЬ` (свежие данные), `📈 PRO` (полный разбор),
+«Назад», «Главная». Команды `/signal`, `/scan`, `/walkforward`, `/status`
+работают как раньше.
 
 ## CLI
 
 ```bash
-python -m v3 signal BTCUSDT                  # анализ/сигнал (beginner)
-python -m v3 signal BTCUSDT --mode pro       # полный факторный разбор
-python -m v3 scan --mode pro                 # скан вселенной USDT-perp
+python -m v3 signal BTCUSDT --mode pro     # полный анализ
+python -m v3 scan --mode pro               # скан вселенной
+python -m v3 market                        # обзор рынка
 python -m v3 backtest BTCUSDT --tf 15m --bars 2000
 python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
 python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000
-python -m v3 watch BTCUSDT,ETHUSDT
-python -m v3 daemon --port 8400              # API + watcher + Telegram (команда по умолчанию)
-python -m v3 status                          # сигналы + health
-python -m v3 pulse                           # самодиагностика оператора: режим данных,
-                                             #   токен/статус Telegram, ошибки поллинга,
-                                             #   последний цикл watcher, активные сигналы
-
-# то же через main.py
-python main.py status
+python -m v3 status | pulse                # health / самодиагностика
+python -m v3 daemon                        # API + watcher + Telegram
 ```
-
-> `python -m v3` без команды запускает `daemon` (процесс держится: API + watcher +
-> Telegram-поллинг). Если `TELEGRAM_BOT_TOKEN` не задан — в логе будет явно
-> `Telegram: выключен`, остальное продолжает работать.
 
 ## REST API (порт 8400)
 
 | Метод | Путь | Что возвращает |
-|-------|------|----------------|
-| GET | `/health` | режим, сигналы, health snapshot |
-| GET | `/api/v3/status` | счётчики, последний цикл, ошибки |
-| POST | `/api/v3/scan?limit=&top=` | авто-скан вселенной, `tradable` |
-| GET | `/api/v3/signal/{symbol}?refresh=true` | полный сигнал |
+|---|---|---|
+| GET | `/health` | health, режим, счётчики |
+| GET | `/api/v3/market` | market overview (BTC/ETH/global/movers) |
+| GET | `/api/v3/top?direction=LONG&limit=10` | топ сетапы из последнего скана |
+| POST | `/api/v3/scan` | авто-скан, `tradable` |
+| GET | `/api/v3/signal/{symbol}` | полный сигнал (валидируется перед сохранением) |
 | GET | `/api/v3/history/{symbol}` | история сигналов |
-| POST | `/api/v3/track` | `{SYMBOL: price}` → TP/SL события |
-| GET | `/api/v3/backtest/{symbol}?tf=&bars=&warmup=` | бэктест |
-| GET | `/api/v3/walk-forward/{symbol}?tf=&bars=&folds=...` | walk-forward |
-| GET | `/api/v3/calibrate?symbols=&tf=&bars=` | read-only калибровка |
-| GET | `/api/v3/explain/{uid}` | score breakdown для uid |
-| GET | `/api/v3/outcomes?symbol=` | lifecycle исходы |
+| POST | `/api/v3/track` | TP/SL lifecycle по ценам |
+| GET | `/api/v3/backtest/{symbol}` | бэктест |
+| GET | `/api/v3/walk-forward/{symbol}` | walk-forward |
+| GET | `/api/v3/calibrate` | read-only калибровка |
+| GET | `/api/v3/explain/{uid}` | score breakdown |
+| GET | `/api/v3/glossary/{term}` | объяснение термина |
+| GET | `/api/v3/outcomes` | исходы сигналов |
 
 Если задан `V3_API_TOKEN`, тяжёлые эндпоинты требуют заголовок `X-API-Token`.
 Swagger: `/docs`.
 
 ## Переменные окружения
 
-Ключевые (полный список — [`v3/.env.example`](v3/.env.example)):
+Полный список — [`v3/.env.example`](v3/.env.example). Ключевые:
 
 | Переменная | По умолчанию | Значение |
-|-----------|--------------|----------|
+|---|---|---|
 | `MARKET_DATA_MODE` | `auto` | `auto` / `live` / `demo` |
-| `PORT` | `8400` | порт HTTP |
-| `V3_COMMAND` | `daemon` | `daemon` / `serve` / `watch` / `bot` / `scan` / `signal` / `backtest` / `walkforward` / `calibrate` / `status` / `pulse` |
-| `V3_API_TOKEN` | *(пусто)* | если задан — `X-API-Token` обязателен для тяжёлых endpoint'ов |
-| `TELEGRAM_BOT_TOKEN` | *(пусто)* | Telegram-бот + уведомления |
-| `SCAN_MIN_TURNOVER_USD` | `20M` | минимальный turnover для входа во вселенную |
-| `MAX_DATA_AGE_SECONDS` | `90` | stale ticker/candles → NO-TRADE |
-| `BACKTEST_FUNDING_RATE` | `0.0002` | консервативный funding cost за 8h в бэктесте |
-| `OPENAI_API_KEY` | *(пусто)* | опциональный AI-аннотатор (fallback rule-based) |
+| `TELEGRAM_BOT_TOKEN` | пусто | токен бота (алиас `TELEGRAM_TOKEN`) |
+| `TELEGRAM_ALLOWED_USER_IDS` | пусто | user ids через запятую — **доступ бота закрыт без него** |
+| `TELEGRAM_ADMIN_CHAT_ID` | пусто | уведомления (numeric — fallback allow-list) |
+| `TIMEFRAMES` | `5m,15m,1h,4h,1d` | порядок быстрый → медленный |
+| `SCAN_TOP` | `20` | сколько кандидатов анализировать глубоко (Stage 2) |
+| `SCAN_SHOW_QUALITY_MIN` | `72` | порог показа в «ТОП» |
+| `MAX_DATA_AGE_SECONDS` | `120` | stale → NO TRADE |
+| `QUALITY_MIN` | `55` | минимальный quality для сигнала |
+| `MIN_RISK_REWARD` | `1.8` | минимальный R:R |
+| `V3_API_TOKEN` | пусто | защита тяжёлых endpoint'ов |
+| `OPENAI_API_KEY` | пусто | опциональный AI-аннотатор |
 
 ## Тесты
 
@@ -152,19 +162,34 @@ make check   # ruff + pytest
 make test    # pytest
 ```
 
-**24 теста** покрывают анализаторы, scanner, walk-forward, AI reasoning,
-stale-data gate, lifecycle, backtest-метрики, калибровку, Telegram-core,
-API token guard, отчёты с явным дисклеймером.
+**46 тестов**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
+gate, lifecycle, backtest-метрики (+ разбивка regime/direction), калибровка,
+Telegram core/авторизация/callback'и/настройки, TTL-кэш, 429 retry,
+структурный entry zone, publisher/stale validation, config validation,
+Bybit account-ratio endpoint (+ 300s TTL).
+
+## Развёртывание (Railway / Docker)
+
+* Startup: `python -m v3 daemon` (или `V3_COMMAND=daemon` через
+  [`entrypoint.sh`](entrypoint.sh)); порт — из `PORT` (Railway инжектит сам).
+* Healthcheck: `GET /health` (есть в [`Dockerfile`](Dockerfile)).
+* Данные SQLite — в `DATA_DIR` (по умолчанию `./data`); для multi-replica
+  используйте volume.
+* Один процесс: API + watcher + Telegram; SIGTERM → graceful shutdown.
+* При старте выполняется `validate_config` — ошибки конфигурации логируются,
+  процесс не падает от отсутствия опциональных секретов.
 
 ## Безопасность
 
-- v3 не может выставить ордер.
-- Ключи только из env / `.env`, не в Git.
-- AI-слой не может изменить данные/направление/уровни/скор.
-- stale data ужесточается до NO-TRADE.
-- см. [`SECURITY.md`](SECURITY.md).
+* Read-only: в проекте нет пути исполнения ордеров.
+* Секреты только из env/`.env`; `.env`, `data/`, `*.log` в `.gitignore`.
+* Telegram закрыт allow-list; API закрыт `V3_API_TOKEN` (по желанию).
+* AI-слой не может изменить direction/levels/score — гейт всегда первичен.
+* `v3/validator.py` подключён на всех путях публикации (Telegram, API, watcher).
+* См. [`SECURITY.md`](SECURITY.md) и [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Дисклеймер
 
 Любой анализ/сигнал — **статистическая оценка, а не гарантия результата**.
-Все отчёты несут явный дисклеймер. Криптофьючерсы высокорискованны.
+Signal Quality ≈ качество сетапа, **не вероятность прибыли**. Криптофьючерсы
+высокорискованны; не используйте плечо, которое не можете позволить потерять.

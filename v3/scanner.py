@@ -132,6 +132,30 @@ class Scanner:
         self.last = result
         return result
 
+    # ── result views used by the Telegram UI / API ────────────────
+    def best_setups(self, direction: str | None = None, quality_min: float | None = None) -> list[dict[str, Any]]:
+        """Deep-analysed setups sorted by quality, optional direction filter.
+
+        ``direction`` is LONG | SHORT | None (any). ``quality_min`` defaults to
+        ``SCAN_SHOW_QUALITY_MIN`` -- weak setups stay visible in the raw scan
+        but are not presented as "top opportunities".
+        """
+        if self.last is None:
+            return []
+        qmin = self.cfg.SCAN_SHOW_QUALITY_MIN if quality_min is None else quality_min
+        items: list[dict[str, Any]] = []
+        for item in self.last.analyzed:
+            sig = item["signal"]
+            if direction and sig.direction != direction:
+                continue
+            if sig.direction not in ("LONG", "SHORT"):
+                continue
+            if sig.quality < qmin:
+                continue
+            items.append(item)
+        items.sort(key=lambda item: item["signal"].quality, reverse=True)
+        return items
+
     def heatmap(self, limit: int = 20) -> list[dict[str, Any]]:
         if self.last is None:
             return []
