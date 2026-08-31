@@ -31,6 +31,7 @@ class SignalConfig(BaseSettings):
     APP_VERSION: str = "3.0.0"
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool = False
+    V3_API_TOKEN: str = ""
 
     # ── Exchange / data mode (reuses v1 settings aliases) ────────
     MARKET_DATA_MODE: Literal["auto", "live", "demo"] = "auto"

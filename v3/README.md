@@ -75,6 +75,7 @@ Market Data (v1 Bybit/Binance/MEXC failover + demo)
 | `v3/engine.py` | orchestration + deterministic gate (live/backtest parity). |
 | `v3/scanner.py` | universe ranking (turnover/heat/spread/funding) + deep analysis. |
 | `v3/walkforward.py` | train/test folds, stability verdict (STABLE/MIXED/UNSTABLE). |
+| `v3/calibrate.py` | read-only threshold calibration on a live/backtest sample (never edits config). |
 | `v3/ai.py` | rule-based explanation layer + optional OpenAI annotator (never changes direction/levels/score). |
 | `v3/observability.py` | thread-safe runtime metrics + `/health` snapshot. |
 | `v3/validator.py` | pre-publish validation of a `TradingSignal`. |
@@ -101,9 +102,10 @@ python -m v3 scan
 python -m v3 signal SOLUSDT --mode pro
 python -m v3 signal SOLUSDT --mode beginner
 
-# backtest + walk-forward
+# backtest + walk-forward + calibration report
 python -m v3 backtest BTCUSDT --tf 15m --bars 2000 --warmup 120
 python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
+python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000
 
 # passive lifecycle observer / telegram
 python -m v3 watch BTCUSDT,ETHUSDT
@@ -190,6 +192,14 @@ same `run_backtest` on every fold. It then reports aggregate metrics plus
 `STABLE` / `MIXED` / `UNSTABLE` from consistency of per-fold expectancy.
 A single lucky fold is not trusted.
 
+## Calibration (`v3/calibrate.py`)
+
+`python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT` runs the same `run_backtest`
+across a sample and reports win-rate, expectancy R, max consecutive losses,
+average quality/confidence/R:R and tier distribution per symbol. It then prints
+**suggestions only** — it never writes `SignalConfig`, and the whole report must
+be revalidated with walk-forward before any threshold is changed.
+
 ## AI layer (`v3/ai.py`)
 
 * `RuleBasedReasoner` is deterministic and free; it explains the setup from the
@@ -240,7 +250,8 @@ Root `.env` and `v3/.env.example` are both read. Key variables:
 `MARKET_DATA_MODE`, `TIMEFRAMES`, `ENTRY_TF`, `ANALYSIS_BARS`,
 `SCAN_MIN_TURNOVER_USD`, `SCAN_MIN_VOLUME_USD`, `SCAN_TOP`, `SCAN_LIMIT`,
 `WATCHLIST_SYMBOLS`, `MAX_DATA_AGE_SECONDS`, `AI_ENABLED`, `OPENAI_API_KEY`,
-`OPENAI_MODEL`, `OPENAI_TIMEOUT_SECONDS`, `QUALITY_MIN`, `CONFIDENCE_MIN`,
+`OPENAI_MODEL`, `OPENAI_TIMEOUT_SECONDS`, `V3_API_TOKEN`, `QUALITY_MIN`,
+`CONFIDENCE_MIN`,
 `MIN_RISK_REWARD`, `MAX_RISK_SCORE_TO_ENTER`, `ATR_SL_MULTIPLIER`,
 `ATR_TP_MULTIPLIER`, `RISK_PER_TRADE_PCT`, `MAX_POSITION_PCT`,
 `MAX_LEVERAGE`, `COOLDOWN_SECONDS`, `S/A/B/C_TIER_MIN`.

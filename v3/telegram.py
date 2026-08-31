@@ -201,6 +201,16 @@ class V3TelegramTransport:
         if self._bot is not None:
             await self._bot.session.close()
 
+    async def notify_text(self, text: str) -> None:
+        """Send an event to the configured admin chat (no-op if the bot is not running)."""
+        if not self.enabled or self._bot is None:
+            return
+        chat_id = self.cfg.TELEGRAM_ADMIN_CHAT_ID
+        if not chat_id:
+            return
+        for chunk in _split(text, 4000):
+            await self._bot.send_message(chat_id, chunk, disable_web_page_preview=True)
+
 
 def _medium_from(tf: str) -> str:
     return {"1m": "15m", "5m": "15m", "15m": "1h", "30m": "2h", "1h": "4h", "4h": "1d"}.get(tf, "1h")

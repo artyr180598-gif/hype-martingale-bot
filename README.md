@@ -17,6 +17,7 @@
 > python -m v3 scan                      # скан вселенной фьючерсов
 > python -m v3 backtest BTCUSDT --tf 15m # бэктест с realistic execution
 > python -m v3 walkforward BTCUSDT       # walk-forward стабильность
+> python -m v3 calibrate BTCUSDT,ETHUSDT # read-only калибровка порогов
 > python -m v3 watch                     # фоновый lifecycle-наблюдатель
 > python -m v3 bot                       # Telegram (beginner/pro + /walkforward)
 > python -m v3 serve                     # FastAPI: /health, /api/v3/...
@@ -36,7 +37,7 @@
 > Текущая версия ниже (`src/`, `main.py`) сохранена как есть и продолжает работать.
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-302%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-303%20passed-brightgreen.svg)]()
 [![Telegram](https://img.shields.io/badge/Telegram-кнопочный%20бот-2ca5e0.svg)]()
 
 **Бот НЕ торгует.** Он не имеет доступа к твоему счёту и не выставляет ордера.
@@ -445,6 +446,7 @@ python -m v3 signal BTCUSDT --mode pro      # полный факторный р
 python -m v3 scan --mode pro                # скан вселенной USDT-perp
 python -m v3 backtest BTCUSDT --tf 15m --bars 2000
 python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
+python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000  # read-only калибровка
 python -m v3 watch BTCUSDT,ETHUSDT   # фоновый наблюдатель
 python -m v3 bot                            # Telegram-бот v3
 python -m v3 serve --port 8400              # FastAPI v3
@@ -485,6 +487,7 @@ Swagger: `/docs`.
 | POST | `/api/v3/track` | `{XY: price}` → lifecycle-события (TP/SL) |
 | GET | `/api/v3/backtest/{symbol}?tf=&bars=&warmup=` | бэктест с честными метриками |
 | GET | `/api/v3/walk-forward/{symbol}?tf=&bars=&folds=&train=&test=&step=&warmup=` | walk-forward стабильность |
+| GET | `/api/v3/calibrate?symbols=BTCUSDT,ETHUSDT&tf=&bars=&warmup=` | read-only калибровка порогов на backtest-выборке |
 | GET | `/api/v3/explain/{uid}` | score breakdown/risk/no-trade для конкретного uid |
 | GET | `/api/v3/outcomes?symbol=` | lifecycle-исходы |
 
@@ -527,6 +530,9 @@ v3-специфичные (полный список — [`v3/.env.example`](v3/
 | `OPENAI_API_KEY` | *(пусто)* | при заполнении — опциональный LLM-обогатитель текста; слой всё равно не меняет direction/levels/score |
 | `OPENAI_MODEL` | `gpt-4o-mini` | модель AI-аннотатора |
 | `OPENAI_TIMEOUT_SECONDS` | `20` | таймаут AI-вызова; при сбое — fallback на rule-based |
+| `V3_API_TOKEN` | *(пусто)* | если задан, тяжёлые `/api/v3/*` требуют заголовок `X-API-Token` |
+| `SCAN_MIN_TURNOVER_USD` | `20M` | минимальный 24h turnover для входа во вселенную |
+| `SCAN_MIN_VOLUME_USD` | `5M` | минимальный 24h объём, используемый как флаг `volume_ok` |
 
 ---
 
@@ -559,7 +565,7 @@ make check      # ruff + pytest
 make test       # только тесты
 ```
 
-**302 теста** (v1 + v2 + v3) покрывают: индикаторы, демо-источник, движок
+**303 теста** (v1 + v2 + v3) покрывают: индикаторы, демо-источник, движок
 анализа, волны, скоринг, сканер, наблюдение, хранилище, **спектральный анализ**,
 **риск-движок и карточку сделки**, **Telegram-клавиатуры и хендлеры**,
 настройки и REST API. В `v3/tests` отдельно проверены: `Scanner` (ранжирование

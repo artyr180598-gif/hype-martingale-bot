@@ -21,6 +21,7 @@ fully separated and defaults to paper).
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | env / `.env` (not committed) | optional |
 | `OPENAI_API_KEY` | env / `.env` (not committed) | optional (rule-based fallback) |
+| `V3_API_TOKEN` | env / `.env` (not committed) | optional (recommended if the API is public) |
 | `BYBIT_API_KEY/SECRET`, `BINANCE...`, `MEXC...` | env / `.env` (not committed) | optional |
 
 ## Input validation

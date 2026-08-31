@@ -16,7 +16,7 @@ import asyncio
 import time
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 
 from src.core.timeutil import now_ms
 from v3.backtest import run_backtest
@@ -58,6 +58,13 @@ app = FastAPI(title="HYPE v3 Futures Signal Intelligence", version="3.0.0")
 runtime = V3Runtime()
 
 
+def require_api_token(x_api_token: str = Header(default="")) -> None:
+    """Guard heavy/mutating endpoints when V3_API_TOKEN is set (local default: off)."""
+    token = runtime.cfg.V3_API_TOKEN
+    if token and x_api_token != token:
+        raise HTTPException(status_code=401, detail="invalid or missing X-API-Token")
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     await runtime.start()
@@ -89,14 +96,18 @@ async def health() -> dict[str, Any]:
 
 
 @app.get("/api/v3/signal/{symbol}")
-async def signal(symbol: str, refresh: bool = True) -> dict[str, Any]:
+async def signal(symbol: str, refresh: bool = True, _: None = Depends(require_api_token)) -> dict[str, Any]:
     sig = await runtime.engine.analyze(symbol.upper(), refresh=refresh)
     runtime.store.save_signal(sig)
     return sig.to_dict()
 
 
 @app.post("/api/v3/scan")
-async def scan(limit: int = Query(100, ge=1, le=500), top: int = Query(10, ge=1, le=50)) -> dict[str, Any]:
+async def scan(
+    limit: int = Query(100, ge=1, le=500),
+    top: int = Query(10, ge=1, le=50),
+    _: None = Depends(require_api_token),
+) -> dict[str, Any]:
     from v3.scanner import Scanner
 
     tickers = await runtime.data.tickers()
@@ -122,6 +133,7 @@ async def backtest(
     tf: str = Query("15m"),
     bars: int = Query(1000, ge=300, le=5000),
     warmup: int = Query(120, ge=50, le=500),
+    _: None = Depends(require_api_token),
 ) -> dict[str, Any]:
     history = await runtime.data.history(symbol.upper(), tf, bars)
     res = run_backtest(
@@ -136,7 +148,7 @@ async def backtest(
 
 
 @app.get("/api/v3/history/{symbol}")
-async def history(symbol: str, limit: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
+async def history(symbol: str, limit: int = Query(50, ge=1, le=500), _: None = Depends(require_api_token)) -> dict[str, Any]:
     return {"symbol": symbol.upper(), "signals": runtime.store.recent_signals(symbol, limit)}
 
 
@@ -163,10 +175,25 @@ async def status() -> dict[str, Any]:
 
 
 @app.post("/api/v3/track")
-async def track(prices: dict[str, float]) -> dict[str, Any]:
+async def track(prices: dict[str, float], _: None = Depends(require_api_token)) -> dict[str, Any]:
     """Provide a price map {SYMBOL: price}; returns TP/SL lifecycle events."""
     events = runtime.lifecycle.track_prices(prices)
     return {"events": events}
+
+
+@app.get("/api/v3/calibrate")
+async def calibrate(
+    symbols: str = Query("BTCUSDT,ETHUSDT"),
+    tf: str = Query("15m"),
+    bars: int = Query(2000, ge=300, le=10000),
+    warmup: int = Query(120, ge=50, le=500),
+    _: None = Depends(require_api_token),
+) -> dict[str, Any]:
+    from v3.calibrate import calibrate
+
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    res = await calibrate(runtime.engine, syms, tf=tf, bars=bars, warmup=warmup, cfg=runtime.cfg)
+    return res.to_dict()
 
 
 @app.get("/api/v3/explain/{uid}")
@@ -205,6 +232,7 @@ async def walk_forward(
     test: int = Query(300, ge=50, le=5000),
     step: int = Query(300, ge=50, le=5000),
     warmup: int = Query(120, ge=50, le=500),
+    _: None = Depends(require_api_token),
 ) -> dict[str, Any]:
     from v3.walkforward import WalkForwardConfig, walk_forward
 

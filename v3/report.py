@@ -130,4 +130,5 @@ def render_no_trade(signal: TradingSignal, pro: bool = False) -> str:
         for r in signal.reasons[:5]:
             lines.append(f"  • {r}")
     lines.extend(["", "✅ Сейчас лучше не входить. Ждём подтверждённый сетап."])
+    lines.append("❗ Это аналитический сигнал, а не гарантия результата.")
     return "\n".join(lines)

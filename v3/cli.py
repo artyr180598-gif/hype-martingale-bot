@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import time
+from typing import Any
 
 from v3.backtest import run_backtest as run_v3_backtest
 from v3.config import SignalConfig
@@ -42,6 +43,7 @@ async def run_signal(symbol: str, mode: str = "beginner", deposit: float | None 
 
 
 async def run_scan(limit: int | None = None, top: int | None = None, mode: str = "beginner") -> int:
+    """Scan the USDT-perp universe and print the ranked/deep analysis."""
     from v3.scanner import Scanner
 
     data, engine = _engine()
@@ -117,6 +119,7 @@ def run_serve(host: str = "0.0.0.0", port: int = 8400) -> int:
 
 async def run_bot() -> int:
     from v3.telegram import V3Core, V3TelegramTransport
+    from v3.watcher import V3Watcher
 
     data, engine = _engine()
     store = SignalStore(_cfg.db_path)
@@ -126,9 +129,43 @@ async def run_bot() -> int:
     if not transport.enabled:
         print("Telegram выключен: задайте TELEGRAM_BOT_TOKEN / TELEGRAM_TOKEN")
         return 2
+    watcher = V3Watcher(data, engine, store, lifecycle, _cfg)
     await data.probe()
-    await transport.start()
+
+    async def notify(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            text = _event_alert(item)
+            if text:
+                await transport.notify_text(text)
+
+    await watcher.start(notify=notify, interval=_cfg.SCAN_INTERVAL_SECONDS)
+    polling = asyncio.create_task(transport.start(), name="v3.telegram")
+    try:
+        await asyncio.Event().wait()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        await watcher.stop()
+        await transport.stop()
+        polling.cancel()
     return 0
+
+
+def _event_alert(item: dict[str, Any]) -> str:
+    """Compact Telegram alert for a signal or outcome event."""
+    if item.get("symbol") and item.get("direction") in ("LONG", "SHORT"):
+        return (
+            f"🟢 {item['symbol']} {item['direction']} "
+            f"q={item.get('quality', 0):.1f} tier={item.get('tier', '')}\n"
+            f"Entry {item.get('entry_zone', (0, 0))[0]:.8g}–{item.get('entry_zone', (0, 0))[1]:.8g}\n"
+            f"SL {item.get('stop_loss', 0):.8g} | R:R 1:{item.get('rr', 0):.2f}\n"
+            "❗ Аналитика, не гарантия результата."
+        )
+    if item.get("event"):
+        return (
+            f"📊 {item.get('symbol', '')} {item.get('event')} "
+            f"{item.get('outcome', '')} r={item.get('r_multiple', 0):+.2f}\n"
+            "❗ Аналитика, не гарантия результата."
+        )
+    return ""
 
 
 async def run_watch(symbols: list[str] | None = None, interval: int | None = None) -> int:
@@ -173,6 +210,32 @@ async def run_status() -> int:
         store.close()
 
 
+async def run_calibrate(symbols: list[str], tf: str = "15m", bars: int = 2000, warmup: int = 120) -> int:
+    from v3.calibrate import calibrate
+
+    data, engine = _engine()
+    try:
+        await data.probe()
+        print(f"Калибровка порогов на выборке: {', '.join(symbols)} @ {tf}, {bars} бар…")
+        res = await calibrate(engine, symbols, tf=tf, bars=bars, warmup=warmup, cfg=_cfg)
+        print(f"Режим: {res.mode} | символов: {len(res.rows)} | за {res.duration_sec:.1f}с")
+        for r in res.rows:
+            if r.error:
+                print(f"  ⚠ {r.symbol}: {r.error}")
+            else:
+                print(f"  {r.symbol:<12} сигн {r.signals:>4} сделок {r.trades:>3} "
+                      f"win {r.win_rate:>5.1f}% exp {r.expectancy_r:+.3f}R "
+                      f"q {r.avg_quality:>5.1f} conf {r.avg_confidence:.2f} loss_seq {r.max_consecutive_losses}")
+        print("\nАгрегат:", res.aggregate)
+        print("\nРекомендации (не автоматически!):")
+        for s in res.suggestions:
+            print(f"  • {s}")
+        print("\n❗ Калибровка по прошлым данным не гарантирует будущих результатов.")
+        return 0
+    finally:
+        await data.close()
+
+
 async def run_walkforward(symbol: str, tf: str = "15m", bars: int = 5000, folds: int = 5) -> int:
     from v3.walkforward import WalkForwardConfig, walk_forward
 
@@ -208,7 +271,7 @@ def _macro_from(tf: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="HYPE v3 — futures signal intelligence")
-    parser.add_argument("command", nargs="?", default="status", help="signal | scan | backtest | walkforward | status | serve | bot | watch")
+    parser.add_argument("command", nargs="?", default="status", help="signal | scan | backtest | walkforward | calibrate | status | serve | bot | watch")
     parser.add_argument("symbol", nargs="?", default="", help="symbol")
     parser.add_argument("--mode", default="beginner", help="beginner | pro")
     parser.add_argument("--tf", default="15m", help="entry timeframe")
@@ -216,6 +279,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmup", type=int, default=120)
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--deposit", type=float, default=None)
+    parser.add_argument("--limit", type=int, default=None, help="scan candidate limit")
+    parser.add_argument("--top", type=int, default=None, help="deep-analysis top N")
     parser.add_argument("--host", default="0.0.0.0", help="serve host")
     parser.add_argument("--port", type=int, default=8400, help="serve port")
     args = parser.parse_args(argv)
@@ -227,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return asyncio.run(run_signal(args.symbol, args.mode, args.deposit))
     if cmd == "scan":
-        return asyncio.run(run_scan(mode=args.mode))
+        return asyncio.run(run_scan(limit=args.limit, top=args.top, mode=args.mode))
     if cmd == "backtest":
         if not args.symbol:
             print("Укажите символ: python -m v3 backtest BTCUSDT --tf 15m")
@@ -238,6 +303,11 @@ def main(argv: list[str] | None = None) -> int:
             print("Укажите символ: python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5")
             return 2
         return asyncio.run(run_walkforward(args.symbol, args.tf, args.bars, args.folds))
+    if cmd == "calibrate":
+        syms = [s.strip().upper() for s in args.symbol.split(",") if s.strip()]
+        if not syms:
+            syms = [s for s in _cfg.WATCHLIST_SYMBOLS.split(",") if s.strip()][:3]
+        return asyncio.run(run_calibrate(syms, args.tf, args.bars, args.warmup))
     if cmd == "status":
         return asyncio.run(run_status())
     if cmd == "serve":
@@ -247,5 +317,5 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "watch":
         syms = [s.strip().upper() for s in args.symbol.split(",") if s.strip()] if args.symbol else None
         return asyncio.run(run_watch(syms))
-    print("Доступные команды: signal, scan, backtest, walkforward, status, serve, bot, watch")
+    print("Доступные команды: signal, scan, backtest, walkforward, calibrate, status, serve, bot, watch")
     return 2

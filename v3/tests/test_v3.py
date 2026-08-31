@@ -382,6 +382,10 @@ def test_reports():
     assert "Score breakdown" in pro
     assert "не гарантия результата" in beg  # explicit disclaimer, no guarantee
 
+    no_trade = TradingSignal(uid="r0", symbol="X", ts_ms=1, direction="NO_TRADE", status="NO_TRADE", score=20, quality=20, tier="NONE", no_trade_reasons=["quality below threshold"])
+    assert "не гарантия результата" in render_signal(no_trade, "beginner")
+    assert "не гарантия результата" in render_signal(no_trade, "pro")
+
 
 async def test_scanner_ranks_and_filters():
     from v3.scanner import Scanner
@@ -432,3 +436,22 @@ async def test_scanner_ranks_and_filters():
     assert len(result.candidates) == 1
     assert result.candidates[0].symbol == "AAUSDT"
     assert result.analyzed[0]["signal"].direction == "LONG"
+
+
+async def test_calibrate_smoke():
+    from v3.calibrate import calibrate
+
+    class FakeData:
+        mode = "fake"
+        is_demo = False
+
+        async def history(self, symbol, tf, bars):
+            df = make_df(min(bars, 600), "up")
+            df["ts"] = np.arange(len(df), dtype=np.int64) * 900_000 + 1_700_000_000_000
+            return df
+
+    engine = FuturesSignalEngine(FakeData(), SignalConfig())  # type: ignore[arg-type]
+    report = await calibrate(engine, ["TESTUSDT"], tf="15m", bars=500, warmup=80, cfg=SignalConfig())
+    assert len(report.rows) == 1
+    assert report.rows[0].symbol == "TESTUSDT"
+    assert isinstance(report.suggestions, list)

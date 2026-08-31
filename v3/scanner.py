@@ -40,7 +40,7 @@ def _rank_candidate(t: Any, cfg: SignalConfig) -> ScanCandidate | None:
     funding = getattr(t, "funding_rate", None)
     oi = getattr(t, "open_interest_usd", None) or getattr(t, "open_interest", None)
 
-    if not symbol.endswith("USDT") or turnover <= 0 or turnover < cfg.SCAN_MIN_VOLUME_USD:
+    if not symbol.endswith("USDT") or turnover <= 0 or turnover < cfg.SCAN_MIN_TURNOVER_USD:
         return None
 
     spread_pct = None
@@ -84,7 +84,7 @@ def _rank_candidate(t: Any, cfg: SignalConfig) -> ScanCandidate | None:
         spread_pct=spread_pct,
         heat=round(heat, 2),
         liquidity_ok=turnover >= cfg.SCAN_MIN_TURNOVER_USD,
-        volume_ok=turnover >= cfg.SCAN_MIN_VOLUME_USD,
+        volume_ok=volume >= cfg.SCAN_MIN_VOLUME_USD,
         reason="",
     )
 
