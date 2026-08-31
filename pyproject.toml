@@ -1,13 +1,12 @@
 [project]
-name = "hype-advisor"
-version = "5.0.0"
-description = "HYPE Advisor — профессиональный крипто-советник: сканер рынка, поиск скрытых монет, теханализ, волновые/волатильные режимы, советы по входу и выходу, графики"
+name = "hype-futures-engine"
+version = "3.0.0"
+description = "HYPE Futures Signal Intelligence — AI/quant crypto futures analyst: scanning, multi-timeframe analysis, NO-TRADE gate, walk-forward, lifecycle, Telegram, observability"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.28.0",
-    "jinja2>=3.1.0",
     "pydantic>=2.6.0",
     "pydantic-settings>=2.2.0",
     "numpy>=1.26.4",
@@ -19,12 +18,12 @@ dependencies = [
 ]
 
 [project.scripts]
-hype-advisor = "main:main"
+hype-engine = "v3.cli:main"
 
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = "-ra -q --asyncio-mode=auto"
-testpaths = ["tests", "v2/tests"]
+testpaths = ["v3/tests"]
 pythonpath = ["."]
 
 [tool.ruff]
