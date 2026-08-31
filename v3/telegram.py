@@ -46,6 +46,8 @@ class V3Core:
         self.store = store
         self.lifecycle = lifecycle
         self.cfg = cfg or SignalConfig()
+        # set by V3TelegramTransport for diagnostics (pulse / /status)
+        self.transport: V3TelegramTransport | None = None
 
     async def handle_message(self, text: str, _chat_id: Any = None) -> str:
         text = (text or "").strip()
@@ -78,6 +80,44 @@ class V3Core:
             )
         last = self.store.get_state("last_scan_ms", "0")
         lines.extend(["", f"Последний скан: {last}", "Режим: " + self.data.mode])
+        lines.append(f"Активных сигналов: {len(self.lifecycle.active())}")
+        if self.transport is not None:
+            lines.append(f"Telegram: {'включён' if self.transport.enabled else 'выключен'}")
+            if self.transport.last_error:
+                lines.append(f"Ошибка поллинга: {self.transport.last_error}")
+        lines.append("")
+        lines.append("❗ Аналитика, не гарантия результата.")
+        return "\n".join(lines)
+
+    def pulse_text(self, transport: Any = None, watcher: Any = None, mode: str | None = None) -> str:
+        """Operator self-diagnostics: data mode, Telegram state, watcher state.
+
+        Used by ``python -m v3 pulse`` and exposed via ``/status`` when the
+        transport is attached.  ``watcher`` is optional (only its watchlist /
+        cycle timestamps are used, guarded).
+        """
+        tg = transport or self.transport
+        data_mode = mode or getattr(self.data, "mode", "unknown")
+        token_state = "задан" if self.cfg.TELEGRAM_BOT_TOKEN else "не задан"
+        tg_state = "включён" if tg is not None and tg.enabled else "выключен"
+        tg_error = (getattr(tg, "last_error", "") or "нет") if tg is not None else "нет"
+        last_cycle = self.store.get_state("v3_last_cycle_ms", "нет")
+        last_error = self.store.get_state("v3_last_error", "нет") or "нет"
+        watchlist = ", ".join(getattr(watcher, "watchlist", []) or []) or "—"
+        lines = [
+            "🩺 Диагностика HYPE v3",
+            f"  Режим данных: {data_mode}",
+            f"  TELEGRAM_BOT_TOKEN: {token_state}",
+            f"  Telegram transport: {tg_state}",
+            f"  Ошибка Telegram-поллинга: {tg_error}",
+            f"  Активных сигналов: {len(self.lifecycle.active())}",
+            f"  Последний цикл watcher: {last_cycle}",
+            f"  Последняя ошибка watcher: {last_error}",
+            f"  Watchlist: {watchlist}",
+            f"  Сохранено сигналов: {len(self.store.recent_signals(limit=10_000))}",
+            "",
+            "❗ Самодиагностика, не гарантия результата.",
+        ]
         return "\n".join(lines)
 
     async def signal_text(self, text: str) -> str:
@@ -172,10 +212,18 @@ class V3TelegramTransport:
         self.core = core
         self.cfg = cfg
         self.enabled = bool(cfg.TELEGRAM_BOT_TOKEN)
+        self.last_error: str = ""
         self._bot = None
         self._dp = None
+        core.transport = self  # expose transport state to /status and pulse
 
-    async def start(self) -> None:
+    async def start(self, handle_signals: bool = True) -> None:
+        """Run polling (no-op when disabled).
+
+        ``handle_signals=False`` must be used when the process also runs
+        uvicorn: aiogram would otherwise replace uvicorn's SIGTERM handler and
+        break graceful shutdown (the process would hang on stop).
+        """
         if not self.enabled:
             return
         from aiogram import Bot, Dispatcher
@@ -195,7 +243,7 @@ class V3TelegramTransport:
             for chunk in _split(answer, 4000):
                 await message.answer(chunk, disable_web_page_preview=True)
 
-        await self._dp.start_polling(self._bot)
+        await self._dp.start_polling(self._bot, handle_signals=handle_signals)
 
     async def stop(self) -> None:
         if self._bot is not None:
