@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -54,7 +55,6 @@ class V3Runtime:
         await self.data.close()
 
 
-app = FastAPI(title="HYPE v3 Futures Signal Intelligence", version="3.0.0")
 runtime = V3Runtime()
 
 
@@ -65,14 +65,16 @@ def require_api_token(x_api_token: str = Header(default="")) -> None:
         raise HTTPException(status_code=401, detail="invalid or missing X-API-Token")
 
 
-@app.on_event("startup")
-async def _startup() -> None:
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
     await runtime.start()
+    try:
+        yield
+    finally:
+        await runtime.stop()
 
 
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    await runtime.stop()
+app = FastAPI(title="HYPE v3 Futures Signal Intelligence", version="3.0.0", lifespan=_lifespan)
 
 
 @app.get("/health")

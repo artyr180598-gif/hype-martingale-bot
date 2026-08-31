@@ -438,6 +438,26 @@ async def test_scanner_ranks_and_filters():
     assert result.analyzed[0]["signal"].direction == "LONG"
 
 
+def test_api_optional_token_guard():
+    from fastapi import HTTPException
+
+    from v3.api import require_api_token, runtime
+
+    old = runtime.cfg.V3_API_TOKEN
+    runtime.cfg.V3_API_TOKEN = "secret"
+    try:
+        require_api_token("secret")
+        try:
+            require_api_token("")
+        except HTTPException as exc:
+            assert exc.status_code == 401
+        else:
+            raise AssertionError("missing token should be rejected")
+    finally:
+        runtime.cfg.V3_API_TOKEN = old
+        require_api_token("")  # token disabled -> allowed
+
+
 async def test_calibrate_smoke():
     from v3.calibrate import calibrate
 

@@ -38,7 +38,7 @@
 > Текущая версия ниже (`src/`, `main.py`) сохранена как есть и продолжает работать.
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-303%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-304%20passed-brightgreen.svg)]()
 [![Telegram](https://img.shields.io/badge/Telegram-кнопочный%20бот-2ca5e0.svg)]()
 
 **Бот НЕ торгует.** Он не имеет доступа к твоему счёту и не выставляет ордера.
@@ -572,7 +572,7 @@ make check      # ruff + pytest
 make test       # только тесты
 ```
 
-**303 теста** (v1 + v2 + v3) покрывают: индикаторы, демо-источник, движок
+**304 теста** (v1 + v2 + v3) покрывают: индикаторы, демо-источник, движок
 анализа, волны, скоринг, сканер, наблюдение, хранилище, **спектральный анализ**,
 **риск-движок и карточку сделки**, **Telegram-клавиатуры и хендлеры**,
 настройки и REST API. В `v3/tests` отдельно проверены: `Scanner` (ранжирование
