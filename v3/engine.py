@@ -29,6 +29,7 @@ from v3.analysis.levels import build_levels
 from v3.analysis.orderflow import analyze_orderflow
 from v3.analysis.regime import detect_regime
 from v3.analysis.risk import build_risk_brief, risk_score
+from v3.analysis.scenarios import pick_scenario
 from v3.analysis.scoring import score_signal, tier_from_quality
 from v3.analysis.timeframes import build_timeframe_view
 from v3.config import SignalConfig
@@ -71,12 +72,16 @@ class FuturesSignalEngine:
         self._cache: dict[str, tuple[float, TradingSignal]] = {}
         self.reasoner = build_reasoner(self.cfg) if self.cfg.AI_ENABLED else None
 
+    TF_MS_MAP = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "1d": 86_400_000}
+    ANALYZE_CACHE_TTL = 60.0
+
     async def analyze(self, symbol: str, refresh: bool = False, deep: bool = True) -> TradingSignal:
         symbol = symbol.upper()
         key = f"{symbol}"
         if not refresh and key in self._cache:
             ts, cached = self._cache[key]
-            if time.time() - ts < 60:
+            # устаревший кэш (stale-данные) никогда не отдаём повторно
+            if time.time() - ts < self.ANALYZE_CACHE_TTL and not cached.stale:
                 return cached
 
         started = time.time()
@@ -97,11 +102,24 @@ class FuturesSignalEngine:
                 tf_map[tf] = df
                 # stale candle detection: the newest bar must start within the
                 # timeframe + max allowed age, otherwise the chart is stale.
-                last_close = int(df["ts"].iloc[-1])
-                tf_ms = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "1d": 86_400_000}.get(tf, 3_600_000)
-                age = now_ms - last_close
+                last_open = int(df["ts"].iloc[-1])
+                tf_ms = self.TF_MS_MAP.get(tf, 3_600_000)
+                age = now_ms - last_open
                 if age > tf_ms + self.cfg.MAX_DATA_AGE_SECONDS * 1000 and not any("stale klines" in d for d in bundle.degraded):
                     bundle.degraded.append(f"stale klines ({tf})")
+                # непрерывность свечей: пропуски/нулевые объёмы честно деградируют confidence
+                gaps, zero_vol = candle_series_problems(df, tf_ms)
+                if gaps:
+                    bundle.degraded.append(f"пропуск свечей {tf} ({gaps})")
+                if zero_vol:
+                    bundle.degraded.append(f"нулевой объём свечей {tf} ({zero_vol})")
+
+        # возраст данных — по биржевому timestamp последней свечи входного ТФ,
+        # если тикер его не дал (тикерный возраст = возраст кэша, это fallback)
+        entry_df = tf_map.get(self.cfg.ENTRY_TF)
+        if bundle.data_age_seconds is None and entry_df is not None and len(entry_df):
+            last_open = int(entry_df["ts"].iloc[-1])
+            bundle.data_age_seconds = max(0.0, (now_ms - last_open) / 1000.0)
 
         btc_df = None
         try:
@@ -112,9 +130,10 @@ class FuturesSignalEngine:
             btc_df = None
 
         signal = self.evaluate_bundle(bundle, tf_map, btc_tf=btc_df)
+        signal.source = getattr(self.data, "mode", "") or ""
         signal.duration_sec = time.time() - started
         self._cache[key] = (time.time(), signal)
-        metrics.mark_mode(self.data.mode, not bundle.is_demo)
+        metrics.mark_mode(getattr(self.data, "mode", "unknown"), True)
         metrics.record_analysis(symbol, signal.duration_sec)
         return signal
 
@@ -154,10 +173,12 @@ class FuturesSignalEngine:
                 degraded.append(f"{tf}: insufficient data")
 
         if not views:
-            return self._no_trade(
+            sig = self._no_trade(
                 bundle, ["no usable timeframe data"], degraded,
                 "WAIT", None, RegimeSnapshot(note="no data"), started,
             )
+            sig.features["no_data"] = True
+            return sig
 
         btc_view = None
         if btc_tf is not None:
@@ -171,6 +192,9 @@ class FuturesSignalEngine:
 
         direction_vote, vote_strength = _weighted_vote(views)
         direction = "WAIT"
+        scenario = ""
+        condition = ""
+        stop_hint: float | None = None
         reasons: list[str] = []
         risks: list[str] = []
 
@@ -186,7 +210,25 @@ class FuturesSignalEngine:
         if direction == "SHORT" and not any(v.trend == "down" for v in views[-2:]):
             direction = "WAIT"
 
-        levels = build_levels(direction, bundle.price, entry_view.atr, entry_view, self.cfg) if direction in ("LONG", "SHORT") else None
+        # альтернативные сценарии на реальных признаках (только если трендовый
+        # путь не дал направления): sweep / CHoCH / range / условный пробой
+        if direction == "WAIT" and not regime.conflicts:
+            candidate = pick_scenario(
+                views,
+                tf_map.get(self.cfg.ENTRY_TF),
+                bundle.price,
+                regime,
+                orderflow,
+                self.cfg,
+            )
+            if candidate is not None:
+                direction = candidate.direction
+                scenario = candidate.kind
+                condition = candidate.condition
+                stop_hint = candidate.stop_hint
+                reasons.extend(candidate.reasons)
+
+        levels = build_levels(direction, bundle.price, entry_view.atr, entry_view, self.cfg, stop_override=stop_hint) if direction in ("LONG", "SHORT") else None
 
         rsk, risk_why = risk_score(bundle, views, derivatives, orderflow, context, regime, self.cfg)
         risks.extend(risk_why[:4])
@@ -225,11 +267,32 @@ class FuturesSignalEngine:
         )
         direction, status, no_trade = self.apply_direction_gate(violations, direction)
 
+        # разворотные сценарии — мягче порог R:R (гейт не отключён); диапазон
+        # средний; аномальная волатильность — строже по качеству
+        min_rr = self.cfg.MIN_RISK_REWARD
+        if scenario in ("reversal_choch", "liquidity_sweep", "range_reversion"):
+            min_rr = self.cfg.MIN_RISK_REWARD_REVERSAL
+        quality_min = self.cfg.QUALITY_MIN
+        if regime.regime == "HIGH_VOLATILITY" and direction in ("LONG", "SHORT"):
+            quality_min += 5.0
+            reasons.append("аномальная волатильность — вход только при усиленном качестве, размер уменьшен")
+
         if direction in ("LONG", "SHORT") and levels is not None:
-            direction, status, no_trade, levels = self.apply_risk_reward_gate(levels, rsk, score, deposit_usd or self.cfg.DEFAULT_DEPOSIT_USD)
+            direction, status, no_trade, levels = self.apply_risk_reward_gate(
+                levels, rsk, score, deposit_usd or self.cfg.DEFAULT_DEPOSIT_USD,
+                min_rr=min_rr, quality_min=quality_min,
+            )
 
         if direction in ("LONG", "SHORT"):
             reasons.extend(signal_reasons(views, derivatives, orderflow, context, regime, levels, self.cfg))
+            if scenario == "reversal_choch":
+                risks.append("разворотный сценарий — повышенный риск, стоп за структурой")
+            elif scenario == "liquidity_sweep":
+                risks.append("сценарий stop-hunt — стоп за фитилём ложного пробоя")
+            elif scenario == "range_reversion":
+                risks.append("вход в диапазоне — меньший размер, выход у середины")
+            if condition:
+                risks.append("условный сетап: вход только после подтверждения условия")
             if levels is not None:
                 risks.extend(level_risks(levels, view=entry_view))
             if score.total >= self.cfg.A_TIER_MIN:
@@ -270,16 +333,21 @@ class FuturesSignalEngine:
             risks=dedupe(risks[:8]),
             invalidation=levels.invalidation if levels is not None else "",
             no_trade_reasons=no_trade[:8],
-            features=features_dict(views, derivatives, orderflow, context, regime, bundle.news_items),
+            features=features_dict(views, derivatives, orderflow, context, regime, bundle.news_items, scenario=scenario),
             score_breakdown=score,
             risk_brief=risk_brief,
-            is_demo=bundle.is_demo,
+            scenario=scenario,
+            condition=condition,
             data_age_seconds=round(data_age, 1) if data_age is not None else None,
             stale=stale,
             created_ms=time.time() * 1000,
             updated_ms=time.time() * 1000,
             duration_sec=round(time.time() - started, 2),
         )
+        # «нет реальных данных»: тикер недоступен или нет ни одного биржевого
+        # timestamp — пользователь видит предупреждение, а не «успешный» анализ
+        if bundle.price <= 0 or any("no real market data" in v for v in no_trade):
+            signal.features["no_data"] = True
         active_reasoner = ai_reasoner or self.reasoner
         if active_reasoner is not None:
             try:
@@ -306,8 +374,10 @@ class FuturesSignalEngine:
         v: list[str] = []
         if bundle.price <= 0 or not _fin(bundle.price):
             v.append("non-positive/missing price")
-        if bundle.is_demo:
-            v.append("demo data is not a live signal")
+        # инвариант «только реальные данные»: в живом пути нет биржевого
+        # timestamp — нет сигнала (в бэктестовом пути метка возраста не нужна)
+        if strict_liquidity and bundle.data_age_seconds is None:
+            v.append("no real market data (missing exchange timestamp)")
         if bundle.data_age_seconds is not None and bundle.data_age_seconds > self.cfg.MAX_DATA_AGE_SECONDS:
             v.append(f"stale market data ({bundle.data_age_seconds:.0f}s old)")
         if any("stale klines" in d for d in bundle.degraded):
@@ -348,16 +418,21 @@ class FuturesSignalEngine:
         rsk: int,
         score,
         deposit_usd: float,
+        *,
+        min_rr: float | None = None,
+        quality_min: float | None = None,
     ) -> tuple[str, str, list[str], Any]:
         no_trade: list[str] = []
         if levels is None:
             return "WAIT", "NO_TRADE", ["could not build entry levels"], None
-        if levels.rr < self.cfg.MIN_RISK_REWARD:
-            no_trade.append(f"R:R 1:{levels.rr:.2f} below minimum 1:{self.cfg.MIN_RISK_REWARD:.1f}")
+        min_rr = self.cfg.MIN_RISK_REWARD if min_rr is None else min_rr
+        qmin = self.cfg.QUALITY_MIN if quality_min is None else quality_min
+        if levels.rr < min_rr:
+            no_trade.append(f"R:R 1:{levels.rr:.2f} below minimum 1:{min_rr:.1f}")
         if rsk > self.cfg.MAX_RISK_SCORE_TO_ENTER:
             no_trade.append(f"risk score {rsk}/10 above max {self.cfg.MAX_RISK_SCORE_TO_ENTER}/10")
-        if score.total < self.cfg.QUALITY_MIN:
-            no_trade.append(f"quality {score.total:.1f} below min {self.cfg.QUALITY_MIN:.0f}")
+        if score.total < qmin:
+            no_trade.append(f"quality {score.total:.1f} below min {qmin:.0f}")
         if no_trade:
             return "NO_TRADE", "NO_TRADE", no_trade, levels
         return levels.direction, "CONFIRMED", [], levels
@@ -383,7 +458,6 @@ class FuturesSignalEngine:
             no_trade_reasons=reasons,
             risks=degraded[:6],
             features={"degraded": degraded},
-            is_demo=bundle.is_demo,
             data_age_seconds=round(age, 1) if age is not None else None,
             stale=any("stale" in d for d in degraded),
             duration_sec=round(time.time() - started, 2),
@@ -458,6 +532,7 @@ def features_dict(
     context: MarketContext,
     regime: RegimeSnapshot,
     news: list[dict[str, Any]] | None = None,
+    scenario: str = "",
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "timeframes": [v.to_dict() for v in views],
@@ -466,9 +541,26 @@ def features_dict(
         "context": context.to_dict(),
         "regime": regime.to_dict(),
     }
+    if scenario:
+        out["scenario"] = scenario
     if news:
         out["news"] = news
     return out
+
+
+def candle_series_problems(df: Any, tf_ms: int) -> tuple[int, int]:
+    """(пропуски свечей, свечи с нулевым объёмом) — честная деградация данных."""
+    gaps = 0
+    zero_vol = 0
+    try:
+        if df is None or len(df) < 3:
+            return 0, 0
+        diffs = df["ts"].diff().iloc[1:]
+        gaps = int((diffs > int(tf_ms * 1.5)).sum())
+        zero_vol = int((df["volume"] <= 0).sum())
+    except Exception:  # noqa: BLE001
+        return 0, 0
+    return gaps, zero_vol
 
 
 def dedupe(values: list[str]) -> list[str]:

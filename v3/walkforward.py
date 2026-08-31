@@ -56,7 +56,6 @@ class WalkForwardResult:
     folds: list[WalkFold] = field(default_factory=list)
     aggregate: dict[str, Any] = field(default_factory=dict)
     stability: dict[str, Any] = field(default_factory=dict)
-    is_demo: bool = False
     error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -66,7 +65,6 @@ class WalkForwardResult:
             "folds": [f.to_dict() for f in self.folds],
             "aggregate": self.aggregate,
             "stability": self.stability,
-            "is_demo": self.is_demo,
             "error": self.error,
         }
 
@@ -92,7 +90,6 @@ def walk_forward(
         return WalkForwardResult(
             symbol=symbol.upper(),
             config=wf,
-            is_demo=engine.data.is_demo,
             error=f"not enough history: {len(df)} bars, need >= {needed}",
         )
 
@@ -151,5 +148,4 @@ def walk_forward(
         folds=folds,
         aggregate=aggregate,
         stability=stability,
-        is_demo=engine.data.is_demo,
     )

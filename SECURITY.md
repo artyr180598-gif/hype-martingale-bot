@@ -38,7 +38,8 @@ order-execution platform. The unified engine has no live order path at all.
 * Stale tickers and stale candles are marked degraded and block a live signal
   (`MAX_DATA_AGE_SECONDS`); every report shows its data timestamp.
 * Engine gate → validator gate (R:R, risk, confidence, quality, liquidity,
-  demo-data checks, **stale flag / `data_age_seconds` > TTL**).
+  **stale flag / `data_age_seconds` > TTL / отсутствие биржевого timestamp** —
+  «real-market-data» инвариант (раунд 3): без биржевого timestamp сигнал не публикуется.
 * The API is read-only; it does not accept orders or credentials.
 * Telegram callback payloads are flat, enumerated strings; user settings are
   bounded (deposit ≤ 1M USD, risk ≤ 5%).

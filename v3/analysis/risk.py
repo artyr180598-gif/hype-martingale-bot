@@ -35,9 +35,6 @@ def risk_score(
     score = 1.0
     why: list[str] = []
 
-    if bundle.is_demo:
-        score += 1.5
-        why.append("demo data +1.5")
     entry = views[0] if views else None
     if entry is not None:
         if entry.atr_pct >= cfg.ATR_PCT_EXTREME:

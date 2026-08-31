@@ -92,6 +92,7 @@ def _rank_candidate(t: Any, cfg: SignalConfig) -> ScanCandidate | None:
 @dataclass
 class ScanResult:
     ts_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    scanned_total: int = 0                     # сколько тикеров реально получено с биржи
     candidates: list[ScanCandidate] = field(default_factory=list)
     analyzed: list[dict[str, Any]] = field(default_factory=list)
     top_by_heat: list[ScanCandidate] = field(default_factory=list)
@@ -115,7 +116,12 @@ class Scanner:
         candidates.sort(key=lambda c: c.heat, reverse=True)
         candidates = candidates[:limit]
 
-        result = ScanResult(candidates=candidates, top_by_heat=candidates[:top], mode=self.engine.data.mode)
+        result = ScanResult(
+            scanned_total=len(tickers),
+            candidates=candidates,
+            top_by_heat=candidates[:top],
+            mode=self.engine.data.mode,
+        )
 
         if candidates:
             top_symbols = [c.symbol for c in candidates[:top]]
@@ -133,16 +139,19 @@ class Scanner:
         return result
 
     # ── result views used by the Telegram UI / API ────────────────
-    def best_setups(self, direction: str | None = None, quality_min: float | None = None) -> list[dict[str, Any]]:
+    def best_setups(self, direction: str | None = None, quality_min: float | None = None, top_only: bool = False) -> list[dict[str, Any]]:
         """Deep-analysed setups sorted by quality, optional direction filter.
 
-        ``direction`` is LONG | SHORT | None (any). ``quality_min`` defaults to
-        ``SCAN_SHOW_QUALITY_MIN`` -- weak setups stay visible in the raw scan
-        but are not presented as "top opportunities".
+        ``direction`` is LONG | SHORT | None (any). ``quality_min`` по
+        умолчанию: ``SCAN_LIST_QUALITY_MIN`` (тир-осознанные списки, B/C
+        видны); с ``top_only=True`` — строгий ``SCAN_SHOW_QUALITY_MIN``,
+        используется только для «⭐ ТОП». Weak setups stay visible in the raw
+        scan either way.
         """
         if self.last is None:
             return []
-        qmin = self.cfg.SCAN_SHOW_QUALITY_MIN if quality_min is None else quality_min
+        if quality_min is None:
+            quality_min = self.cfg.SCAN_SHOW_QUALITY_MIN if top_only else self.cfg.SCAN_LIST_QUALITY_MIN
         items: list[dict[str, Any]] = []
         for item in self.last.analyzed:
             sig = item["signal"]
@@ -150,11 +159,15 @@ class Scanner:
                 continue
             if sig.direction not in ("LONG", "SHORT"):
                 continue
-            if sig.quality < qmin:
+            if sig.quality < quality_min:
                 continue
             items.append(item)
         items.sort(key=lambda item: item["signal"].quality, reverse=True)
         return items
+
+    def top_setups(self, direction: str | None = None) -> list[dict[str, Any]]:
+        """Строгий «⭐ ТОП» — только сетапы выше SCAN_SHOW_QUALITY_MIN."""
+        return self.best_setups(direction, top_only=True)
 
     def heatmap(self, limit: int = 20) -> list[dict[str, Any]]:
         if self.last is None:
@@ -166,6 +179,7 @@ class Scanner:
             return {"candidates": [], "analyzed": [], "duration_sec": 0.0}
         return {
             "ts_ms": self.last.ts_ms,
+            "scanned_total": self.last.scanned_total,
             "candidates": [c.to_dict() for c in self.last.candidates],
             "analyzed": [
                 {"candidate": item["candidate"], "signal": item["signal"].to_dict()}

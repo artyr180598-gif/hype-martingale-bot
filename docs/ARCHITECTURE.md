@@ -3,18 +3,22 @@
 ## Поток данных
 
 ```
-Bybit (primary) ── Binance (failover) ── MEXC (failover) ── Demo (auto fallback)
+Bybit (primary) ── Binance (failover) ── MEXC (failover)      [demo УДАЛЁН — раунд 3]
         │
         ▼
 src/data/collector.py        единый MarketDataSource-контракт, HTTP с ретраями
                              (429 → backoff + Retry-After), свечи/тикеры/funding/
-                             стакан/ликвидции; EnrichedSource = CoinGecko + F&G + новости
-        │
+                             стакан (ликвидации — только реальные);
+                             EnrichedSource = CoinGecko + F&G + новости (режим auto)
+        │                    src/data/liquidations_ws.py — публичный WS ликвидаций
+        │                    Bybit v5: один коллектор на процесс, reconnect+backoff,
+        │                    буфер 15 мин с биржевыми ts; подписки ≤60 топиков
         ▼
 v3/data.py FuturesDataService  TTL-кэши, параллельный build_bundle, OI/funding
                              история, L/S account ratio (Bybit, 300s TTL),
                              mark/index (из тикера, 0 доп. запросов),
-                             market_overview, stale-детекция
+                             market_overview, stale-детекция, владелец WS-потока,
+                             source_diagnostics() (попытки/последняя ошибка/здоровье)
         │
         ▼
 v3/analysis/*                timeframes (индикаторы+структура), regime, derivatives,
@@ -54,8 +58,16 @@ Telegram (v3/telegram.py + v3/tg/*)   FastAPI (v3/api.py)   CLI (v3/cli.py)
 5. **Без look-ahead**: в бэктесте видны только закрытые бары, вход с открытия
    следующего бара, стоп проверяется пессимистично.
 6. **Секреты только из env**; бот закрыт списком `TELEGRAM_ALLOWED_USER_IDS`.
-7. **Данные свежие**: ticker/свечи старше TTL → degraded → NO TRADE; в отчёте
-   всегда timestamp.
+7. **Только реальные данные (раунд 3)**: нет тикера/свечей → «Нет реальных
+   данных — анализ невозможен» + причины + retry; без биржевого timestamp
+   публикация запрещена двумя валидаторами (`engine.validate` + `validator.py`).
+8. **Данные свежие**: ticker/свечи старше TTL → degraded → NO TRADE; в отчёте
+   всегда `📡 источник · обновлено HH:MM:SS UTC · возраст Nс` (возраст — по
+   биржевому timestamp).
+9. **История диалога не затирается**: независимые запросы Telegram → новое
+   сообщение (`BotReply.edit=False` по умолчанию); правится только навигация
+   внутри одного результата (пагинация/PRO/«🔄 ОБНОВИТЬ», с fallback на новое
+   сообщение при невозможности правки); `delete` не вызывается.
 
 ## Telegram UI
 
@@ -68,6 +80,10 @@ Telegram (v3/telegram.py + v3/tg/*)   FastAPI (v3/api.py)   CLI (v3/cli.py)
 Callback-схема: `menu`, `scan`, `list:{top|longs|shorts}:{page}`, `coin:{SYM}`,
 `update:{SYM}`, `pro:{SYM}`, `market`, `pick:{page}`, `glossary:{term}`,
 `settings`, `set:{mode|deposit|risk}:…`, `back:menu`.
+
+Правила истории (`BotReply.edit`): новое сообщение — `menu`, `help`, `scan`,
+`market`, `coin:*`, `pick:*`, `settings` (и любая неизвестная команда);
+правка — `list:*`, `update:*`, `pro:*`, `glossary:*`, `set:*`, `back:menu`.
 
 ## Масштабирование
 

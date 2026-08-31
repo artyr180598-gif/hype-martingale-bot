@@ -34,7 +34,10 @@ class SignalConfig(BaseSettings):
     V3_API_TOKEN: str = ""
 
     # ── Exchange / data mode (reuses v1 settings aliases) ────────
-    MARKET_DATA_MODE: Literal["auto", "live", "demo"] = "auto"
+    # Только реальные данные. live — биржи Bybit→Binance→MEXC; auto — те же
+    # реальные биржи + реальный спот-контекст (CoinGecko/Fear&Greed/новости).
+    # Значение "demo" (и любое другое) — ошибка конфигурации при старте.
+    MARKET_DATA_MODE: Literal["auto", "live"] = "live"
     BYBIT_API_KEY: str = ""
     BYBIT_API_SECRET: str = ""
     BYBIT_TESTNET: bool = False
@@ -51,7 +54,8 @@ class SignalConfig(BaseSettings):
     SCAN_LIMIT: int = 250
     SCAN_MIN_TURNOVER_USD: float = 20_000_000.0
     SCAN_MIN_VOLUME_USD: float = 5_000_000.0
-    SCAN_SHOW_QUALITY_MIN: float = 72.0  # setups below this are hidden from "TOP"
+    SCAN_SHOW_QUALITY_MIN: float = 72.0  # строгий порог «⭐ ТОП» (A и выше)
+    SCAN_LIST_QUALITY_MIN: float = 58.0  # тир-осознанные списки LONG/SHORT (B/C видны)
     WATCHLIST_SYMBOLS: str = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,SUIUSDT,TIAUSDT"
 
     # ── Timeframes ──────────────────────────────────────────────
@@ -75,6 +79,8 @@ class SignalConfig(BaseSettings):
     ORDERBOOK_CACHE_TTL_SECONDS: float = 5.0
     FUNDING_CACHE_TTL_SECONDS: float = 300.0
     LIQUIDATIONS_CACHE_TTL_SECONDS: float = 60.0
+    LIQUIDATIONS_WS_ENABLED: bool = True     # реальный WS-поток ликвидаций Bybit (public)
+    LIQUIDATIONS_WS_MAX_AGE_SECONDS: float = 900.0
     ORDERBOOK_DEPTH: int = 50
     ETH_CONTEXT_ENABLED: bool = True
 
@@ -96,6 +102,7 @@ class SignalConfig(BaseSettings):
     ATR_MAX_SL_MULTIPLIER: float = 3.5
     ATR_TP_MULTIPLIER: float = 3.6
     MIN_RISK_REWARD: float = 1.8
+    MIN_RISK_REWARD_REVERSAL: float = 1.5   # разворотные сценарии (CHoCH/sweep) — мягче, но гейт не отключён
     MAX_ENTRY_DISTANCE_ATR: float = 1.0
     TP_CLOSE_PCT: tuple[float, float, float] = (0.5, 0.3, 0.2)
 
@@ -145,6 +152,23 @@ class SignalConfig(BaseSettings):
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_TIMEOUT_SECONDS: float = 20.0
+
+    @field_validator("MARKET_DATA_MODE", mode="before")
+    @classmethod
+    def _data_mode_real_only(cls, v: object) -> object:
+        """Только реальные данные: demo (и любое иное значение) — ошибка старта."""
+        value = str(v).strip().lower() if v is not None else ""
+        if value == "demo":
+            raise ValueError(
+                "Режим MARKET_DATA_MODE=demo удалён: платформа работает только на "
+                "реальных данных бирж. Допустимые значения: live | auto."
+            )
+        if value and value not in ("live", "auto"):
+            raise ValueError(
+                f"Неизвестный MARKET_DATA_MODE={value!r}: допустимые значения live | auto "
+                "(только реальные данные)."
+            )
+        return value or "live"
 
     @field_validator("TIMEFRAMES", mode="before")
     @classmethod
@@ -220,6 +244,20 @@ def validate_config(cfg: SignalConfig | None = None) -> list[str]:
     """
     cfg = cfg or load_config()
     errors: list[str] = []
+    mode = str(cfg.MARKET_DATA_MODE).lower()
+    if mode == "demo":
+        errors.append(
+            "MARKET_DATA_MODE=demo удалён: платформа работает только на реальных данных (live | auto)"
+        )
+    elif mode not in ("live", "auto"):
+        errors.append(f"MARKET_DATA_MODE={cfg.MARKET_DATA_MODE!r} недопустим: только live | auto")
+    if not (0 < cfg.SCAN_LIST_QUALITY_MIN <= cfg.SCAN_SHOW_QUALITY_MIN <= 100):
+        errors.append(
+            "SCAN_LIST_QUALITY_MIN must be in (0, SCAN_SHOW_QUALITY_MIN] — "
+            "списки не могут быть строже «⭐ ТОП»"
+        )
+    if not (0 < cfg.MIN_RISK_REWARD_REVERSAL <= cfg.MIN_RISK_REWARD):
+        errors.append("MIN_RISK_REWARD_REVERSAL must be in (0, MIN_RISK_REWARD]")
     tfs = cfg.timeframes
     if not tfs:
         errors.append("TIMEFRAMES is empty")

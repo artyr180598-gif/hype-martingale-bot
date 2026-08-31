@@ -5,11 +5,14 @@
   MarketDataSource (контракт)
     ├── BybitSource     — основной источник (фьючерсы USDT-perp, V5 public API)
     ├── BinanceSource   — резерв (USDⓈ-M фьючерсы)
-    ├── MexcSource      — третий источник
-    └── DemoMarketSource— синтетический рынок (тесты / нет доступа к биржам)
+    └── MexcSource      — третий источник
 
   EnrichedSource оборачивает биржевой источник и добавляет спот-контекст:
   CoinGecko (муверы, тренды, глобальная статистика), Fear & Greed, новости.
+
+Платформа работает ТОЛЬКО на реальных данных бирж. Синтетических источников
+нет: MARKET_DATA_MODE=demo запрещён (ошибка при старте), при недоступности
+всех бирж probe() возвращает ошибку вместо подмены данных.
 
 Публичные эндпоинты работают БЕЗ ключей. Ключи (BYBIT_API_KEY/SECRET и т.п.)
 нужны только для приватных данных; советник обходится публичными.
@@ -28,7 +31,7 @@ import pandas as pd
 from src.config.settings import Settings
 from src.core.errors import DataSourceError, RateLimitError, UnknownSymbol
 from src.core.logging import get_logger
-from src.core.timeutil import now_ms, tf_ms
+from src.core.timeutil import now_ms
 from src.data.models import (
     CoinMover,
     FearGreed,
@@ -51,10 +54,9 @@ QUOTE = "USDT"
 #  КОНТРАКТ
 # ════════════════════════════════════════════════════════════════
 class MarketDataSource(abc.ABC):
-    """Интерфейс источника рыночных данных."""
+    """Интерфейс источника рыночных данных (только реальные биржи)."""
 
     name: str = "base"
-    is_demo: bool = False
 
     @abc.abstractmethod
     async def discover_instruments(self, category: str = "linear") -> list[Instrument]: ...
@@ -204,7 +206,6 @@ def _tf_to_mexc(timeframe: str) -> str:
 # ════════════════════════════════════════════════════════════════
 class BybitSource(_Http, MarketDataSource):
     name = "bybit"
-    is_demo = False
 
     def __init__(self, settings: Settings):
         host = "https://api-testnet.bybit.com" if settings.BYBIT_TESTNET else "https://api.bybit.com"
@@ -364,8 +365,8 @@ class BybitSource(_Http, MarketDataSource):
             rows = res.get("list", []) or []
             value = _none_or_float(rows[0].get("buyRatio")) if rows else None
         except DataSourceError:
-            # публичный эндпоинт может быть недоступен в регионе/тестнете —
-            # это контекст, а не причина отказывать в анализе
+            # публичный эндпоинт может быть недоступен в регионе — это
+            # контекст, а не причина отказывать в анализе
             value = None
         self._lsr_cache[symbol] = (time.time(), value)
         return value
@@ -388,40 +389,14 @@ class BybitSource(_Http, MarketDataSource):
         ]
 
     async def get_recent_liquidations(self, limit: int = 200) -> list[Liquidation]:
+        """У Bybit нет публичного REST-фида ликвидаций — только WebSocket.
+
+        Публичный WS-коллектор ликвидаций реализован в
+        ``src/data/liquidations_ws.py`` и подключается слоем ``v3.data``.
+        Прокси «крупных сделок» за ликвидации не выдаётся: без живого
+        потока возвращаем пустой список, а аналитика честно показывает «н/д».
         """
-        Публичного REST-фида ликвидаций Bybit нет (только WebSocket), поэтому
-        используем ленту крупных сделок как прокси принудительных закрытий.
-        """
-        out: list[Liquidation] = []
-        try:
-            instruments = await self.discover_instruments()
-        except Exception:  # noqa: BLE001
-            return []
-        top = sorted(instruments, key=lambda i: i.turnover_24h, reverse=True)[:12]
-        for inst in top:
-            try:
-                raw = await self.get(
-                    "/v5/market/recent-trade", {"category": "linear", "symbol": inst.symbol, "limit": 60}
-                )
-                res = self._unwrap(raw, "recent-trade") or {}
-                for tr in res.get("list", []):
-                    usd = float(tr.get("price") or 0) * float(tr.get("size") or 0)
-                    if usd < 50_000:
-                        continue
-                    out.append(
-                        Liquidation(
-                            symbol=inst.symbol,
-                            side=str(tr.get("side", "Buy")),
-                            size=usd,
-                            qty=float(tr.get("size") or 0),
-                            price=float(tr.get("price") or 0),
-                            ts_ms=int(tr.get("time") or now_ms()),
-                        )
-                    )
-            except Exception:  # noqa: BLE001
-                continue
-        out.sort(key=lambda x: x.ts_ms, reverse=True)
-        return out[:limit]
+        return []
 
     async def get_orderbook(self, symbol: str, depth: int = 25) -> OrderBook:
         raw = await self.get(
@@ -457,7 +432,6 @@ class BybitSource(_Http, MarketDataSource):
 # ════════════════════════════════════════════════════════════════
 class BinanceSource(_Http, MarketDataSource):
     name = "binance"
-    is_demo = False
 
     def __init__(self, settings: Settings):
         super().__init__(settings, "https://fapi.binance.com")
@@ -592,6 +566,7 @@ class BinanceSource(_Http, MarketDataSource):
         ]
 
     async def get_recent_liquidations(self, limit: int = 200) -> list[Liquidation]:
+        """Реальные принудительные ордера-ликвидации Binance (публичный REST)."""
         try:
             raw = await self.get("/fapi/v1/allForceOrders", {"limit": min(limit, 1000)})
         except Exception:  # noqa: BLE001
@@ -643,7 +618,6 @@ class BinanceSource(_Http, MarketDataSource):
 # ════════════════════════════════════════════════════════════════
 class MexcSource(_Http, MarketDataSource):
     name = "mexc"
-    is_demo = False
 
     def __init__(self, settings: Settings):
         super().__init__(settings, "https://contract.mexc.com")
@@ -825,15 +799,12 @@ def extract_symbols(text: str) -> list[str]:
 
 
 class EnrichedSource(MarketDataSource):
-    """Биржевой источник + спот-контекст (CoinGecko, Fear&Greed, новости)."""
-
-    is_demo = False
+    """Биржевой источник + реальный спот-контекст (CoinGecko, Fear&Greed, новости)."""
 
     def __init__(self, settings: Settings, primary: MarketDataSource):
         self.settings = settings
         self.primary = primary
         self.name = primary.name
-        self.is_demo = primary.is_demo
         self._cg = _Http(
             settings,
             "https://api.coingecko.com/api/v3",
@@ -848,15 +819,21 @@ class EnrichedSource(MarketDataSource):
 
     @property
     def mode(self) -> str:
-        """Реально выбранный источник (может смениться на demo после фейловера)."""
+        """Реально выбранная биржа (может смениться после фейловера)."""
         return getattr(self.primary, "mode", self.name)
 
     async def probe(self) -> str:
         if hasattr(self.primary, "probe"):
             await self.primary.probe()
         self.name = self.mode
-        self.is_demo = self.primary.is_demo
         return self.mode
+
+    def diagnostics(self) -> list[dict[str, Any]]:
+        """Диагностика по каждой реальной бирже (см. FailoverSource)."""
+        probe = getattr(self.primary, "diagnostics", None)
+        if callable(probe):
+            return probe()
+        return []
 
     # ── делегирование бирже ──
     async def discover_instruments(self, category: str = "linear") -> list[Instrument]:
@@ -1040,76 +1017,137 @@ class EnrichedSource(MarketDataSource):
 
 
 # ════════════════════════════════════════════════════════════════
-#  ФЕЙЛОВЕР: биржа 1 → биржа 2 → биржа 3 → demo
+#  ФЕЙЛОВЕР: только реальные биржи (Bybit → Binance → MEXC)
 # ════════════════════════════════════════════════════════════════
 class FailoverSource(MarketDataSource):
     """
-    Пробует источники по очереди и запоминает первый живой.
+    Пробует реальные биржи по очереди и запоминает первую живую.
 
     Работает полностью асинхронно: никаких блокирующих проверок при старте,
     поэтому источник можно создавать изнутри event loop (API-хендлеры,
-    Telegram-команды). При отказе всех бирж в режиме auto переключаемся на
-    демо-рынок и помечаем это в self.mode.
+    Telegram-команды). Синтетического фолбэка нет: если ВСЕ биржи недоступны,
+    ``probe()`` повторяет попытку с экспоненциальным backoff, а затем бросает
+    ``DataSourceError`` — вызывающая сторона обязана сообщить
+    «нет реальных данных», а не анализировать фиктивный рынок.
     """
 
-    def __init__(self, settings: Settings, delegates: list[MarketDataSource], allow_demo: bool = True):
+    def __init__(
+        self,
+        settings: Settings,
+        delegates: list[MarketDataSource],
+        probe_retries: int = 2,
+    ):
         self.settings = settings
         self._delegates = delegates
-        self._allow_demo = allow_demo
         self._active: MarketDataSource | None = None
-        self._demo: MarketDataSource | None = None
         self.mode = delegates[0].name if delegates else "none"
         self.failures: dict[str, str] = {}
+        # диагностика по каждой бирже: попытки, ошибки, circuit breaker state
+        self._diag: dict[str, dict[str, Any]] = {
+            d.name: {
+                "attempts": 0,
+                "errors": 0,
+                "consecutive_errors": 0,
+                "last_error": "",
+                "last_success_ms": 0,
+                "last_attempt_ms": 0,
+            }
+            for d in delegates
+        }
+        # сколько дополнительных попыток probe() с backoff (0 = одна попытка)
+        self._probe_retries = max(0, int(probe_retries))
 
     @property
     def name(self) -> str:
         return self.mode
 
     @property
-    def is_demo(self) -> bool:
-        return bool(self._active and self._active.is_demo)
-
-    @property
     def active(self) -> MarketDataSource | None:
         return self._active
 
+    def diagnostics(self) -> list[dict[str, Any]]:
+        """Статус каждого реального источника (для pulse /status /health)."""
+        out: list[dict[str, Any]] = []
+        for name, d in self._diag.items():
+            out.append({
+                "source": name,
+                "active": self._active is not None and self._active.name == name,
+                "available": d["consecutive_errors"] == 0 and (d["last_success_ms"] > 0 or d["attempts"] == 0),
+                "attempts": d["attempts"],
+                "errors": d["errors"],
+                "consecutive_errors": d["consecutive_errors"],
+                "last_error": d["last_error"],
+                "last_success_ms": d["last_success_ms"],
+                "last_attempt_ms": d["last_attempt_ms"],
+            })
+        return out
+
+    def _mark_attempt(self, name: str, ok: bool, error: Exception | None = None) -> None:
+        d = self._diag[name]
+        d["attempts"] += 1
+        d["last_attempt_ms"] = now_ms()
+        if ok:
+            d["last_success_ms"] = now_ms()
+            d["consecutive_errors"] = 0
+            self.failures.pop(name, None)
+        else:
+            d["errors"] += 1
+            d["consecutive_errors"] += 1
+            d["last_error"] = (str(error)[:120] if error else "unknown")
+            self.failures[name] = d["last_error"]
+
+    async def _try_delegate(self, cand: MarketDataSource) -> bool:
+        try:
+            df = await cand.get_klines("BTCUSDT", "15m", 5)
+            if len(df) >= 3:
+                await cand.discover_instruments()
+                self._active = cand
+                self.mode = cand.name
+                self._mark_attempt(cand.name, True)
+                logger.info("Источник данных: %s", cand.name)
+                return True
+            raise DataSourceError(f"{cand.name}: пустой ответ свечей")
+        except Exception as e:  # noqa: BLE001
+            self._mark_attempt(cand.name, False, e)
+            logger.warning("Источник %s недоступен: %s", cand.name, e)
+            return False
+
     async def probe(self) -> str:
-        """Выбирает первый живой источник. Возвращает итоговый режим."""
+        """Выбирает первую живую РЕАЛЬНУЮ биржу. Возвращает итоговый режим.
+
+        Если все биржи недоступны — повторные раунды с экспоненциальным
+        backoff, затем ``DataSourceError`` с диагностикой по всем источникам.
+        """
         if self._active is not None:
             return self.mode
-        for cand in self._delegates:
-            try:
-                df = await cand.get_klines("BTCUSDT", "15m", 5)
-                if len(df) >= 3:
-                    await cand.discover_instruments()
-                    self._active = cand
-                    self.mode = cand.name
-                    logger.info("Источник данных: %s", cand.name)
+        delay = 0.5
+        for attempt in range(self._probe_retries + 1):
+            for cand in self._delegates:
+                if await self._try_delegate(cand):
                     return self.mode
-            except Exception as e:  # noqa: BLE001
-                self.failures[cand.name] = str(e)[:120]
-                logger.warning("Источник %s недоступен: %s", cand.name, e)
-        if not self._allow_demo:
-            raise DataSourceError(f"Ни одна биржа недоступна: {self.failures}")
-        from src.data.demo import DemoMarketSource
-
-        self._demo = DemoMarketSource(self.settings)
-        self._active = self._demo
-        self.mode = "demo"
-        logger.warning("Биржи недоступны — переключаюсь в DEMO-режим")
-        return self.mode
+            if attempt < self._probe_retries:
+                logger.warning(
+                    "Все реальные источники недоступны, повтор probe через %.1fс (раунд %d/%d)",
+                    delay, attempt + 1, self._probe_retries + 1,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2.0, 8.0)
+        raise DataSourceError(f"Все реальные источники недоступны: {self.failures}")
 
     async def _call(self, method: str, *args, **kwargs):
         if self._active is None:
             await self.probe()
         assert self._active is not None
         try:
-            return await getattr(self._active, method)(*args, **kwargs)
+            result = await getattr(self._active, method)(*args, **kwargs)
+            if self._active.name in self._diag:
+                self._mark_attempt(self._active.name, True)
+            return result
         except (UnknownSymbol, DataSourceError) as e:
             # неизвестный символ — не повод менять биржу
             if isinstance(e, UnknownSymbol):
                 raise
-            self.failures[self.mode] = str(e)[:120]
+            self._mark_attempt(self.mode, False, e)
             self._active = None
             await self.probe()
             return await getattr(self._active, method)(*args, **kwargs)
@@ -1161,8 +1199,6 @@ class FailoverSource(MarketDataSource):
     async def close(self) -> None:
         for d in self._delegates:
             await d.close()
-        if self._demo is not None:
-            await self._demo.close()
 
 
 # ════════════════════════════════════════════════════════════════
@@ -1170,31 +1206,38 @@ class FailoverSource(MarketDataSource):
 # ════════════════════════════════════════════════════════════════
 def build_source(settings: Settings) -> tuple[MarketDataSource, str]:
     """
-    Собирает источник данных по MARKET_DATA_MODE (без сетевых вызовов,
-    поэтому безопасно вызывать и из синхронного, и из async-кода):
-      auto — Bybit → Binance → MEXC, при полном отказе демо-рынок
-      live — только биржи (ошибка при недоступности всех)
-      demo — только синтетический рынок
-    Возвращает (source, mode). Реальный режим уточняется после первого
-    запроса: FailoverSource.mode / AppContext.mode.
-    """
-    mode = (settings.MARKET_DATA_MODE or "auto").lower()
+    Собирает источник РЕАЛЬНЫХ рыночных данных по MARKET_DATA_MODE
+    (без сетевых вызовов, безопасно из sync и async-кода):
 
-    from src.data.demo import DemoMarketSource
+      live — биржи Bybit → Binance → MEXC (только реальные данные);
+      auto — те же реальные биржи + реальный спот-контекст
+             (CoinGecko / Fear&Greed / CryptoCompare);
+      demo — УДАЛЁН: ошибка конфигурации (синтетических данных нет).
+
+    Когда все биржи недоступны, probe() выбрасывает ошибку — платформа
+    показывает «нет реальных данных», а не подменяет их синтетикой.
+    Возвращает (source, mode). Реальный режим уточняется после probe():
+    FailoverSource.mode.
+    """
+    mode = (settings.MARKET_DATA_MODE or "live").lower()
 
     if mode == "demo":
-        logger.info("Режим DEMO: синтетический рынок")
-        src = DemoMarketSource(settings)
-        return src, "demo"
+        raise DataSourceError(
+            "Режим MARKET_DATA_MODE=demo удалён: платформа работает только на "
+            "реальных данных бирж (live | auto)."
+        )
 
     failover = FailoverSource(
         settings,
         [BybitSource(settings), BinanceSource(settings), MexcSource(settings)],
-        allow_demo=(mode != "live"),
     )
     if mode == "live":
         return failover, "live"
-    return EnrichedSource(settings, failover), "auto"
+    if mode == "auto":
+        return EnrichedSource(settings, failover), "auto"
+    raise DataSourceError(
+        f"Неизвестный MARKET_DATA_MODE={mode!r}: допустимые значения live | auto (demo удалён)."
+    )
 
 
 # ── мелкие хелперы ──

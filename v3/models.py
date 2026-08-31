@@ -59,7 +59,6 @@ class DataBundle:
     btc_dominance: float | None = None
     news_sentiment: float | None = None
     news_items: list[dict[str, Any]] = field(default_factory=list)
-    is_demo: bool = False
     degraded: list[str] = field(default_factory=list)
     data_age_seconds: float | None = None
     symbol_price_history: list[float] = field(default_factory=list)
@@ -270,6 +269,9 @@ class TradingSignal:
     market: str = "USDT perpetual"
     timeframe: str = "15m"
     horizon: str = "15m-4h"
+    source: str = ""                            # реальная биржа-источник (bybit/binance/mexc)
+    scenario: str = ""                          # trend | reversal_choch | liquidity_sweep | range_reversion | breakout_watch
+    condition: str = ""                         # «условный сетап»: вход при выполнении условия
     reasons: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
     invalidation: str = ""
@@ -277,7 +279,6 @@ class TradingSignal:
     features: dict[str, Any] = field(default_factory=dict)
     score_breakdown: ScoreBreakdown = field(default_factory=ScoreBreakdown)
     risk_brief: RiskBrief = field(default_factory=RiskBrief)
-    is_demo: bool = False
     data_age_seconds: float | None = None
     stale: bool = False
     created_ms: int = field(default_factory=now_ms)
@@ -314,6 +315,9 @@ class TradingSignal:
             "market": self.market,
             "timeframe": self.timeframe,
             "horizon": self.horizon,
+            "source": self.source,
+            "scenario": self.scenario,
+            "condition": self.condition,
             "reasons": self.reasons,
             "risks": self.risks,
             "invalidation": self.invalidation,
@@ -321,7 +325,6 @@ class TradingSignal:
             "features": self.features,
             "score_breakdown": self.score_breakdown.to_dict(),
             "risk_brief": self.risk_brief.to_dict(),
-            "is_demo": self.is_demo,
             "data_age_seconds": self.data_age_seconds,
             "stale": self.stale,
             "created_ms": self.created_ms,

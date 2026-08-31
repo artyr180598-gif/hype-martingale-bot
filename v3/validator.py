@@ -34,8 +34,10 @@ def validate_signal(signal: TradingSignal, cfg: SignalConfig) -> list[str]:
         violations.append("need at least two targets")
     if signal.entry_zone and signal.entry_zone[1] <= 0:
         violations.append("entry zone invalid")
-    if signal.is_demo:
-        violations.append("demo data -- never publish as live")
+    # инвариант «только реальные данные»: публикуемый сигнал обязан иметь
+    # биржевой timestamp (возраст данных), иначе это не реальный рынок
+    if signal.data_age_seconds is None:
+        violations.append("no real market data (missing exchange timestamp)")
     if signal.stale:
         violations.append("stale market data")
     elif (

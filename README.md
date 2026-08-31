@@ -19,8 +19,10 @@ Market Data → Normalization → Scanner → Liquidity/Volume → Technical Ana
 
 * 🔎 **Интерактивный Telegram UI**: главное меню, «Сканировать рынок»,
   «Лучшие LONG/SHORT», «Топ возможности», «Анализ монеты», «Мой рынок»,
-  «Настройки», «Помощь»; пагинация, кнопки «Обновить», «PRO», «Назад»,
-  редактирование сообщений вместо спама.
+  «Настройки», «Помощь»; пагинация, кнопки «Обновить», «PRO», «Назад».
+  **История диалога не затирается**: независимые запросы публикуются новыми
+  сообщениями; правится только навигация внутри одного результата
+  (пагинация/«PRO»/«🔄 ОБНОВИТЬ»).
 * 🔒 **Закрытый бот**: `TELEGRAM_ALLOWED_USER_IDS` (fallback — числовой
   `TELEGRAM_ADMIN_CHAT_ID`); без allow-list доступ закрыт для всех.
 * 🧠 **Двухэтапный скан**: Stage 1 — быстрый отсев вселенной по
@@ -30,9 +32,11 @@ Market Data → Normalization → Scanner → Liquidity/Volume → Technical Ana
 * 🧪 **Индикаторы в контексте** (не «RSI<30 = BUY»): EMA/SMA, RSI, MACD, ATR,
   ADX, Bollinger, Stochastic, VWAP, volume-z, OBV/CVD, squeeze, SuperTrend.
 * 🏗 **Market structure**: HH/HL/LH/LL, BOS/CHoCH (свинги + зигзаг),
-  поддержка/сопротивление, инвалидация по структуре.
+  поддержка/сопротивление, инвалидация по структуре. Сценарии: тренд,
+  CHoCH-разворот, liquidity sweep, mean-reversion в диапазоне, условный пробой.
 * 📉 **Derivatives**: funding (история/тренд), open interest (+ изменение за
-  24ч после накопления истории), ликвидации (прокси по крупным сделкам Bybit),
+  24ч после накопления истории), **реальные ликвидации Bybit v5** (публичный
+  WebSocket `liquidation.<SYMBOL>`, один коллектор на процесс; офлайн → «н/д»),
   **Bybit Long/Short account-ratio** (публичный эндпоинт, 300s TTL) и
   **mark/index** (из тикера, 0 доп. запросов); спред/глубина стакана,
   imbalance, slippage-прокси.
@@ -53,9 +57,11 @@ Market Data → Normalization → Scanner → Liquidity/Volume → Technical Ana
   по направлению и market regime; walk-forward и read-only калибровка.
 * 🤖 **AI-слой только для объяснений**: rule-based по умолчанию, опциональный
   OpenAI; не может изменить direction/levels/score.
-* ✅ **Надёжность**: TTL-кэши (tickers/klines/стакан/funding/ликвидции),
-  параллельный сбор bundle, ретраи с экспоненциальным backoff + `Retry-After`
-  на 429, failover Bybit → Binance → MEXC → demo, graceful degradation.
+* ✅ **Надёжность и только реальные данные**: TTL-кэши (tickers/klines/стакан/
+  funding/ликвидции), параллельный сбор bundle, ретраи с экспоненциальным
+  backoff + `Retry-After` на 429, failover Bybit → Binance → MEXC (без
+  демо-фолбэка: `MARKET_DATA_MODE=demo` удалён), graceful degradation; без
+  данных — «Нет реальных данных», retry и диагностика по каждому источнику.
 
 ---
 
@@ -69,9 +75,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env         # заполните TELEGRAM_* при необходимости
 
-# офлайн-проверка (демо-рынок)
-MARKET_DATA_MODE=demo python -m v3 market
-MARKET_DATA_MODE=demo python -m v3 signal BTCUSDT
+# самодиагностика источников (офлайн покажет «недоступен», без подмены данными)
+python -m v3 pulse
 
 # live/auto (публичные данные Bybit, ключи не нужны)
 python -m v3 signal SOLUSDT --mode pro
@@ -142,13 +147,16 @@ Swagger: `/docs`.
 
 | Переменная | По умолчанию | Значение |
 |---|---|---|
-| `MARKET_DATA_MODE` | `auto` | `auto` / `live` / `demo` |
+| `MARKET_DATA_MODE` | `live` | `live` / `auto` (demo **удалён** — ошибка конфигурации при старте) |
 | `TELEGRAM_BOT_TOKEN` | пусто | токен бота (алиас `TELEGRAM_TOKEN`) |
 | `TELEGRAM_ALLOWED_USER_IDS` | пусто | user ids через запятую — **доступ бота закрыт без него** |
 | `TELEGRAM_ADMIN_CHAT_ID` | пусто | уведомления (numeric — fallback allow-list) |
 | `TIMEFRAMES` | `5m,15m,1h,4h,1d` | порядок быстрый → медленный |
 | `SCAN_TOP` | `20` | сколько кандидатов анализировать глубоко (Stage 2) |
-| `SCAN_SHOW_QUALITY_MIN` | `72` | порог показа в «ТОП» |
+| `SCAN_SHOW_QUALITY_MIN` | `72` | порог показа в строгом «⭐ ТОП» |
+| `SCAN_LIST_QUALITY_MIN` | `58` | порог тир-осознанных списков (B/C тоже видны, 0 < x ≤ 72) |
+| `MIN_RISK_REWARD_REVERSAL` | `1.5` | смягчённый R:R только для разворотных сценариев |
+| `LIQUIDATIONS_WS_ENABLED` | `true` | реальные ликвидации Bybit WS; недоступно → «н/д» |
 | `MAX_DATA_AGE_SECONDS` | `120` | stale → NO TRADE |
 | `QUALITY_MIN` | `55` | минимальный quality для сигнала |
 | `MIN_RISK_REWARD` | `1.8` | минимальный R:R |
@@ -162,11 +170,25 @@ make check   # ruff + pytest
 make test    # pytest
 ```
 
-**46 тестов**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
+**72 теста**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
 gate, lifecycle, backtest-метрики (+ разбивка regime/direction), калибровка,
 Telegram core/авторизация/callback'и/настройки, TTL-кэш, 429 retry,
 структурный entry zone, publisher/stale validation, config validation,
-Bybit account-ratio endpoint (+ 300s TTL).
+Bybit account-ratio endpoint (+ 300s TTL), **инварианты «только реальные
+данные»** (`v3/tests/test_realdata.py`: demo у конфигурации/factory удалён,
+fail-closed без тикера/свечей/timestamp, WS-ликвидации на фейк-сессии),
+**история диалога** (`v3/tests/test_telegram_history.py`: независимые запросы
+→ новые сообщения, навигация внутри результата → правка, без `delete`).
+
+## Только реальные данные (политика платформы)
+
+* **ТОЛЬКО** реальные биржи Bybit → Binance → MEXC; `MARKET_DATA_MODE=demo`
+  удалён: ошибка конфигурации на старте (и в `v3/config.py`, и в `build_source`).
+* Возраст данных — **по биржевым timestamp** (свеча/тикер); без биржевого
+  timestamp метрики НЕ публикуются: валидатор блокирует, движок отвечает NO TRADE.
+* Нет минимального набора (тикер + свечи) → сообщение «⚠️ Нет реальных данных —
+  анализ невозможен» + причины + вердикт по каждому источнику + кнопка
+  «🔄 ПОПРОБОВАТЬ СНОВА». Ничего не подставляется вместо недостающих данных.
 
 ## Развёртывание (Railway / Docker)
 

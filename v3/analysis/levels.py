@@ -23,9 +23,16 @@ def build_levels(
     atr: float,
     view: TimeframeView | None,
     cfg: SignalConfig,
+    stop_override: float | None = None,
 ) -> TradeLevels | None:
-    if direction not in ("LONG", "SHORT") or atr <= 0 or price <= 0:
+    if direction not in ("LONG", "SHORT") or price <= 0:
         return TradeLevels(direction="WAIT", entry_zone=(0.0, 0.0), stop_loss=0.0, targets=[], rr=0.0, atr=atr, atr_pct=atr / price * 100 if price else 0, stop_pct=0.0, invalidation="no entry")
+
+    fallback_notes: list[str] = []
+    if not math.isfinite(atr) or atr <= 0:
+        # fallback вместо отказа: 1.5% от цены как консервативная оценка ATR.
+        atr = price * 0.015
+        fallback_notes.append("auto_fallback: ATR недоступен → стоп по 1.5% от цены")
 
     is_long = direction == "LONG"
     sl_mult = _clip(cfg.ATR_SL_MULTIPLIER, cfg.ATR_MIN_SL_MULTIPLIER, cfg.ATR_MAX_SL_MULTIPLIER)
@@ -34,7 +41,9 @@ def build_levels(
 
     # Structure-based stop first, but keep it inside 0.8-3.5 ATR.
     stop = price - sl_mult * atr if is_long else price + sl_mult * atr
-    why = [f"ATR {atr:.8g} ({atr / price * 100:.2f}%), stop = {sl_mult:.1f}×ATR"]
+    why = fallback_notes + [f"ATR {atr:.8g} ({atr / price * 100:.2f}%), stop = {sl_mult:.1f}×ATR"]
+    if view is None:
+        why.append("auto_fallback: структура недоступна → уровни по ATR от цены")
 
     if view is not None and view.support is not None and is_long:
         dist = abs(price - view.support)
@@ -46,6 +55,13 @@ def build_levels(
         if view.resistance > price and cfg.ATR_MIN_SL_MULTIPLIER * atr <= dist <= cfg.ATR_MAX_SL_MULTIPLIER * atr:
             stop = view.resistance
             why.append(f"stop moved to structural resistance {view.resistance:.8g}")
+
+    # Явная подсказка стопа (например, от сценария liquidity sweep).
+    if stop_override is not None and (stop_override < price if is_long else stop_override > price):
+        dist = abs(price - stop_override)
+        if cfg.ATR_MIN_SL_MULTIPLIER * 0.5 * atr <= dist <= cfg.ATR_MAX_SL_MULTIPLIER * 1.1 * atr:
+            stop = stop_override
+            why.append(f"stop anchored to scenario level {stop_override:.8g}")
 
     # Entry zone: anchored to market structure when it is near the price.
     # A zone is always bounded to 1.0 ATR and stays close enough to fill

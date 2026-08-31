@@ -39,7 +39,9 @@ class Settings(BaseSettings):
     TELEGRAM_ALERT_MIN_SCORE: float = 70.0
 
     # ── БИРЖИ / ДАННЫЕ ─────────────────────────────────────────
-    MARKET_DATA_MODE: str = "auto"  # auto | live | demo
+    # live | auto — только реальные биржи. Режим demo удалён: платформа работает
+    # только на реальных данных (см. src/data/collector.build_source).
+    MARKET_DATA_MODE: str = "live"  # live | auto
     BYBIT_API_KEY: str = Field(
         default="", validation_alias=AliasChoices("BYBIT_API_KEY", "BYBIT_KEY", "BYBIT_APIKEY")
     )

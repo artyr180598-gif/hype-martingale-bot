@@ -43,7 +43,6 @@ def make_df(n: int = 200, start: float = 100.0) -> pd.DataFrame:
 class FakeExchange:
     """Minimal MarketDataSource-compatible fake used by the service tests."""
 
-    is_demo = False
     mode = "fake"
     name = "fake"
     settings = SimpleNamespace(HTTP_TIMEOUT_SECONDS=12.0, HTTP_MAX_RETRIES=3)
@@ -329,6 +328,7 @@ def test_publisher_downgrades_invalid_signal_keeps_reasons():
         uid="p2", symbol="Y", ts_ms=1, direction="LONG", status="CONFIRMED", score=90,
         confidence=0.9, quality=90, tier="S", rr=2, risk_score=3, price=100,
         entry_zone=(99, 100), stop_loss=98, targets=[102, 104, 106],
+        data_age_seconds=2.0,  # «свой» сигнал со свежего биржевого timestamp
     )
     out2, v2 = sanitize_for_publish(good, cfg)
     assert out2.direction == "LONG" and v2 == []
@@ -436,7 +436,6 @@ def test_scanner_best_setups_filters_direction_and_quality():
     class FakeEngine:
         class FakeData:
             mode = "fake"
-            is_demo = False
 
         data = FakeData()
 
@@ -473,5 +472,7 @@ def test_scanner_best_setups_filters_direction_and_quality():
     result = asyncio.run(scanner.run(tickers, limit=10, top=3))
     assert len(result.analyzed) == 3
     longs = scanner.best_setups("LONG")
-    assert [i["signal"].symbol for i in longs] == ["LONGUSDT"]
-    assert len(scanner.best_setups()) == 2  # weak filtered by SCAN_SHOW_QUALITY_MIN
+    assert [i["signal"].symbol for i in longs] == ["LONGUSDT", "WEAKUSDT"]
+    # weak (q=60) отфильтрован только для СТРОГОГО ТОПа, в тир-списках (≥58) виден
+    assert len(scanner.best_setups()) == 3
+    assert [i["signal"].symbol for i in scanner.top_setups()] == ["LONGUSDT", "SHORTUSDT"]

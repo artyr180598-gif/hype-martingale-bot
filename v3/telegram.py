@@ -34,7 +34,19 @@ from v3.tg.settings import UserSettingsService
 LOGGER_NAME = "v3.telegram"
 logger = get_logger(LOGGER_NAME)
 
-HELP_TEXT = """🤖 **HYPE v3 — futures signal intelligence**
+HELP_TEXT = """🤖 **HYPE — futures signal intelligence (только реальные данные)**
+
+Платформа анализирует ТОЛЬКО реальные данные бирж (Bybit → Binance → MEXC):
+цены, свечи, стакан, фандинг, OI, ликвидации, L/S ratio, новости. Никаких
+демо-данных и «приблизительных» значений: чего нет — показано как «н/д».
+
+Как читать оценку сетапа:
+  S 82–100 — отличный
+  A 72–81 — хороший
+  B 62–71 — средний, нужна дисциплина
+  C 50–61 — слабый, обычно не входим
+  ниже 50 — не входим
+⚠️ Оценка — это КАЧЕСТВО сетапа, а не вероятность прибыли.
 
 Кнопки — быстрее всего. Также работают команды:
 
@@ -65,9 +77,17 @@ MENU_TEXT = """🧠 **HYPE — CRYPTO MARKET INTELLIGENCE**
 
 @dataclass
 class BotReply:
+    """Ответ бота на callback/команду.
+
+    ``edit=False`` (по умолчанию) — НОВОЕ сообщение: история диалога никогда
+    не перезаписывается. ``edit=True`` — только для навигации внутри одного
+    результата (пагинация, переключение вида карточки, кнопка «🔄 ОБНОВИТЬ»).
+    Удаление сообщений запрещено — транспорт никогда не вызывает delete_message.
+    """
+
     text: str
     keyboard: Any = None
-    edit: bool = True
+    edit: bool = False
 
 
 class V3Core:
@@ -124,7 +144,7 @@ class V3Core:
                 f"tier={r['tier']} {r['status']}"
             )
         last = self.store.get_state("last_scan_ms", "0")
-        lines.extend(["", f"Последний скан: {last}", "Режим: " + self.data.mode])
+        lines.extend(["", f"Последний скан: {last}", f"Режим: {self.data.mode} (только реальные данные)"])
         lines.append(f"Активных сигналов: {len(self.lifecycle.active())}")
         if self.transport is not None:
             lines.append(f"Telegram: {'включён' if self.transport.enabled else 'выключен'}")
@@ -147,6 +167,7 @@ class V3Core:
         watchlist = ", ".join(getattr(watcher, "watchlist", []) or []) or "—"
         lines = [
             "🩺 Диагностика HYPE v3",
+            "  Политика данных: только реальные данные бирж (MARKET_DATA_MODE=demo удалён)",
             f"  Режим данных: {data_mode}",
             f"  TELEGRAM_BOT_TOKEN: {token_state}",
             f"  Telegram transport: {tg_state}",
@@ -157,9 +178,20 @@ class V3Core:
             f"  Последняя ошибка watcher: {last_error}",
             f"  Watchlist: {watchlist}",
             f"  Сохранено сигналов: {len(self.store.recent_signals(limit=10_000))}",
-            "",
-            "❗ Самодиагностика, не гарантия результата.",
         ]
+        diag_fn = getattr(self.data, "source_diagnostics", None)
+        if callable(diag_fn):
+            rows = diag_fn() or []
+            if rows:
+                lines.append("  Источники:")
+                for row in rows:
+                    state = "доступен" if (row.get("available") or row.get("healthy")) else "недоступен"
+                    err = f" ({row.get('last_error')})" if row.get("last_error") else ""
+                    lines.append(
+                        f"    • {row.get('source', '?')}: {state}{err}"
+                        f" [попыток {row.get('attempts', '-')}, ошибок подряд {row.get('consecutive_errors', '-')}]"
+                    )
+        lines.extend(["", "❗ Самодиагностика, не гарантия результата."])
         return "\n".join(lines)
 
     # ── message routing ──────────────────────────────────────────
@@ -216,12 +248,28 @@ class V3Core:
         self.store.save_signal(sig)
         if violations:
             metrics.record_error("publish.blocked", f"{symbol}: {violations}")
+        if sig.features.get("no_data"):
+            return rv.render_no_data(
+                sig.no_trade_reasons or sig.risks or ["нет реальных данных по символу"],
+                getattr(self.data, "source_diagnostics", lambda: [])(),
+            )
         return render_signal(sig, mode)
 
     async def scan_text(self, mode: str = "beginner") -> str:
         from v3.scanner import Scanner
 
-        tickers = await self.data.tickers()
+        try:
+            tickers = await self.data.tickers()
+        except Exception as exc:  # noqa: BLE001
+            return rv.render_no_data(
+                [f"тикеры недоступны: {exc}"],
+                getattr(self.data, "source_diagnostics", lambda: [])(),
+            )
+        if not tickers:
+            return rv.render_no_data(
+                ["биржа вернула пустой список тикеров"],
+                getattr(self.data, "source_diagnostics", lambda: [])(),
+            )
         scanner = Scanner(self.engine, self.cfg)
         result = await scanner.run(tickers, limit=self.cfg.SCAN_LIMIT, top=self.cfg.SCAN_TOP)
         self._scanner = scanner
@@ -233,28 +281,43 @@ class V3Core:
         self.store.set_state("last_scan_ms", now)
         self.store.set_state("v3_last_scan_ms", now)
 
-        best = scanner.best_setups()
+        setups = scanner.best_setups()
+        top = scanner.top_setups()
         longs = scanner.best_setups("LONG")
         shorts = scanner.best_setups("SHORT")
+        summary = rv.scan_summary(
+            result.scanned_total,
+            len(result.candidates),
+            len(result.analyzed),
+            setups,
+            result.mode or self.data.mode,
+            result.duration_sec,
+            result.ts_ms,
+        )
         lines = [
-            f"🔎 **СКАН РЫНКА** — {len(result.candidates)} кандидатов, "
-            f"{len(result.analyzed)} глубоких за {result.duration_sec:.1f}с",
+            "🔎 **СКАН РЫНКА**",
+            rv.source_stamp(result.mode or self.data.mode, result.ts_ms),
+            summary,
             "",
         ]
-        if not best:
-            lines.append("😶 Ни один кандидат не прошёл гейт качества. Это нормально: "
+        if not setups:
+            hint = rv.empty_list_hint(result.analyzed, len(result.candidates))
+            lines.append("😶 Ни один кандидат не прошёл гейт. Это нормально: "
                          "система предпочитает **NO TRADE** слабому сетапу.")
+            if hint:
+                lines.append(f"Почему: {hint}")
         else:
-            lines.append("✅ **ПРОШЕДШИЕ СЕТАПЫ**")
-            for i, item in enumerate(best[:5], 1):
+            lines.append("✅ **НАЙДЕНО СЕТАПОВ**")
+            for i, item in enumerate(setups[:5], 1):
                 s = item["signal"]
+                emoji = "🟢" if s.direction == "LONG" else "🔻"
                 lines.append(
-                    f"{i}. {s.symbol} {s.direction} Q={s.quality:.0f} "
-                    f"R:R 1:{s.rr:.1f} ({s.regime})"
+                    f"{i}. {emoji} {s.symbol} {s.direction} — {rv.quality_label(s.quality, s.tier, self.cfg)}"
                 )
+            lines.append("Подробнее: 🔥/🔻/⭐ кнопки ниже.")
         lines += [
             "",
-            f"🔥 LONG: {len(longs)} | 🔻 SHORT: {len(shorts)} | ⭐ TOP: {len(best)}",
+            f"🔥 LONG: {len(longs)} | 🔻 SHORT: {len(shorts)} | ⭐ ТОП (строгий): {len(top)}",
             "❗ Аналитика, не гарантия прибыли.",
         ]
         return "\n".join(lines)
@@ -273,6 +336,11 @@ class V3Core:
         sig, _ = sanitize_for_publish(sig, self.cfg)
         self._signals[symbol] = sig
         self.store.save_signal(sig)
+        if sig.features.get("no_data"):
+            return rv.render_no_data(
+                sig.no_trade_reasons or sig.risks or ["нет реальных данных по символу"],
+                getattr(self.data, "source_diagnostics", lambda: [])(),
+            )
         return render_signal(sig, mode)
 
     async def update_coin(self, symbol: str) -> str:
@@ -284,17 +352,51 @@ class V3Core:
             return await self.coin_text(symbol, "pro")
         return render_signal(sig, "pro")
 
-    def top_text(self, kind: str, page: int = 0) -> str:
+    def top_items(self, kind: str) -> list[dict[str, Any]]:
+        """Сетапы раздела: «⭐ ТОП» — строгий порог, списки — тир-осознанные."""
         scanner = self._scanner
-        items = scanner.best_setups() if scanner is not None else []
+        if scanner is None:
+            return []
+        if kind == "top":
+            return scanner.top_setups()
         if kind == "longs":
-            items = scanner.best_setups("LONG") if scanner is not None else []
-        elif kind == "shorts":
-            items = scanner.best_setups("SHORT") if scanner is not None else []
+            return scanner.best_setups("LONG")
+        if kind == "shorts":
+            return scanner.best_setups("SHORT")
+        return scanner.best_setups()
+
+    def scan_stats_line(self) -> str:
+        if self._scanner is None or self._scanner.last is None:
+            return ""
+        result = self._scanner.last
+        setups = self._scanner.best_setups()
+        return rv.scan_summary(
+            result.scanned_total,
+            len(result.candidates),
+            len(result.analyzed),
+            setups,
+            result.mode or self.data.mode,
+            result.duration_sec,
+            result.ts_ms,
+        )
+
+    def top_text(self, kind: str, page: int = 0) -> str:
+        items = self.top_items(kind)
         pages = max(1, (len(items) + kb.PAGE_SIZE - 1) // kb.PAGE_SIZE)
         page = max(0, min(page, pages - 1))
-        title = {"top": "⭐ **ТОП ВОЗМОЖНОСТИ**", "longs": "🔥 **ЛУЧШИЕ LONG**", "shorts": "🔻 **ЛУЧШИЕ SHORT**"}.get(kind, "⭐ ТОП")
-        return rv.render_setup_list(items, title, page, pages)
+        title = {
+            "top": "⭐ **ТОП ВОЗМОЖНОСТИ** (строгий отбор)",
+            "longs": "🔥 **ЛУЧШИЕ LONG** (B/C тоже видны)",
+            "shorts": "🔻 **ЛУЧШИЕ SHORT** (B/C тоже видны)",
+        }.get(kind, "⭐ ТОП")
+        hint = ""
+        if not items and self._scanner is not None and self._scanner.last is not None:
+            hint = rv.empty_list_hint(self._scanner.last.analyzed, len(self._scanner.last.candidates))
+        return rv.render_setup_list(
+            items, title, page, pages, self.cfg,
+            stats_line=self.scan_stats_line(),
+            empty_hint=hint,
+        )
 
     def settings_text(self, user_id: int) -> str:
         return rv.render_settings(self.user_settings.get(user_id).to_dict())
@@ -351,30 +453,36 @@ class V3Core:
         return "\n".join(lines)
 
     # ── callback router ──────────────────────────────────────────
+    # Правила истории диалога (задача: сообщения не пропадают):
+    #   * независимый запрос (меню, скан, рынок, монета, настройки, помощь) —
+    #     ВСЕГДА новое сообщение (edit=False), старое не трогаем;
+    #   * навигация внутри одного результата (пагинация ◀️/▶️, переключение
+    #     PRO/карточки, «🔄 ОБНОВИТЬ») — edit того же сообщения (edit=True);
+    #   * delete_message не вызывается никогда.
     async def handle_callback(self, data: str, user_id: int | None = None) -> BotReply:
         if not self.authorize(user_id):
-            return BotReply(self.access_denied_text, edit=True)
+            return BotReply(self.access_denied_text, edit=False)
         data = (data or "").strip()
         if data == "menu":
-            return BotReply(self.menu_text(), kb.main_menu())
+            return BotReply(self.menu_text(), kb.main_menu(), edit=False)
         if data == "help":
-            return BotReply(HELP_TEXT, kb.glossary_menu())
+            return BotReply(HELP_TEXT, kb.glossary_menu(), edit=False)
         if data == "scan":
             text = await self.scan_text("beginner")
             k = kb.scan_results(
                 bool(self._scanner and self._scanner.best_setups("LONG")),
                 bool(self._scanner and self._scanner.best_setups("SHORT")),
-                bool(self._scanner and self._scanner.best_setups()),
+                bool(self._scanner and self._scanner.top_setups()),
             )
-            return BotReply(text, k)
+            return BotReply(text, k, edit=False)
         if data == "market":
-            return BotReply(await self.market_text(), kb.scan_action())
+            return BotReply(await self.market_text(), kb.scan_action(), edit=False)
         if data.startswith("list:"):
             _, kind, page = data.split(":")
-            text = self.top_text(kind, int(page or 0))
-            items = self._scanner.best_setups(kind.upper() if kind in ("longs", "shorts") else None) if self._scanner else []
+            items = self.top_items(kind)
             pages = max(1, (len(items) + kb.PAGE_SIZE - 1) // kb.PAGE_SIZE)
-            return BotReply(text, kb.setups_pager(kind, int(page or 0), pages))
+            text = self.top_text(kind, int(page or 0))
+            return BotReply(text, kb.setups_pager(kind, int(page or 0), pages), edit=True)
         if data.startswith("pick:"):
             page = int(data.split(":")[1] or 0)
             symbols = await self._pick_symbols()
@@ -384,63 +492,109 @@ class V3Core:
             text = (f"🔍 **АНАЛИЗ МОНЕТЫ** — выберите символ (стр. {page + 1}/{pages})\n\n"
                     + "\n".join(f"• `{s}`" for s in chunk)
                     + "\n\nМожно также просто отправить символ сообщением, например `SOLUSDT`.")
-            return BotReply(text, kb.coin_list(chunk, page, pages))
+            return BotReply(text, kb.coin_list(chunk, page, pages), edit=False)
         if data.startswith("coin:"):
             symbol = data.split(":", 1)[1].upper()
-            return BotReply(await self.coin_text(symbol, "beginner"), kb.coin_card(symbol))
+            return BotReply(await self.coin_text(symbol, "beginner"), kb.coin_card(symbol), edit=False)
         if data.startswith("update:"):
             symbol = data.split(":", 1)[1].upper()
-            return BotReply(await self.coin_text(symbol, "beginner"), kb.coin_card(symbol))
+            # кнопка «🔄 ОБНОВИТЬ» карточки — правим её же (fallback на новое
+            # сообщение в транспорте, если редактирование не удалось)
+            return BotReply(await self.coin_text(symbol, "beginner"), kb.coin_card(symbol), edit=True)
         if data.startswith("pro:"):
             symbol = data.split(":", 1)[1].upper()
-            return BotReply(await self.pro_coin(symbol), kb.coin_card(symbol))
+            return BotReply(await self.pro_coin(symbol), kb.coin_card(symbol), edit=True)
         if data.startswith("glossary:"):
             term = data.split(":", 1)[1]
             if term == "list":
-                return BotReply(rv.render_glossary("list"), kb.glossary_menu())
-            return BotReply(rv.render_glossary(term), kb.glossary_back(term))
+                return BotReply(rv.render_glossary("list"), kb.glossary_menu(), edit=True)
+            return BotReply(rv.render_glossary(term), kb.glossary_back(term), edit=True)
         if data == "settings":
             if user_id is None:
-                return BotReply("⚙️ Настройки доступны только из Telegram (укажите user_id).", edit=True)
-            return BotReply(self.settings_text(user_id), kb.settings_menu(self.user_settings.get(user_id).to_dict()))
+                return BotReply("⚙️ Настройки доступны только из Telegram (укажите user_id).", edit=False)
+            return BotReply(self.settings_text(user_id), kb.settings_menu(self.user_settings.get(user_id).to_dict()), edit=False)
         if data.startswith("set:mode:"):
             if user_id is None:
-                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=True)
+                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=False)
             mode = data.split(":", 2)[2]
             self.user_settings.apply(user_id, "mode", mode)
-            return BotReply(self.settings_text(user_id), kb.settings_menu(self.user_settings.get(user_id).to_dict()))
+            return BotReply(self.settings_text(user_id), kb.settings_menu(self.user_settings.get(user_id).to_dict()), edit=True)
         if data.startswith("set:deposit:custom"):
             if user_id is None:
-                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=True)
+                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=False)
             self._awaiting_deposit.add(user_id)
             return BotReply("💰 Введите сумму депозита в USD цифрами, например `2500`:\n\n0 — вернуться назад", kb.deposit_presets(), edit=True)
         if data.startswith("set:deposit:"):
             if user_id is None:
-                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=True)
+                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=False)
             value = data.split(":", 2)[2]
             self.user_settings.apply(user_id, "deposit_usd", value)
-            return BotReply(self.settings_text(user_id), kb.settings_menu(self.user_settings.get(user_id).to_dict()))
+            return BotReply(self.settings_text(user_id), kb.settings_menu(self.user_settings.get(user_id).to_dict()), edit=True)
         if data == "dep_custom":
             if user_id is None:
-                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=True)
+                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=False)
             self._awaiting_deposit.add(user_id)
             return BotReply("💰 Введите сумму депозита в USD цифрами, например `2500`:",
                             kb.deposit_presets(), edit=True)
         if data == "set:risk":
             if user_id is None:
-                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=True)
+                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=False)
             return BotReply("⚠️ **Риск на сделку** — выберите пресет:\n\n"
                             "Меньший риск = меньший размер позиции при том же стопе.",
                             kb.risk_presets(), edit=True)
         if data.startswith("set:risk:"):
             if user_id is None:
-                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=True)
+                return BotReply("⚙️ Настройки доступны только из Telegram.", edit=False)
             value = data.split(":", 2)[2]
             self.user_settings.apply(user_id, "risk_per_trade_pct", value)
-            return BotReply(self.settings_text(user_id), kb.settings_menu(self.user_settings.get(user_id).to_dict()))
+            return BotReply(self.settings_text(user_id), kb.settings_menu(self.user_settings.get(user_id).to_dict()), edit=True)
         if data == "back:menu":
-            return BotReply(self.menu_text(), kb.main_menu())
-        return BotReply(self.menu_text(), kb.main_menu())
+            return BotReply(self.menu_text(), kb.main_menu(), edit=True)
+        return BotReply(self.menu_text(), kb.main_menu(), edit=False)
+
+    # ── исполнение BotReply транспортом (тестируемо с fake query) ──
+    async def dispatch_callback(self, query: Any) -> None:
+        """Маршрутизация + «исполнение» ответа.
+
+        * ``reply.edit == False`` — ВСЕГДА ``query.message.answer`` (история
+          диалога не перезаписывается);
+        * ``reply.edit == True`` — ``edit_text``, при ошибке редактирования
+          (кроме "message is not modified") — fallback на новое ``answer``;
+        * ``delete_message`` не вызывается никогда.
+        """
+        uid = getattr(query.from_user, "id", None) if getattr(query, "from_user", None) else None
+        if uid is not None and not self.authorize(uid):
+            await query.answer("⛔ Нет доступа", show_alert=True)
+            return
+        try:
+            await query.answer()
+        except Exception:  # noqa: BLE001
+            pass
+        reply = await self.handle_callback(query.data or "", uid)
+
+        async def _send_new() -> None:
+            for chunks_i, chunk in enumerate(_split(reply.text, 4000)):
+                if chunks_i == 0 and reply.keyboard is not None:
+                    await query.message.answer(chunk, reply_markup=reply.keyboard, disable_web_page_preview=True)
+                else:
+                    await query.message.answer(chunk, disable_web_page_preview=True)
+
+        if not reply.edit:
+            await _send_new()
+            return
+        try:
+            if reply.keyboard is not None:
+                await query.message.edit_text(reply.text[:4000], reply_markup=reply.keyboard,
+                                              disable_web_page_preview=True)
+            else:
+                await query.message.edit_text(reply.text[:4000], disable_web_page_preview=True)
+        except Exception as exc:  # noqa: BLE001
+            if "message is not modified" in str(exc).lower():
+                return
+            try:
+                await _send_new()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _pick_symbols(self) -> list[str]:
         """Symbols for the coin picker: watchlist + last scan results."""
@@ -513,21 +667,7 @@ class V3TelegramTransport:
 
         @self._dp.callback_query()
         async def _on_callback(query: CallbackQuery) -> None:  # pragma: no cover
-            uid = getattr(query.from_user, "id", None) if query.from_user else None
-            if uid is not None and not self.core.authorize(uid):
-                await query.answer("⛔ Нет доступа", show_alert=True)
-                return
-            reply = await self.core.handle_callback(query.data or "", uid)
-            for chunk in _split(reply.text, 4000):
-                if reply.keyboard is not None:
-                    await query.message.edit_text(chunk, reply_markup=reply.keyboard, disable_web_page_preview=True)
-                    break
-                await query.message.edit_text(chunk, disable_web_page_preview=True)
-            if reply.keyboard is None:
-                try:
-                    await query.message.edit_text(reply.text, disable_web_page_preview=True)
-                except Exception:  # noqa: BLE001
-                    await query.message.answer(reply.text, disable_web_page_preview=True)
+            await self.core.dispatch_callback(query)
 
         await self._dp.start_polling(self._bot, handle_signals=handle_signals)
 
