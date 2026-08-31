@@ -107,9 +107,10 @@ python -m v3 backtest BTCUSDT --tf 15m --bars 2000 --warmup 120
 python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
 python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000
 
-# passive lifecycle observer / telegram
+# passive lifecycle observer / telegram / full daemon
 python -m v3 watch BTCUSDT,ETHUSDT
-python -m v3 bot
+python -m v3 bot            # Telegram + watcher
+python -m v3 daemon --port 8400   # API + watcher + Telegram
 
 # read-only HTTP
 python -m v3 serve --port 8400

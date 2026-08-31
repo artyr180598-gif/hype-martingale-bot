@@ -19,8 +19,9 @@
 > python -m v3 walkforward BTCUSDT       # walk-forward стабильность
 > python -m v3 calibrate BTCUSDT,ETHUSDT # read-only калибровка порогов
 > python -m v3 watch                     # фоновый lifecycle-наблюдатель
-> python -m v3 bot                       # Telegram (beginner/pro + /walkforward)
+> python -m v3 bot                       # Telegram + watcher (beginner/pro, /walkforward)
 > python -m v3 serve                     # FastAPI: /health, /api/v3/...
+> python -m v3 daemon                    # API + watcher + Telegram в одном процессе
 > python -m v3 status                    # сохранённые сигналы + health
 > ```
 > Документация модуля: [`v3/README.md`](v3/README.md). Полный список переменных:
@@ -378,7 +379,7 @@ python main.py            # дашборд + сканер + наблюдение
 | `RUN_V2` | `false` | `true` — `python -m v2 ${V2_COMMAND:-serve}`; иначе `python main.py` |
 | `V2_COMMAND` | `serve` | команда v2: `serve` / `bot` / `watch` / `scan` / `status` |
 | `RUN_V3` | `false` | `true` — `python -m v3 ${V3_COMMAND:-serve}` |
-| `V3_COMMAND` | `serve` | команда v3: `serve` / `watch` / `bot` / `scan` / `signal` / `backtest` / `walkforward` / `status` |
+| `V3_COMMAND` | `serve` | команда v3: `serve` / `daemon` / `watch` / `bot` / `scan` / `signal` / `backtest` / `walkforward` / `calibrate` / `status` |
 | `PORT` | `8000` | порт HTTP; Railway задаёт сам |
 
 `V2_COMMAND=serve` теперь поднимает **HTTP/дашборд и Telegram-кнопки
@@ -402,6 +403,10 @@ python main.py            # дашборд + сканер + наблюдение
 *`v3-bot` не описан в дефолтном compose, чтобы не создавать второй поллер без
 токена; запускается отдельно: `docker compose run --rm v3-worker ...` либо
 `RUN_V3=true V3_COMMAND=bot python -m v3 bot`.
+
+Для one-process-деплоя (например Railway web-процесс) достаточно
+`RUN_V3=true V3_COMMAND=daemon` — это API + watcher + Telegram в одном процессе,
+healthcheck остаётся на `/health`.
 
 Весь стек из одного файла:
 
@@ -448,8 +453,9 @@ python -m v3 backtest BTCUSDT --tf 15m --bars 2000
 python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
 python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000  # read-only калибровка
 python -m v3 watch BTCUSDT,ETHUSDT   # фоновый наблюдатель
-python -m v3 bot                            # Telegram-бот v3
+python -m v3 bot                            # Telegram-бот v3 + watcher
 python -m v3 serve --port 8400              # FastAPI v3
+python -m v3 daemon --port 8400             # API + watcher + Telegram в одном процессе
 python -m v3 status                         # сигнал + health
 ```
 

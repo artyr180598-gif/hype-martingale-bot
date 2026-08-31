@@ -117,6 +117,45 @@ def run_serve(host: str = "0.0.0.0", port: int = 8400) -> int:
     return 0
 
 
+async def run_daemon(host: str = "0.0.0.0", port: int = 8400) -> int:
+    """One-process v3 daemon: FastAPI + lifecycle watcher + Telegram bot."""
+    import os
+
+    import uvicorn
+
+    from v3.telegram import V3Core, V3TelegramTransport
+    from v3.watcher import V3Watcher
+
+    port = int(os.environ.get("PORT") or port)
+    data, engine = _engine()
+    store = SignalStore(_cfg.db_path)
+    lifecycle = SignalLifecycle(store, _cfg.COOLDOWN_SECONDS, _cfg.MAX_ACTIVE_SIGNALS)
+    core = V3Core(data, engine, store, lifecycle, _cfg)
+    transport = V3TelegramTransport(core, _cfg)
+    watcher = V3Watcher(data, engine, store, lifecycle, _cfg)
+    await data.probe()
+
+    async def notify(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            text = _event_alert(item)
+            if text:
+                await transport.notify_text(text)
+
+    await watcher.start(notify=notify, interval=_cfg.SCAN_INTERVAL_SECONDS)
+    tasks: list[asyncio.Task[Any]] = []
+    if transport.enabled:
+        tasks.append(asyncio.create_task(transport.start(), name="v3.telegram"))
+    else:
+        print("Telegram выключен: только watcher + API")
+    tasks.append(asyncio.create_task(uvicorn.Server(uvicorn.Config("v3.api:app", host=host, port=port, log_level="info")).serve(), name="v3.api"))
+    try:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        await watcher.stop()
+        await transport.stop()
+    return 0
+
+
 async def run_bot() -> int:
     from v3.telegram import V3Core, V3TelegramTransport
     from v3.watcher import V3Watcher
@@ -271,7 +310,7 @@ def _macro_from(tf: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="HYPE v3 — futures signal intelligence")
-    parser.add_argument("command", nargs="?", default="status", help="signal | scan | backtest | walkforward | calibrate | status | serve | bot | watch")
+    parser.add_argument("command", nargs="?", default="status", help="signal | scan | backtest | walkforward | calibrate | status | serve | daemon | bot | watch")
     parser.add_argument("symbol", nargs="?", default="", help="symbol")
     parser.add_argument("--mode", default="beginner", help="beginner | pro")
     parser.add_argument("--tf", default="15m", help="entry timeframe")
@@ -312,10 +351,12 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(run_status())
     if cmd == "serve":
         return run_serve(args.host, args.port)
+    if cmd == "daemon":
+        return asyncio.run(run_daemon(args.host, args.port))
     if cmd == "bot":
         return asyncio.run(run_bot())
     if cmd == "watch":
         syms = [s.strip().upper() for s in args.symbol.split(",") if s.strip()] if args.symbol else None
         return asyncio.run(run_watch(syms))
-    print("Доступные команды: signal, scan, backtest, walkforward, calibrate, status, serve, bot, watch")
+    print("Доступные команды: signal, scan, backtest, walkforward, calibrate, status, serve, daemon, bot, watch")
     return 2

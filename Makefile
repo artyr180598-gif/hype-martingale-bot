@@ -1,6 +1,6 @@
 .PHONY: help install test lint check format run run-api run-scan analyze spectrum plan backtest clean \
 	v2-scan v2-analyze v2-watch v2-serve v2-bot v2-status v2-test v2-check \
-	v3-signal v3-scan v3-backtest v3-walkforward v3-calibrate v3-serve v3-bot v3-watch v3-status v3-test v3-check
+	v3-signal v3-scan v3-backtest v3-walkforward v3-calibrate v3-serve v3-daemon v3-bot v3-watch v3-status v3-test v3-check
 
 help:
 	@echo "HYPE Advisor — аналитический крипто-советник"
@@ -34,7 +34,8 @@ help:
 	@echo "  make v3-walkforward SYM=BTCUSDT TF=15m BARS=5000 FOLDS=5 - walk-forward"
 	@echo "  make v3-calibrate SYMS=BTCUSDT,ETHUSDT TF=15m BARS=2000 - калибровка порогов на выборке"
 	@echo "  make v3-serve PORT=8400          - FastAPI-стенд v3"
-	@echo "  make v3-bot                     - Telegram-бот v3"
+	@echo "  make v3-daemon PORT=8400         - API + watcher + Telegram в одном процессе"
+	@echo "  make v3-bot                     - Telegram-бот v3 + watcher"
 	@echo "  make v3-watch SYMS=BTCUSDT,ETHUSDT - фоновый watcher v3"
 	@echo "  make v3-status                  - сохранённые v3-сигналы и health"
 	@echo "  make v3-test                    - тесты v3"
@@ -122,6 +123,9 @@ v3-calibrate:
 
 v3-serve:
 	python -m v3 serve --host $(or $(HOST),0.0.0.0) --port $(or $(PORT),8400)
+
+v3-daemon:
+	python -m v3 daemon --host $(or $(HOST),0.0.0.0) --port $(or $(PORT),8400)
 
 v3-bot:
 	python -m v3 bot
