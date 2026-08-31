@@ -1,8 +1,7 @@
 # Security
 
-This project is an **analytical** crypto futures/system, not an order-execution
-platform. The v3 engine has no live order path (v2 paper/live executor remains
-fully separated and defaults to paper).
+This project is an **analytical** crypto futures system, not an order-execution
+platform. The unified engine has no live order path at all.
 
 ## What is safe by design
 
@@ -10,10 +9,11 @@ fully separated and defaults to paper).
   `.gitignore` already excludes `.env`, `*.log`, `data/`.
 * Exchange credentials are read only from environment variables; the live
   public sources (Bybit/Binance/MEXC) do not require them.
-* The v3 signal engine never submits orders. `EXECUTOR_MODE=live` requires
-  `EXECUTOR_ALLOW_LIVE=true` and keys, and lives in v2, not v3.
+* The unified signal engine never submits orders and has no order/execution
+  module.
 * The AI layer is explanation-only. It cannot change market data, direction,
   levels or score; the deterministic gate always runs first.
+* Heavy/expensive API endpoints can be protected with `V3_API_TOKEN`.
 
 ## Configuration guidance
 
@@ -32,6 +32,8 @@ fully separated and defaults to paper).
 * Signals must pass `v3.validator.validate_for_publish` (R:R, risk, confidence,
   quality, liquidity, demo-data checks).
 * The API is read-only; it does not accept orders or credentials.
+* `V3_API_TOKEN` is compared with the `X-API-Token` header on heavy endpoints;
+  `None`/empty keeps local development open.
 
 ## Reporting a vulnerability
 

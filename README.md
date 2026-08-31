@@ -1,334 +1,73 @@
-# HYPE Advisor — профессиональный крипто-советник (спот + фьючерсы)
+# HYPE Futures Signal Intelligence
 
-> ## 🆕 v3 — Futures Signal Intelligence (USDT perpetual)
-> Отдельная production-архитектура для **perpetual futures** в [`v3/`](v3/README.md):
-> автоматический сканер вселенной USDT-perp → multi-timeframe (1m/5m/15m/1h/4h) →
-> regime detection → derivatives (funding/OI/liquidations) → order flow/liquidity →
-> BTC/market context → интерпретируемый scoring → entry/SL/TP от ATR → риск → 
-> **детерминированный NO-TRADE gate** → lifecycle + SQLite → walk-forward backtest
-> → beginner/pro отчёты → объяснимый AI-слой (rule-based по умолчанию, OpenAI
-> опционально) → observability `/health` → stale-data-блокировка. Это **не**
-> автотрейдинг: сигнальный движок и исполнение полностью разделены, v3 по
-> умолчанию только пишет сигналы.
->
-> ```bash
-> python -m v3 signal BTCUSDT            # анализ/сигнал
-> python -m v3 signal BTCUSDT pro        # полный факторный разбор
-> python -m v3 scan                      # скан вселенной фьючерсов
-> python -m v3 backtest BTCUSDT --tf 15m # бэктест с realistic execution
-> python -m v3 walkforward BTCUSDT       # walk-forward стабильность
-> python -m v3 calibrate BTCUSDT,ETHUSDT # read-only калибровка порогов
-> python -m v3 watch                     # фоновый lifecycle-наблюдатель
-> python -m v3 bot                       # Telegram + watcher (beginner/pro, /walkforward)
-> python -m v3 serve                     # FastAPI: /health, /api/v3/...
-> python -m v3 daemon                    # API + watcher + Telegram в одном процессе
-> python -m v3 status                    # сохранённые сигналы + health
-> ```
-> Документация модуля: [`v3/README.md`](v3/README.md). Полный список переменных:
-> [`v3/.env.example`](v3/.env.example).
+Единый production-движок для **USDT/USDC perpetual futures**: сканер вселенной,
+multi-timeframe анализ, regime detection, производные/funding/order-flow,
+детерминированный `LONG / SHORT / NO-TRADE` gate, explainable AI-слой,
+walk-forward валидация, lifecycle + SQLite, Telegram beginner/pro,
+observability и безопасный read-only API.
 
-> ## 🆕 v2 — новая архитектура (каталог [`v2/`](v2/README.md))
-> Асинхронный ввод/вывод с WebSocket, **трёхуровневый сканер**
-> (объём за 5 минут → скам-фильтр по холдерам/LP/контракту → ончейн-профиль
-> деплоера), динамические стоп/цель от **ATR**, Markdown-отчёты с вердиктом и
-> пояснением каждой цифры. Запуск: `python -m v2 scan`, `python -m v2 analyze AURORA`,
-> либо `python main.py v2 …`. При деплое версия выбирается переменной `RUN_V2`
-> (см. `entrypoint.sh`). В Telegram-боте v2 кнопки «🆕 Движок: v2» / «🧮 Движок: v1»
-> переключают движок анализа для чата.
-> Текущая версия ниже (`src/`, `main.py`) сохранена как есть и продолжает работать.
+> Бот **не торгует**. Это аналитический сигнальный слой; исполнение ордеров
+> полностью отделено и в этом движке не реализовано.
 
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-304%20passed-brightgreen.svg)]()
-[![Telegram](https://img.shields.io/badge/Telegram-кнопочный%20бот-2ca5e0.svg)]()
+## Что было объединено
 
-**Бот НЕ торгует.** Он не имеет доступа к твоему счёту и не выставляет ордера.
-Он собирает данные с биржи, делает полный спектральный анализ и выдаёт готовый
-план: **куда входить, где стоп, где цели, сколько купить в USDT и в монетах —
-и что нажимать в приложении биржи.**
+- **v1 (`src/`)** — сохранено как *общее ядро данных*: failover-источники
+  Bybit / Binance / MEXC, публичные тикеры/свечи/фандинг/стакан/новости,
+  демо-рынок, индикаторы и волновая структура. Всё остальное (старый
+  CEX-советник, API, дашборд, отдельный Telegram-бот, charts) удалено.
+- **v2 (`v2/`)** — старый DEX/микрокап-сканер удалён. Полезная идея
+  «трёхуровневый скан → junk-фильтр → глубокий анализ» перенесена в
+  `v3/scanner.py` для CEX-фьючерсов.
+- **v3 (`v3/`)** — единственный движок: `python -m v3 ...` и `python main.py ...`.
 
-> Отход от мартингейла: стратегия удвоения удалена. Никаких усреднений
-> против стопа и гридов — только анализ, риск-менеджмент и советы.
+## Возможности
 
----
+- **Автономный скан** USDT-perp без жёсткого watchlist: отсев мусора по
+  turnover/спреду, heat-ранжирование, глубокий анализ топ-N.
+- **Multi-timeframe** 1m/5m/15m/1h/4h (настраивается).
+- **Regime detection**, derivatives (funding, OI, liquidations), order flow,
+  BTC/global context.
+- **NO-TRADE — полноценная рекомендация**: движок объясняет, почему входить рано.
+- **AI explainability**: rule-based по умолчанию + опциональный OpenAI.
+  Слой **не может** изменить direction, entry/stop/targets, score или confidence.
+- **Stale-data gate**: ticker/свечи старше `MAX_DATA_AGE_SECONDS` → NO-TRADE.
+- **Walk-forward** с fees/slippage/funding и вердиктом стабильности.
+- **Калибровка порогов** on-sample (read-only отчёт).
+- **Signal lifecycle**: cooldown, max-active, TP1/TP2/TP3/SL исходы в SQLite.
+- **Telegram**: `/signal ... pro`, `/scan`, `/scan pro`, `/walkforward`, `/status`,
+  + уведомления watcher'а о сигналах и закрытиях.
+- **API**: `/health`, `/api/v3/*`, Swagger, опциональный `X-API-Token`.
+- **Observability**: latency, analyses, scans, errors в `/health` и `/status`.
 
-## 📑 Содержание
-- [На основе каких проектов сделано](#-на-основе-каких-проектов-сделано)
-- [Главное: управление кнопками](#-главное-управление-кнопками)
-- [Что такое спектральный анализ](#-что-такое-спектральный-анализ)
-- [Карточка сделки для новичка](#-карточка-сделки-для-новичка)
-- [Бэктест: насколько бот угадывал](#-бэктест-насколько-бот-угадывал)
-- [Архитектура](#-архитектура)
-- [Быстрый старт](#-быстрый-старт)
-- [Деплой на Railway](#-деплой-на-railway)
-- [CLI-режимы](#-cli-режимы)
-- [REST API](#-rest-api)
-- [Переменные окружения](#-переменные-окружения)
-- [Режимы данных: live / auto / demo](#-режимы-данных-live--auto--demo)
-- [Тесты](#-тесты)
-- [Дисклеймер](#-дисклеймер)
-
----
-
-## 🏆 На основе каких проектов сделано
-
-Архитектура собрана из решений топ-7 open-source ботов для спота и фьючерсов
-(звёзды проверены через GitHub API 29.08.2026):
-
-| # | Проект | ⭐ | Что взято в HYPE Advisor |
-|---|--------|-----|--------------------------|
-| 1 | [freqtrade/freqtrade](https://github.com/freqtrade/freqtrade) | 53 804 | Кнопочный Telegram-интерфейс и компактный набор команд; режим dry-run (бумажные позиции вместо реальных ордеров); «защиты» — не спамить одним сигналом чаще раза в час |
-| 2 | [ccxt/ccxt](https://github.com/ccxt/ccxt) | 43 794 | Единый контракт источника данных + отдельные коннекторы бирж; нормализация символов; **precision/limits инструмента** (tick size, шаг лота, минимальный объём) — без них биржа отклонит ордер новичка |
-| 3 | [nautechsystems/nautilus_trader](https://github.com/nautechsystems/nautilus_trader) | 28 081 | Risk-движок с жёсткими лимитами **до** выдачи рекомендации: потолок плеча, лимит доли депозита в марже, отказ при низком R:R |
-| 4 | [hummingbot/hummingbot](https://github.com/hummingbot/hummingbot) | 19 690 | Анализ стакана (глубина ±1%, перекос, стены, спред); принцип «сначала симуляция, потом живые деньги» — отсюда демо-режим |
-| 5 | [jesse-ai/jesse](https://github.com/jesse-ai/jesse) | 8 392 | Размер позиции от процента риска (`qty = риск$ / |вход − стоп|`); широкая библиотека индикаторов; мультитаймфреймовые срезы без заглядывания в будущее |
-| 6 | [Drakkar-Software/OctoBot](https://github.com/Drakkar-Software/OctoBot) | 6 487 | Взвешенные «эвалюаторы» (тренд/моментум/волатильность/объём) вместо одного вердикта; ориентация на новичка — всё кнопками, код знать не нужно |
-| 7 | [Superalgos/Superalgos](https://github.com/Superalgos/Superalgos) | 5 629 | Идея визуального спектра факторов — отсюда тепловая карта «группы × таймфреймы» |
-
-Плюс [CryptoSignal/Crypto-Signal](https://github.com/CryptoSignal/Crypto-Signal)
-(5 621 ⭐) — пайплайн «индикатор → поведение → сигнал» и маршрутизация алертов.
-
----
-
-## 🎛 Главное: управление кнопками
-
-Всё делается нажатием — команды знать не обязательно.
+## Архитектура
 
 ```
-🧭 Главное меню
-├── 📊 Наблюдение      список монет с рейтингом → нажми на монету
-├── 🔎 Скан рынка      поиск скрытых монет по всей вселенной фьючерсов
-├── 💎 Находки         последние результаты сканера
-├── 🌡 Рынок           Fear & Greed, капитализация, доминация BTC
-├── 📰 Новости         с сентиментом
-├── 📚 Гайд новичку    правила риска, плечо, чего не делать
-├── 🧪 Бэктест         спросит тикер → прогон по истории за 30 дней
-└── ⚙️ Настройки       депозит, риск %, плечо, биржа, фьючерсы/спот
-
-Карточка монеты
-├── 🔬 Полный анализ   ← ОДНА КНОПКА = весь анализ
-├── 🎯 План входа      карточка сделки: объём + «что нажимать»
-├── 📉 График          свечи с зоной входа, стопом и целями
-├── 🌈 Спектр          текстовый спектр + тепловая карта
-├── 🧪 Бэктест         насколько бот угадывал на истории этой монеты
-└── ➕ В наблюдение    алерты по этой монете
+src/data/ (Bybit/Binance/MEXC failover + demo, indicators, models)
+src/analysis/waves.py (structure/volatility helpers)
+src/core/ + src/config/ (logging, time, errors, settings)
+        │
+        ▼
+v3.data.FuturesDataService   (validation, stale detection, normalisation)
+        │
+        ▼
+v3.analysis.*                (timeframes, regime, derivatives, orderflow, context, scoring, levels, risk)
+        │
+        ▼
+v3.engine.FuturesSignalEngine → deterministic NO-TRADE gate
+        │
+        ├── LONG / SHORT
+        └── WAIT / NO_TRADE
+        │
+        ▼
+v3.store + SignalLifecycle   (SQLite, cooldown, active book)
+        │
+        ▼
+v3.report / v3.telegram / v3.api / v3.cli
 ```
 
-**🔬 Полный анализ** одной кнопкой присылает пять сообщений:
-вердикт и план → график цены → спектральный разбор → тепловая карта спектра →
-карточка сделки с пошаговой инструкцией.
+Подробности модулей: [`v3/README.md`](v3/README.md).
 
-Настройки хранятся в SQLite отдельно для каждого чата, поэтому бот считает
-объём позиции под **твой** депозит.
-
----
-
-## 🌈 Что такое спектральный анализ
-
-Вместо одного «покупай/не покупай» строится спектр по 8 измерениям
-(модуль `src/analysis/spectrum.py`):
-
-| Группа | Вес | Что смотрит |
-|--------|-----|-------------|
-| Таймфреймы | 24% | 5m, 15m, 1h, 4h, 1d — совпадение трендов |
-| Тренд | 20% | стек EMA 9/20/50, ADX и DI, SuperTrend, цена к VWAP |
-| Моментум | 14% | RSI (с контрарианской логикой на экстремумах), MACD, Stochastic, ROC |
-| Объём и поток | 12% | OBV, CVD (дельта), MFI, z-score объёма |
-| Деривативы | 9% | фандинг и его тренд, ликвидации лонгов/шортов |
-| Волатильность | 8% | ATR-процентиль, squeeze (BB внутри Keltner) |
-| Стакан | 7% | глубина ±1%, перекос, спред |
-| Контекст | 6% | тренд BTC как бета-фильтр, Fear & Greed, сентимент новостей |
-
-Каждый фактор даёт оценку от −1 до +1. Итог — взвешенная сумма:
-направление (LONG/SHORT/WAIT), сила, **confluence 0–100** и уверенность.
-
-Как это выглядит в Telegram:
-
-```
-⏸ SOL: спектр +0.11 → WAIT, confluence 14/100 | конфликт таймфреймов: вверх 1, вниз 4
-
-🟥 Таймфреймы     ▰▰▰▱▱▱▱▱ -0.41
-🟩 Тренд          ▰▰▰▰▰▰▰▱ +0.82
-🟩 Моментум       ▰▱▱▱▱▱▱▱ +0.18
-⬜ Волатильность  ▰▱▱▱▱▱▱▱ -0.08
-⬜ Объём и поток  ▱▱▱▱▱▱▱▱ -0.05
-⬜ Стакан         ▰▱▱▱▱▱▱▱ +0.08
-⬜ Деривативы     ▱▱▱▱▱▱▱▱ -0.02
-🟩 Контекст рынка ▰▰▰▱▱▱▱▱ +0.42
-```
-
-**WAIT — это полноценная рекомендация**, а не отсутствие ответа: бот объясняет,
-почему входить рано и что должно произойти.
-
----
-
-## 🎯 Карточка сделки для новичка
-
-Кнопка **🎯 План входа** считает деньги и пишет инструкцию под твою биржу.
-Реальный пример вывода (депозит $500, риск 1%):
-
-```
-🟢 SOLUSDT — LONG (фьючерсы, bybit)
-Рейтинг сделки: R:R 1:2.3 | риск 1% депозита
-
-🎯 УРОВНИ
-Вход (лимит): 171.01 – 171.93
-Стоп-лосс: 168.92 (-1.22%)
-Цель 1: 175.85 — закрыть 50% позиции
-Цель 2: 177.34 — закрыть 30% позиции
-Цель 3: 179.76 — закрыть остаток
-Безубыток (с учётом комиссий): 171.19
-
-💰 СКОЛЬКО ПОКУПАТЬ
-Депозит: $500.00
-Риск на сделку (1%): $1.83
-Объём позиции: $149.99
-Количество: 0.8771 SOL
-Плечо: 2x → маржа $74.99
-Ликвидация (оценка): 86.36
-Стоп-лосс заберёт: -$1.99
-Цель 1 принесёт: $4.08
-
-👆 ЧТО НАЖИМАТЬ
-1. Открой приложение Bybit → внизу вкладка «Деривативы» (Derivatives).
-2. В строке поиска сверху введи SOL и выбери пару SOLUSDT (USDT Perpetual).
-3. Слева от плеча нажми на тип маржи и выбери «Изолированная»…
-4. Нажми на цифру плеча (например «10x») → поставь ползунок на 2x → «Подтвердить».
-5. В панели ордера выбери тип «Лимитный» (Limit).
-6. В поле «Цена» вставь 171.01 (диапазон зоны входа 171.01–171.93).
-7. В поле «Количество» переключи на USDT и введи 149.99. Это даст ~0.8771 SOL.
-8. Нажми на шестерёнку/«TP/SL» и заполни: Take Profit 175.85, Stop Loss 168.92.
-9. Проверь строку «Маржа»: должно быть около $74.99.
-10. Нажми зелёную «Купить / Long».
-11. После исполнения зайди во вкладку «Позиции» и убедись, что TP и SL стоят.
-
-✅ ПРОВЕРЬ ПЕРЕД ВХОДОМ · 🚪 КОГДА ВЫХОДИТЬ · ⚠️ ПРЕДУПРЕЖДЕНИЯ
-```
-
-### Как считается объём (`src/analysis/advisor.py`)
-
-```
-риск в $   = депозит × риск%
-количество = риск$ / |вход − стоп|
-объём в $  = количество × вход
-маржа      = объём / плечо
-```
-
-Плечо **не увеличивает риск** — риск задан процентом, плечо лишь уменьшает
-замороженную маржу. Risk-движок дополнительно:
-
-- не поднимает плечо выше 10x, даже если `MAX_LEVERAGE` больше;
-- режет плечо при высокой и экстремальной волатильности;
-- ограничивает маржу долей `MAX_POSITION_PCT` депозита и честно пересчитывает фактический риск;
-- учитывает tick size / шаг лота / минимальный объём биржи;
-- **отказывается рекомендовать сделку**, если R:R ниже `MIN_RISK_REWARD`,
-  уверенность сценария ниже 45%, или если SHORT запрошен на споте.
-
-Инструкции есть для 4 комбинаций: **Bybit фьючерсы / Bybit спот /
-Binance фьючерсы / Binance спот** (переключается в ⚙️ Настройках).
-
----
-
-## 🧪 Бэктест: насколько бот угадывал
-
-Кнопка **🧪 Бэктест** (в меню монеты и в главном меню) прогоняет советника
-по реальной истории и показывает, сколько бы он заработал или потерял.
-
-### Главное правило: никакого заглядывания в будущее
-
-Бэктест вызывает **тот же самый** `AnalysisEngine.analyze_frames()`, что и
-живой режим (backtest/live parity, как в nautilus_trader). На шаге `i` в
-анализ попадают только бары `<= i`, причём для старших таймфреймов — только
-уже **закрытые**: бар с `open_time = t` виден лишь когда `t + tf <= ts + tf_entry`.
-Сделка открывается начиная с бара `i+1`.
-
-### Как симулируется сделка
-
-| Что | Как |
-|-----|-----|
-| Вход | лимитником в зону из плана; если цена не дошла — сделки нет |
-| Гэп сквозь стоп | мгновенный стоп-аут по цене открытия (убыток, не «плюс из воздуха») |
-| Внутри бара | если задеты и стоп, и цель — считается **худший** исход (стоп) |
-| Выходы | 50% на цели 1 (стоп → в безубыток), 30% на цели 2, остаток на цели 3 |
-| Издержки | комиссия taker 0.055% за сторону + слиппедж 0.02% на каждый филл |
-| Результат | в **R** — кратностях начального риска, не зависит от плеча и депозита |
-
-### Честная проверка вместо красивой цифры
-
-Отчёт показывает **точку безубыточности**: при среднем выигрыше `W` и среднем
-проигрыше `L` стратегия окупается ровно при винрейте `L/(W+L)`. Если фактический
-винрейт ниже — бот в минусе, сколько бы сделок он ни делал. Рядом всегда
-`buy&hold` за тот же период.
-
-### Что бэктест уже нашёл и что было исправлено
-
-| Находка | Что сделано |
-|---------|-------------|
-| Гэп сквозь стоп считался «стопом в плюс» и раздувал винрейт с 36% до 70% | отдельная ветка `gap_stop`: это всегда убыток |
-| Цель 1 срабатывала повторно на следующих барах | флаг `done[k]` — каждая цель исполняется один раз |
-| Бар старшего ТФ попадал в анализ до закрытия (look-ahead) | `closed_upto()` сравнивает с моментом закрытия текущего бара |
-| Фильтр по R:R **вредил**: высокое R:R движок даёт ужатием стопа, а на узком стопе комиссии съедают 0.5–1.1R | фильтр по **стоимости сделки в R** (`max_cost_r`) и минимальной ширине стопа |
-| Зона входа часто стоит далеко от цены: на истории BTC/1h исполнилось только **9%** входов | зона подтягивается к цене (не ближе 1 ATR) + метрика `fill_rate_pct` |
-| **R:R считался от нижнего края зоны, а лимитник исполняется по верхнему** — у LONG цель 1 оказывалась ниже цены входа, и все траншеи закрывались в минус при формально плюсовом плане | `entry_ref` = худший филл в зоне; регрессионный тест в `test_backtest.py` |
-| Прибыль отдавалась обратно: после цели 1 цена редко доходит до целей 2–3 | опция трейлинг-стопа; A/B показал, что на BTC/1h пользы нет, поэтому по умолчанию выключена |
-
-Эффект фильтров издержек на одном и том же прогоне: издержки **6.10 R → 1.54 R**,
-матожидание **−0.065 R → +0.096 R** на сделку, максимальная просадка **16.7 R → 8.1 R**.
-
-### Запуск
-
-```bash
-python main.py backtest BTCUSDT --days 30 --tf 1h
-python main.py backtest ETHUSDT --days 90 --tf 4h --step 2
-make backtest SYM=SOLUSDT DAYS=60 TF=1h
-curl "localhost:8000/api/backtest/BTCUSDT?days=30&tf=1h"
-```
-
-> ⚠️ **Важно про цифры.** Бэктест, запущенный в песочнице без доступа к биржам,
-> идёт на **демо-данных** и честно это помечает. Такие цифры доказывают, что
-> механика считает верно, но **не** говорят о реальном эдже. Осмысленный прогон —
-> на Railway, где живут ключи Bybit и доступна настоящая история.
-> Корректность самих расчётов доказывают 32 детерминированных теста в
-> `tests/test_backtest.py` на сериях с заранее известным ответом.
-
----
-
-## 🏗 Архитектура
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│                    ИСТОЧНИКИ ДАННЫХ (FailoverSource)               │
-│   Bybit V5  →  Binance USDⓈ-M  →  MEXC  →  при отказе всех: demo   │
-│   + CoinGecko (муверы/тренды/глобальная стата)                     │
-│   + alternative.me (Fear & Greed) + CryptoCompare (новости)        │
-└───────────────────────────────┬────────────────────────────────────┘
-                                ▼
-┌────────────────────────────────────────────────────────────────────┐
-│  ИНДИКАТОРЫ (60+) — src/data/indicators.py                         │
-│  EMA · RSI · MACD · Stochastic · Williams %R · ATR · Bollinger     │
-│  Keltner · squeeze · ADX/DI · SuperTrend · VWAP · OBV · CVD        │
-│  MFI · z-score объёма · реализованная волатильность                │
-└───────────────┬────────────────────────────────┬───────────────────┘
-                ▼                                ▼
-┌───────────────────────────────┐  ┌─────────────────────────────────┐
-│ ДВИЖОК АНАЛИЗА (15m/1h/4h)    │  │ СПЕКТРАЛЬНЫЙ АНАЛИЗ             │
-│ Волны Эллиотта · структура    │  │ 5 таймфреймов × 8 групп         │
-│ Скоринг «скрытой» монеты      │  │ Стакан · фандинг · ликвидации   │
-│ План: вход/стоп/цели/R:R      │  │ Контекст · новости · confluence │
-└───────────────┬───────────────┘  └───────────────┬─────────────────┘
-                └───────────────┬──────────────────┘
-                                ▼
-┌────────────────────────────────────────────────────────────────────┐
-│  RISK-ДВИЖОК + КАРТОЧКА СДЕЛКИ (src/analysis/advisor.py)           │
-│  Объём позиции · плечо · ликвидация · безубыток · «что нажимать»   │
-└───────┬──────────────────┬──────────────────┬──────────────────────┘
-        ▼                  ▼                  ▼
-  Telegram-бот       REST API + дашборд     CLI
-  (38 хендлеров)     (JSON + PNG)           (analyze/spectrum/plan/scan)
-```
-
----
-
-## 🚀 Быстрый старт
+## Быстрый старт
 
 ```bash
 git clone https://github.com/artyr180598-gif/hype-martingale-bot
@@ -336,254 +75,89 @@ cd hype-martingale-bot
 
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # заполни TELEGRAM_BOT_TOKEN и TELEGRAM_ADMIN_CHAT_ID
+cp .env.example .env       # заполни TELEGRAM_BOT_TOKEN при необходимости
 
-python main.py            # дашборд + сканер + наблюдение + Telegram
+# полный движок: API + watcher + Telegram
+python -m v3 daemon
+
+# или по частям
+python -m v3 serve         # FastAPI
+python -m v3 watch         # lifecycle-наблюдатель
+python -m v3 bot           # Telegram-бот + watcher
 ```
 
-Без ключей бирж бот тоже работает: публичные данные Bybit/Binance/MEXC
-не требуют авторизации.
-
----
-
-## 🚂 Деплой на Railway
-
-В проекте уже есть `Procfile`, `Dockerfile` и `nixpacks`-совместимая структура.
-
-1. Подключи репозиторий к Railway → **New Project → Deploy from GitHub repo**.
-2. Во вкладке **Variables** должны быть (у тебя уже заданы):
-   ```
-   TELEGRAM_TOKEN          # токен бота от @BotFather
-   TELEGRAM_CHAT_ID        # твой chat id (узнать: @userinfobot)
-   BYBIT_API_KEY           # опционально: публичные данные работают без них
-   BYBIT_API_SECRET
-   ```
-   Поддерживаются оба варианта имён: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_TOKEN`,
-   `BYBIT_API_KEY`/`BYBIT_KEY`, `BYBIT_API_SECRET`/`BYBIT_SECRET`.
-3. **`PORT` задавать не нужно** — Railway инжектит его сам, настройки его подхватят.
-   Healthcheck стучится на `${PORT:-8000}/health`.
-4. Нажми **Deploy**. В логах должно быть:
-   ```
-   Источник данных активен: mode=bybit
-   Telegram-бот запущен
-   ```
-
-**Procfile** сейчас: `web: ./entrypoint.sh` — так Railway выдаст публичный домен
-для дашборда, а Telegram-бот работает в том же процессе. Если домен не нужен,
-поменяй на `worker: ./entrypoint.sh`.
-
-Какую версию поднимает контейнер, задают переменные:
-
-| Переменная | По умолчанию | Значение |
-|-----------|--------------|----------|
-| `RUN_V2` | `false` | `true` — `python -m v2 ${V2_COMMAND:-serve}`; иначе `python main.py` |
-| `V2_COMMAND` | `serve` | команда v2: `serve` / `bot` / `watch` / `scan` / `status` |
-| `RUN_V3` | `false` | `true` — `python -m v3 ${V3_COMMAND:-serve}` |
-| `V3_COMMAND` | `serve` | команда v3: `serve` / `daemon` / `watch` / `bot` / `scan` / `signal` / `backtest` / `walkforward` / `calibrate` / `status` |
-| `PORT` | `8000` | порт HTTP; Railway задаёт сам |
-
-`V2_COMMAND=serve` теперь поднимает **HTTP/дашборд и Telegram-кнопки
-«🆕 Движок: v2» / «🧮 Движок: v1» одновременно** (если задан `TELEGRAM_BOT_TOKEN`).
-Один токен — один поллер: `bot` остаётся отдельной командой без HTTP/healthcheck,
-а `serve` не запускает второй Telegram-процесс. Кнопки переключения движка есть и
-в v1-боте (`python main.py`), так что переключатель виден и без `RUN_V2=true`.
-
-Локально то же самое: `docker compose up`, `RUN_V2=true docker compose up`,
-или без Docker — `python main.py v2 serve --data-mode demo`.
-
-**v3 в compose** (`RUN_V3=true`) поднимается как три сервиса:
-
-| Сервис | Команда | Что делает |
-|--------|---------|------------|
-| `v3-api` | `python -m v3 serve` | FastAPI `/health`, `/api/v3/*`, `/docs` |
-| `v3-worker` | `python -m v3 watch` | фоновый lifecycle-наблюдатель по `WATCHLIST_SYMBOLS` |
-| `v3-bot`* | `python -m v3 bot` | Telegram-команды `/signal`, `/scan`, `/walkforward`, `/status` |
-
-Оба сервиса используют общий volume `./data` → общий SQLite `data/signals_v3.db`.
-*`v3-bot` не описан в дефолтном compose, чтобы не создавать второй поллер без
-токена; запускается отдельно: `docker compose run --rm v3-worker ...` либо
-`RUN_V3=true V3_COMMAND=bot python -m v3 bot`.
-
-Для one-process-деплоя (например Railway web-процесс) достаточно
-`RUN_V3=true V3_COMMAND=daemon` — это API + watcher + Telegram в одном процессе,
-healthcheck остаётся на `/health`.
-
-Весь стек из одного файла:
+## CLI
 
 ```bash
-docker compose up --build v3-api v3-worker
-```
-
-⚠️ **Файловая система Railway эфемерная**: при редеплое SQLite (`./data`) очищается.
-Настройки депозита и журнал позиций сбросятся. Чтобы этого избежать, подключи
-Railway **Volume** и задай `DATA_DIR=/data`.
-
-### Проверка после деплоя
-
-```bash
-curl https://<твой-домен>.up.railway.app/health
-# {"status":"ok","app":"HYPE Advisor","version":"5.0.0","mode":"bybit","started":true}
-```
-
-Если `mode` = `demo` — Railway не достучался до бирж (проверь исходящий трафик),
-бот честно пишет об этом в каждом сообщении.
-
----
-
-## 💻 CLI-режимы
-
-```bash
-python main.py                  # всё вместе: API + сканер + наблюдение + Telegram
-python main.py analyze SOLUSDT  # разовый анализ с планом
-python main.py spectrum SOLUSDT # полный спектральный анализ
-python main.py plan SOLUSDT --deposit 500   # карточка сделки для новичка
-python main.py backtest BTCUSDT --days 30 --tf 1h   # прогон по истории
-python main.py scan             # разовый скан скрытых монет
-python main.py watch            # только фоновое наблюдение
-python main.py api              # только веб-дашборд
-python main.py api --port 9000  # дашборд на другом порту
-python main.py v2 scan          # делегировать в v2 (то же, что python -m v2 scan)
-python main.py v2 analyze AURORA --data-mode demo
-
-# ── v3: futures signal intelligence ──
-python -m v3 signal BTCUSDT                 # сигнал beginner
-python -m v3 signal BTCUSDT --mode pro      # полный факторный разбор
-python -m v3 scan --mode pro                # скан вселенной USDT-perp
+python -m v3 signal BTCUSDT                  # анализ/сигнал (beginner)
+python -m v3 signal BTCUSDT --mode pro       # полный факторный разбор
+python -m v3 scan --mode pro                 # скан вселенной USDT-perp
 python -m v3 backtest BTCUSDT --tf 15m --bars 2000
 python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
-python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000  # read-only калибровка
-python -m v3 watch BTCUSDT,ETHUSDT   # фоновый наблюдатель
-python -m v3 bot                            # Telegram-бот v3 + watcher
-python -m v3 serve --port 8400              # FastAPI v3
-python -m v3 daemon --port 8400             # API + watcher + Telegram в одном процессе
-python -m v3 status                         # сигнал + health
+python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000
+python -m v3 watch BTCUSDT,ETHUSDT
+python -m v3 daemon --port 8400              # API + watcher + Telegram
+python -m v3 status                          # сигналы + health
+
+# то же через main.py
+python main.py status
 ```
 
----
-
-## 🔌 REST API
+## REST API (порт 8400)
 
 | Метод | Путь | Что возвращает |
 |-------|------|----------------|
-| GET | `/health` | статус и режим источника |
-| GET | `/api/status` | наблюдение, последний скан, счётчики |
-| GET | `/api/watch` | все наблюдаемые монеты |
-| GET | `/api/signal/{symbol}` | полный анализ с планом |
-| GET | `/api/spectrum/{symbol}` | **спектральный анализ** (JSON) |
-| GET | `/api/trade-card/{symbol}?deposit=500&risk_pct=1&exchange=bybit&market=futures` | **карточка сделки** с инструкцией |
-| GET | `/api/backtest/{symbol}?days=30&tf=1h&step=1&min_rr=1.5` | **бэктест советника**: сделки, метрики в R, текст отчёта |
-| GET | `/api/chart/{symbol}` | PNG-график цены с уровнями |
-| GET | `/api/spectrum-chart/{symbol}` | PNG тепловая карта спектра |
-| GET | `/api/gems` | находки сканера |
-| POST | `/api/scan` | запустить скан |
-| GET | `/api/fear`, `/api/global`, `/api/news`, `/api/positions` | контекст рынка |
-| POST / DELETE | `/api/watch`, `/api/watch/{symbol}` | управление наблюдением |
+| GET | `/health` | режим, сигналы, health snapshot |
+| GET | `/api/v3/status` | счётчики, последний цикл, ошибки |
+| POST | `/api/v3/scan?limit=&top=` | авто-скан вселенной, `tradable` |
+| GET | `/api/v3/signal/{symbol}?refresh=true` | полный сигнал |
+| GET | `/api/v3/history/{symbol}` | история сигналов |
+| POST | `/api/v3/track` | `{SYMBOL: price}` → TP/SL события |
+| GET | `/api/v3/backtest/{symbol}?tf=&bars=&warmup=` | бэктест |
+| GET | `/api/v3/walk-forward/{symbol}?tf=&bars=&folds=...` | walk-forward |
+| GET | `/api/v3/calibrate?symbols=&tf=&bars=` | read-only калибровка |
+| GET | `/api/v3/explain/{uid}` | score breakdown для uid |
+| GET | `/api/v3/outcomes?symbol=` | lifecycle исходы |
 
+Если задан `V3_API_TOKEN`, тяжёлые эндпоинты требуют заголовок `X-API-Token`.
 Swagger: `/docs`.
 
-### v3 API (`python -m v3 serve`, порт 8400)
+## Переменные окружения
 
-| Метод | Путь | Что возвращает |
-|-------|------|----------------|
-| GET | `/health` | режим, кол-во сигналов, `health`-снапшот (latency, ошибки, данные) |
-| GET | `/api/v3/status` | счётчики, последний цикл, recent-сигналы, ошибки |
-| POST | `/api/v3/scan?limit=&top=` | авто-скан вселенной, кандидаты, `tradable` |
-| GET | `/api/v3/signal/{symbol}?refresh=true` | полный сигнал с уровнями и explain |
-| GET | `/api/v3/history/{symbol}` | история v3-сигналов |
-| POST | `/api/v3/track` | `{XY: price}` → lifecycle-события (TP/SL) |
-| GET | `/api/v3/backtest/{symbol}?tf=&bars=&warmup=` | бэктест с честными метриками |
-| GET | `/api/v3/walk-forward/{symbol}?tf=&bars=&folds=&train=&test=&step=&warmup=` | walk-forward стабильность |
-| GET | `/api/v3/calibrate?symbols=BTCUSDT,ETHUSDT&tf=&bars=&warmup=` | read-only калибровка порогов на backtest-выборке |
-| GET | `/api/v3/explain/{uid}` | score breakdown/risk/no-trade для конкретного uid |
-| GET | `/api/v3/outcomes?symbol=` | lifecycle-исходы |
-
----
-
-## 🔧 Переменные окружения
-
-Полный список с пояснениями — в [`.env.example`](.env.example). Ключевые:
+Ключевые (полный список — [`v3/.env.example`](v3/.env.example)):
 
 | Переменная | По умолчанию | Значение |
 |-----------|--------------|----------|
-| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_TOKEN` | — | токен бота |
-| `TELEGRAM_ADMIN_CHAT_ID` / `TELEGRAM_CHAT_ID` | — | куда слать алерты |
 | `MARKET_DATA_MODE` | `auto` | `auto` / `live` / `demo` |
-| `DEFAULT_DEPOSIT_USD` | `500` | депозит для расчёта объёма |
-| `RISK_PER_TRADE_PCT` | `1.0` | риск на сделку, % |
-| `MAX_LEVERAGE` | `10` | жёсткий потолок плеча |
-| `MIN_RISK_REWARD` | `1.8` | минимальное R:R для рекомендации |
-| `MAX_POSITION_PCT` | `15.0` | лимит доли депозита в марже |
-| `DEFAULT_EXCHANGE` | `bybit` | `bybit` / `binance` |
-| `DEFAULT_MARKET` | `futures` | `futures` / `spot` |
-| `DEFAULT_LEVERAGE` | *(пусто = авто)* | фиксированное плечо |
-| `WATCHLIST_SYMBOLS` | 10 majors | список наблюдения |
-| `WATCH_INTERVAL_SECONDS` | `600` | интервал наблюдения |
-| `SCAN_INTERVAL_SECONDS` | `1800` | интервал скана рынка |
-| `RUN_V2` | `false` | `true` — деплой поднимает v2 через `entrypoint.sh` |
-| `V2_COMMAND` | `serve` | команда v2 при `RUN_V2=true` (`serve` = HTTP + Telegram, `bot` = только Telegram) |
-| `PORT` | `8000` | порт HTTP (Railway инжектит сам; healthcheck — `${PORT:-8000}`) |
+| `PORT` | `8400` | порт HTTP |
+| `V3_COMMAND` | `daemon` | `daemon` / `serve` / `watch` / `bot` / `scan` / `signal` / `backtest` / `walkforward` / `calibrate` / `status` |
+| `V3_API_TOKEN` | *(пусто)* | если задан — `X-API-Token` обязателен для тяжёлых endpoint'ов |
+| `TELEGRAM_BOT_TOKEN` | *(пусто)* | Telegram-бот + уведомления |
+| `SCAN_MIN_TURNOVER_USD` | `20M` | минимальный turnover для входа во вселенную |
+| `MAX_DATA_AGE_SECONDS` | `90` | stale ticker/candles → NO-TRADE |
+| `BACKTEST_FUNDING_RATE` | `0.0002` | консервативный funding cost за 8h в бэктесте |
+| `OPENAI_API_KEY` | *(пусто)* | опциональный AI-аннотатор (fallback rule-based) |
 
-v3-специфичные (полный список — [`v3/.env.example`](v3/.env.example)):
-
-| Переменная | По умолчанию | Значение |
-|-----------|--------------|----------|
-| `SCAN_TOP` | `20` | сколько кандидатов после ранжирования идёт в глубокий анализ |
-| `SCAN_LIMIT` | `250` | верхний порог кандидатов по heat/ликвидности |
-| `SCAN_MIN_TURNOVER_USD` | `20M` | минимальный turnover за 24ч для входа во вселенную |
-| `WATCHLIST_SYMBOLS` | `BTCUSDT,…` | что смотрит `v3 watch` |
-| `MAX_DATA_AGE_SECONDS` | `90` | после этого ticker/свечи считаются stale и сигнал блокируется |
-| `BACKTEST_FUNDING_RATE` | `0.0002` | консервативная стоимость funding за 8h интервал в бэктесте |
-| `AI_ENABLED` | `true` | включает rule-based reasoning (без ключа) |
-| `OPENAI_API_KEY` | *(пусто)* | при заполнении — опциональный LLM-обогатитель текста; слой всё равно не меняет direction/levels/score |
-| `OPENAI_MODEL` | `gpt-4o-mini` | модель AI-аннотатора |
-| `OPENAI_TIMEOUT_SECONDS` | `20` | таймаут AI-вызова; при сбое — fallback на rule-based |
-| `V3_API_TOKEN` | *(пусто)* | если задан, тяжёлые `/api/v3/*` требуют заголовок `X-API-Token` |
-| `SCAN_MIN_TURNOVER_USD` | `20M` | минимальный 24h turnover для входа во вселенную |
-| `SCAN_MIN_VOLUME_USD` | `5M` | минимальный 24h объём, используемый как флаг `volume_ok` |
-
----
-
-## 📡 Режимы данных: live / auto / demo
-
-`MARKET_DATA_MODE=auto` (по умолчанию) — самый надёжный:
-
-1. Пробует **Bybit** → **Binance** → **MEXC**.
-2. Первый живой становится основным, режим пишется в лог: `mode=bybit`.
-3. Если все три недоступны — переключается на **демо-рынок** и помечает
-   каждое сообщение плашкой `⚠️ Демо-рынок — это не реальный сигнал`.
-
-Проверка выполняется асинхронно при старте (`ctx.ensure_ready()`), поэтому не
-блокирует event loop. При сбое биржи уже во время работы `FailoverSource`
-переключается на следующую автоматически.
-
-`MARKET_DATA_MODE=live` честно падает с ошибкой, если биржи недоступны —
-никакой подмены данных.
-
-Демо-рынок (`src/data/demo.py`) — детерминированный синтетический рынок:
-режим-переключающееся блуждание, кластеры волатильности, новостные гэпы.
-Нужен для тестов и для работы без доступа к биржам.
-
----
-
-## ✅ Тесты
+## Тесты
 
 ```bash
-make check      # ruff + pytest
-make test       # только тесты
+make check   # ruff + pytest
+make test    # pytest
 ```
 
-**304 теста** (v1 + v2 + v3) покрывают: индикаторы, демо-источник, движок
-анализа, волны, скоринг, сканер, наблюдение, хранилище, **спектральный анализ**,
-**риск-движок и карточку сделки**, **Telegram-клавиатуры и хендлеры**,
-настройки и REST API. В `v3/tests` отдельно проверены: `Scanner` (ранжирование
-вселенной), `walk_forward` (folds/stability), `RuleBasedReasoner` (AI не меняет
-уровни/направление/score), stale-data-блокировка и расширенные backtest-метрики.
+**24 теста** покрывают анализаторы, scanner, walk-forward, AI reasoning,
+stale-data gate, lifecycle, backtest-метрики, калибровку, Telegram-core,
+API token guard, отчёты с явным дисклеймером.
 
----
+## Безопасность
 
-## ⚠️ Дисклеймер
+- v3 не может выставить ордер.
+- Ключи только из env / `.env`, не в Git.
+- AI-слой не может изменить данные/направление/уровни/скор.
+- stale data ужесточается до NO-TRADE.
+- см. [`SECURITY.md`](SECURITY.md).
 
-Бот — **аналитический инструмент**, а не финансовый совет и не гарантия прибыли.
-Он не хранит твои API-ключи для торговли и не выставляет ордера: решение и
-ответственность всегда на тебе. Криптовалюты и фьючерсы с плечом могут привести
-к потере всего депозита. Начинай с малого риска (1%) и с демо-счёта биржи.
+## Дисклеймер
+
+Любой анализ/сигнал — **статистическая оценка, а не гарантия результата**.
+Все отчёты несут явный дисклеймер. Криптофьючерсы высокорискованны.

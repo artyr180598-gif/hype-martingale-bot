@@ -1,38 +1,36 @@
 services:
-  advisor:
+  # Единый движок v3. Для Railway/одного процесса используйте v3-daemon;
+  # для multi-service деплоя — v3-api + v3-worker (общий volume ./data).
+  v3-daemon:
+    image: hype-futures-engine
     build: .
-    container_name: hype-advisor
+    container_name: hype-futures-engine
     env_file:
       - .env
     environment:
-      PORT: ${PORT:-8000}
-      RUN_V2: ${RUN_V2:-false}
-      V2_COMMAND: ${V2_COMMAND:-serve}
-      RUN_V3: ${RUN_V3:-false}
-      V3_COMMAND: ${V3_COMMAND:-serve}
+      RUN_V3: "true"
+      V3_COMMAND: "daemon"
+      PORT: ${PORT:-8400}
     ports:
-      - "${PORT:-8000}:${PORT:-8000}"
+      - "${PORT:-8400}:${PORT:-8400}"
     volumes:
       - ./data:/app/data
     restart: unless-stopped
     command: ["./entrypoint.sh"]
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:${PORT:-8000}/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:${PORT:-8400}/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 20s
 
-  # v3 — live signal intelligence stack. Both services share the same SQLite DB.
-  # HTTP/API for dashboards and Telegram/worker for passive monitoring.
   v3-api:
-    image: hype-advisor
+    image: hype-futures-engine
     build: .
-    container_name: hype-v3-api
+    container_name: hype-futures-api
     env_file:
       - .env
     environment:
-      RUN_V3: "true"
       V3_COMMAND: "serve"
       PORT: ${V3_PORT:-8400}
     ports:
@@ -49,13 +47,12 @@ services:
       start_period: 20s
 
   v3-worker:
-    image: hype-advisor
+    image: hype-futures-engine
     build: .
-    container_name: hype-v3-worker
+    container_name: hype-futures-worker
     env_file:
       - .env
     environment:
-      RUN_V3: "true"
       V3_COMMAND: "watch"
     volumes:
       - ./data:/app/data
@@ -63,4 +60,3 @@ services:
     command: ["python", "-m", "v3", "watch"]
     depends_on:
       - v3-api
-

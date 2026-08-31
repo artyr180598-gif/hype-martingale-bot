@@ -20,11 +20,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.backtest.engine import BacktestConfig, simulate_trade
 from v3.config import SignalConfig
 from v3.data import FuturesDataService
 from v3.engine import FuturesSignalEngine
 from v3.models import DataBundle, TradingSignal
+from v3.simulation import BacktestConfig, simulate_trade
 
 TF_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "1d": 86_400_000}
 RESAMPLE = {"1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "2h": "2h", "4h": "4h", "1d": "1D"}

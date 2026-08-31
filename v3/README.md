@@ -1,17 +1,15 @@
-# HYPE Advisor v3 — Futures Signal Intelligence (USDT Perpetual)
+# HYPE Futures Signal Intelligence (USDT Perpetual) — единый движок
 
-Production-oriented signal engine for **USDT-perp futures** (Bybit/Binance/MEXC via
-the existing v1 failover data layer). It is deliberately **not** an execution
-engine: v3 produces and explains signals; trading/autotrading belongs to a
-separate controlled risk layer.
+The project has **one engine** now. The old v1 CEX-advisor and v2 DEX scanner were
+consolidated permanently: v1's **market-data kernel** (`src/data`, `src/core`,
+`src/analysis/waves`) is reused as the exchange feed; v2 was deleted and its
+useful scanner idea lives in `v3/scanner.py`; all analytics/signals/TG/API live
+in `v3`. It is deliberately **not** an execution engine: signal generation and
+trading are fully separated.
 
-## Why v3 exists
+## Что входит в единый движок
 
-v1 (`src/`) is a mature CEX advisor (multi-source, indicators, backtest/live
-parity, Telegram). v2 (`v2/`) is a DEX/micro-cap scanner with on-chain scam
-filters. v3 adds the missing **futures-specific production slice**:
-
-* automatic universe scan of perpetuals (not a hard-coded watchlist);
+* automatic universe scan of USDT perpetuals (not a hard-coded watchlist);
 * explicit multi-timeframe pipeline (1m/5m/15m/1h/4h, configurable);
 * market-regime detection that changes interpretation of features;
 * derivatives analysis (funding, OI, liquidations) and order-flow/liquidity;
@@ -19,13 +17,15 @@ filters. v3 adds the missing **futures-specific production slice**:
 * interpretable weighted scoring with stored breakdowns;
 * deterministic validation / `NO_TRADE` gate;
 * signal lifecycle + SQLite audit trail;
-* walk-forward backtester with fees/slippage and no look-ahead;
-* beginner/pro report formats.
+* walk-forward + read-only threshold calibration;
+* clear AI explanation layer (never changes direction/levels/score);
+* beginner/pro Telegram and API.
 
 ## Architecture
 
 ```
-Market Data (v1 Bybit/Binance/MEXC failover + demo)
+Shared data kernel: src/data (Bybit/Binance/MEXC failover + demo, indicators),
+src/core (logging/time/errors), src/config, src/analysis/waves
         │
         ▼
  v3.data.FuturesDataService   (validation, stale detection, normalisation)
@@ -261,8 +261,8 @@ Root `.env` and `v3/.env.example` are both read. Key variables:
 
 ## Security & principle
 
-* v3 never submits orders; `EXECUTOR_MODE` defaults to paper in v2 and there is
-  **no** live execution path in v3.
+* v3 never submits orders; there is **no** live execution path in the unified
+  engine.
 * API keys are optional and only used by read-only exchange/public endpoints;
   never commit `.env`.
 * The AI explanation layer (if added) must not modify market data or override
