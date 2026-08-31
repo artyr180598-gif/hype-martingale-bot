@@ -1,4 +1,9 @@
-"""CLI entry points for v3 (used by ``python -m v3`` and ``main.py v3``)."""
+"""CLI entry points for v3 (used by ``python -m v3`` and ``main.py v3``).
+
+Default command is ``daemon``: a single process that runs FastAPI + lifecycle
+watcher + Telegram bot.  It must stay alive -- it must never silently fall
+back to a one-shot ``status`` print.
+"""
 
 from __future__ import annotations
 
@@ -7,12 +12,15 @@ import asyncio
 import time
 from typing import Any
 
+from src.core.logging import get_logger, setup_logging
 from v3.backtest import run_backtest as run_v3_backtest
 from v3.config import SignalConfig
 from v3.data import FuturesDataService
 from v3.engine import FuturesSignalEngine
 from v3.report import render_signal
 from v3.store import SignalLifecycle, SignalStore
+
+logger = get_logger("v3.cli")
 
 _cfg = SignalConfig()
 
@@ -113,12 +121,86 @@ def run_serve(host: str = "0.0.0.0", port: int = 8400) -> int:
     import uvicorn
 
     port = int(os.environ.get("PORT") or port)
-    uvicorn.run("v3.api:app", host=host, port=port, log_level="info")
+    # log_config=None -> use the root logger configured by setup_logging()
+    uvicorn.run("v3.api:app", host=host, port=port, log_level="info", log_config=None)
     return 0
 
 
+def _print_startup_report(
+    data: FuturesDataService,
+    mode: str,
+    transport: Any,
+    watcher: Any,
+    host: str | None,
+    port: int,
+) -> None:
+    """Operator-facing startup banner (deliberately NOT a `status` report)."""
+    print("-" * 64)
+    print("HYPE v3 daemon — Futures Signal Intelligence (единый движок)")
+    print(f"Режим данных: {mode}")
+    if transport.enabled:
+        admin = _cfg.TELEGRAM_ADMIN_CHAT_ID or "не задан"
+        print(f"Telegram: включён (admin chat: {admin})")
+    else:
+        print("Telegram: выключен — задайте TELEGRAM_BOT_TOKEN (алиас TELEGRAM_TOKEN) в .env")
+    print(f"Watcher: запущен, интервал {_cfg.SCAN_INTERVAL_SECONDS}с, watchlist: {len(watcher.watchlist)} символов")
+    if host is not None:
+        print(f"API: http://{host}:{port} (Uvicorn running)")
+    print("-" * 64)
+
+
+async def safe_telegram(
+    transport: Any,
+    *,
+    handle_signals: bool = True,
+    retries: int = 10,
+    retry_delay: float = 5.0,
+    max_delay: float = 60.0,
+) -> None:
+    """Run Telegram polling so it can never kill the daemon.
+
+    Wraps ``transport.start()`` in try/except: every aiogram/start_polling
+    failure is logged (never swallowed), remembered in ``transport.last_error``
+    (visible via ``pulse`` / ``/status``) and retried with exponential backoff.
+    After ``retries`` failed attempts the polling task gives up quietly -- the
+    API and the watcher keep running.
+
+    ``handle_signals=False`` keeps uvicorn in charge of SIGTERM/SIGINT so the
+    daemon can shut down gracefully (aiogram would otherwise replace uvicorn's
+    handlers).
+    """
+
+    delay = float(retry_delay)
+    attempt = 0
+    while True:
+        try:
+            await transport.start(handle_signals=handle_signals)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            transport.last_error = f"{type(exc).__name__}: {exc}"
+            logger.error("Telegram polling: ошибка — %s", transport.last_error)
+            attempt += 1
+            if attempt >= retries:
+                logger.error(
+                    "Telegram polling: %d попыток не удались, поллинг остановлен; "
+                    "daemon продолжает работу (API + watcher). Последняя ошибка: %s",
+                    attempt,
+                    transport.last_error,
+                )
+                return
+            logger.info("Telegram polling: повтор через %.0fс (попытка %d/%d)", delay, attempt + 1, retries)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, float(max_delay))
+
+
 async def run_daemon(host: str = "0.0.0.0", port: int = 8400) -> int:
-    """One-process v3 daemon: FastAPI + lifecycle watcher + Telegram bot."""
+    """One-process v3 daemon: FastAPI + lifecycle watcher + Telegram bot.
+
+    `python -m v3` (no command) lands here.  The process must stay alive:
+    it only exits on SIGINT/SIGTERM.
+    """
     import os
 
     import uvicorn
@@ -133,7 +215,12 @@ async def run_daemon(host: str = "0.0.0.0", port: int = 8400) -> int:
     core = V3Core(data, engine, store, lifecycle, _cfg)
     transport = V3TelegramTransport(core, _cfg)
     watcher = V3Watcher(data, engine, store, lifecycle, _cfg)
-    await data.probe()
+
+    try:
+        mode = await data.probe()
+    except Exception as exc:  # noqa: BLE001
+        mode = f"error: {exc}"
+        logger.error("Не удалось определить источник данных: %s", exc)
 
     async def notify(items: list[dict[str, Any]]) -> None:
         for item in items:
@@ -142,17 +229,33 @@ async def run_daemon(host: str = "0.0.0.0", port: int = 8400) -> int:
                 await transport.notify_text(text)
 
     await watcher.start(notify=notify, interval=_cfg.SCAN_INTERVAL_SECONDS)
-    tasks: list[asyncio.Task[Any]] = []
+    _print_startup_report(data, mode, transport, watcher, host, port)
+
+    tasks: list[asyncio.Task[Any]] = [
+        asyncio.create_task(
+            uvicorn.Server(
+                uvicorn.Config("v3.api:app", host=host, port=port, log_level="info", log_config=None)
+            ).serve(),
+            name="v3.api",
+        )
+    ]
     if transport.enabled:
-        tasks.append(asyncio.create_task(transport.start(), name="v3.telegram"))
-    else:
-        print("Telegram выключен: только watcher + API")
-    tasks.append(asyncio.create_task(uvicorn.Server(uvicorn.Config("v3.api:app", host=host, port=port, log_level="info")).serve(), name="v3.api"))
+        tasks.append(asyncio.create_task(safe_telegram(transport, handle_signals=False), name="v3.telegram"))
     try:
         await asyncio.gather(*tasks, return_exceptions=True)
     except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        # Cancel anything still running (e.g. a polling retry loop) so the
+        # process always exits after uvicorn's graceful shutdown.
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await watcher.stop()
         await transport.stop()
+        await data.close()
+        store.close()
     return 0
 
 
@@ -169,7 +272,12 @@ async def run_bot() -> int:
         print("Telegram выключен: задайте TELEGRAM_BOT_TOKEN / TELEGRAM_TOKEN")
         return 2
     watcher = V3Watcher(data, engine, store, lifecycle, _cfg)
-    await data.probe()
+
+    try:
+        mode = await data.probe()
+    except Exception as exc:  # noqa: BLE001
+        mode = f"error: {exc}"
+        logger.error("Не удалось определить источник данных: %s", exc)
 
     async def notify(items: list[dict[str, Any]]) -> None:
         for item in items:
@@ -178,13 +286,39 @@ async def run_bot() -> int:
                 await transport.notify_text(text)
 
     await watcher.start(notify=notify, interval=_cfg.SCAN_INTERVAL_SECONDS)
-    polling = asyncio.create_task(transport.start(), name="v3.telegram")
+    _print_startup_report(data, mode, transport, watcher, None, 0)
+    polling = asyncio.create_task(safe_telegram(transport), name="v3.telegram")
     try:
-        await asyncio.Event().wait()
+        # aiogram handles SIGTERM/SIGINT (stops polling) and returns here.
+        await polling
     except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
         await watcher.stop()
         await transport.stop()
-        polling.cancel()
+    return 0
+
+
+async def run_pulse() -> int:
+    """One-shot operator self-diagnostics (does not start the daemon)."""
+    from v3.telegram import V3Core, V3TelegramTransport
+    from v3.watcher import V3Watcher
+
+    data, engine = _engine()
+    store = SignalStore(_cfg.db_path)
+    lifecycle = SignalLifecycle(store, _cfg.COOLDOWN_SECONDS, _cfg.MAX_ACTIVE_SIGNALS)
+    core = V3Core(data, engine, store, lifecycle, _cfg)
+    transport = V3TelegramTransport(core, _cfg)
+    watcher = V3Watcher(data, engine, store, lifecycle, _cfg)
+    try:
+        mode = await asyncio.wait_for(data.probe(), timeout=20)
+    except asyncio.TimeoutError:
+        mode = "unknown (таймаут probe)"
+    except Exception as exc:  # noqa: BLE001
+        mode = f"error: {exc}"
+    print(core.pulse_text(transport=transport, watcher=watcher, mode=mode))
+    await data.close()
+    store.close()
     return 0
 
 
@@ -308,9 +442,14 @@ def _macro_from(tf: str) -> str:
     return {"1m": "4h", "5m": "4h", "15m": "4h", "30m": "4h", "1h": "1d", "4h": "1d"}.get(tf, "4h")
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="HYPE v3 — futures signal intelligence")
-    parser.add_argument("command", nargs="?", default="status", help="signal | scan | backtest | walkforward | calibrate | status | serve | daemon | bot | watch")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="daemon",
+        help="signal | scan | backtest | walkforward | calibrate | status | pulse | serve | daemon | bot | watch (default: daemon)",
+    )
     parser.add_argument("symbol", nargs="?", default="", help="symbol")
     parser.add_argument("--mode", default="beginner", help="beginner | pro")
     parser.add_argument("--tf", default="15m", help="entry timeframe")
@@ -322,6 +461,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top", type=int, default=None, help="deep-analysis top N")
     parser.add_argument("--host", default="0.0.0.0", help="serve host")
     parser.add_argument("--port", type=int, default=8400, help="serve port")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    setup_logging(_cfg.LOG_LEVEL)
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     cmd = args.command.lower()
@@ -349,6 +494,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(run_calibrate(syms, args.tf, args.bars, args.warmup))
     if cmd == "status":
         return asyncio.run(run_status())
+    if cmd == "pulse":
+        return asyncio.run(run_pulse())
     if cmd == "serve":
         return run_serve(args.host, args.port)
     if cmd == "daemon":
@@ -358,5 +505,5 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "watch":
         syms = [s.strip().upper() for s in args.symbol.split(",") if s.strip()] if args.symbol else None
         return asyncio.run(run_watch(syms))
-    print("Доступные команды: signal, scan, backtest, walkforward, calibrate, status, serve, daemon, bot, watch")
+    print("Доступные команды: signal, scan, backtest, walkforward, calibrate, status, pulse, serve, daemon, bot, watch")
     return 2

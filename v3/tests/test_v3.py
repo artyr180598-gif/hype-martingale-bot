@@ -371,6 +371,157 @@ async def test_telegram_core_help_status():
     core = V3Core(dummy_data, None, store, lifecycle, SignalConfig())  # type: ignore[arg-type]
     assert "v3" in await core.handle_message("help")
     assert "Сохранено" in core.status_text()
+    assert "не гарантия результата" in core.status_text()
+    store.close()
+
+
+def test_cli_default_command_is_daemon():
+    """`python -m v3` (no command) must land in daemon, not one-shot status."""
+    from v3.cli import build_parser
+
+    parser = build_parser()
+    assert parser.parse_args([]).command == "daemon"
+    assert parser.parse_args(["status"]).command == "status"
+    assert parser.parse_args(["pulse"]).command == "pulse"
+    assert parser.parse_args(["daemon"]).command == "daemon"
+
+
+def test_config_telegram_aliases(monkeypatch):
+    """TELEGRAM_TOKEN / TELEGRAM_CHAT_ID are accepted aliases."""
+    monkeypatch.setenv("TELEGRAM_TOKEN", "111:ALIAS_TOKEN")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "-100111")
+    cfg = SignalConfig()
+    assert cfg.TELEGRAM_BOT_TOKEN == "111:ALIAS_TOKEN"
+    assert cfg.TELEGRAM_ADMIN_CHAT_ID == "-100111"
+
+
+def test_telegram_transport_enabled_flag(monkeypatch):
+    from v3.telegram import V3Core, V3TelegramTransport
+
+    store = SignalStore("/tmp/v3_test_tg_enabled.db")
+    lifecycle = SignalLifecycle(store, cooldown_seconds=60, max_active=3)
+    dummy_data = type("D", (), {"mode": "auto"})()
+    core = V3Core(dummy_data, None, store, lifecycle, SignalConfig())  # type: ignore[arg-type]
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "222:REAL_TOKEN")
+    transport = V3TelegramTransport(core, SignalConfig())
+    assert transport.enabled is True
+    assert core.transport is transport  # attached for /status diagnostics
+
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
+    transport_off = V3TelegramTransport(core, SignalConfig())
+    assert transport_off.enabled is False
+    assert transport_off.last_error == ""
+    store.close()
+
+
+async def test_handle_message_routes_all_commands():
+    from v3.telegram import HELP_TEXT, V3Core
+
+    store = SignalStore("/tmp/v3_test_tg_routes.db")
+    lifecycle = SignalLifecycle(store, cooldown_seconds=60, max_active=3)
+    dummy_data = type("D", (), {"mode": "auto"})()
+    cfg = SignalConfig()
+
+    class FakeCore(V3Core):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.calls: list[tuple[str, str]] = []
+
+        async def signal_text(self, text: str) -> str:
+            self.calls.append(("signal", text))
+            return "SIGNAL_OK"
+
+        async def scan_text(self, mode: str = "beginner") -> str:
+            self.calls.append(("scan", mode))
+            return "SCAN_OK"
+
+        async def walkforward_text(self, text: str) -> str:
+            self.calls.append(("walkforward", text))
+            return "WF_OK"
+
+    core = FakeCore(dummy_data, None, store, lifecycle, cfg)  # type: ignore[arg-type]
+
+    assert await core.handle_message("") == HELP_TEXT
+    assert await core.handle_message("/help") == HELP_TEXT
+    assert await core.handle_message("help") == HELP_TEXT
+
+    status = await core.handle_message("/status")
+    assert "Сохранено" in status and "Режим" in status
+
+    assert await core.handle_message("/scan") == "SCAN_OK"
+    assert core.calls[-1] == ("scan", "beginner")
+    assert await core.handle_message("/scan pro") == "SCAN_OK"
+    assert core.calls[-1] == ("scan", "pro")
+
+    assert await core.handle_message("/signal BTCUSDT") == "SIGNAL_OK"
+    assert core.calls[-1] == ("signal", "/signal BTCUSDT")
+    assert await core.handle_message("/signal BTCUSDT pro") == "SIGNAL_OK"
+    assert "pro" in core.calls[-1][1]
+
+    # bare symbol must be treated as /signal SYMBOL
+    assert await core.handle_message("ETHUSDT") == "SIGNAL_OK"
+    assert core.calls[-1] == ("signal", "/signal ETHUSDT")
+
+    assert await core.handle_message("/walkforward BTCUSDT 1h") == "WF_OK"
+    assert core.calls[-1][0] == "walkforward"
+    store.close()
+
+
+async def test_safe_telegram_logs_error_and_keeps_going():
+    """Polling crash must be logged + remembered, never crash the caller."""
+    from v3.cli import safe_telegram
+
+    class FlakyTransport:
+        enabled = True
+        last_error = ""
+
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def start(self, handle_signals: bool = True) -> None:
+            self.attempts += 1
+            if self.attempts < 3:
+                raise RuntimeError("polling crashed")
+
+    flaky = FlakyTransport()
+    await safe_telegram(flaky, retries=5, retry_delay=0.01, max_delay=0.05)
+    assert flaky.attempts == 3  # recovered on the 3rd attempt
+    assert "polling crashed" in flaky.last_error
+
+    class DeadTransport:
+        enabled = True
+        last_error = ""
+
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def start(self, handle_signals: bool = True) -> None:
+            self.attempts += 1
+            raise RuntimeError("bad token")
+
+    dead = DeadTransport()
+    await safe_telegram(dead, retries=3, retry_delay=0.01, max_delay=0.05)
+    assert dead.attempts == 3  # gave up without raising
+    assert "bad token" in dead.last_error
+
+
+def test_pulse_text_diagnostics():
+    from v3.telegram import V3Core, V3TelegramTransport
+
+    store = SignalStore("/tmp/v3_test_pulse.db")
+    lifecycle = SignalLifecycle(store, cooldown_seconds=60, max_active=3)
+    dummy_data = type("D", (), {"mode": "demo"})()
+    core = V3Core(dummy_data, None, store, lifecycle, SignalConfig())  # type: ignore[arg-type]
+    V3TelegramTransport(core, SignalConfig())
+
+    text = core.pulse_text(mode="demo")
+    assert "Режим данных: demo" in text
+    assert "TELEGRAM_BOT_TOKEN: не задан" in text
+    assert "Telegram transport: выключен" in text
+    assert "Ошибка Telegram-поллинга: нет" in text
+    assert "Активных сигналов: 0" in text
+    assert "не гарантия результата" in text
     store.close()
 
 

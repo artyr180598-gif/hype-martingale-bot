@@ -96,12 +96,19 @@ python -m v3 backtest BTCUSDT --tf 15m --bars 2000
 python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
 python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000
 python -m v3 watch BTCUSDT,ETHUSDT
-python -m v3 daemon --port 8400              # API + watcher + Telegram
+python -m v3 daemon --port 8400              # API + watcher + Telegram (команда по умолчанию)
 python -m v3 status                          # сигналы + health
+python -m v3 pulse                           # самодиагностика оператора: режим данных,
+                                             #   токен/статус Telegram, ошибки поллинга,
+                                             #   последний цикл watcher, активные сигналы
 
 # то же через main.py
 python main.py status
 ```
+
+> `python -m v3` без команды запускает `daemon` (процесс держится: API + watcher +
+> Telegram-поллинг). Если `TELEGRAM_BOT_TOKEN` не задан — в логе будет явно
+> `Telegram: выключен`, остальное продолжает работать.
 
 ## REST API (порт 8400)
 
@@ -130,7 +137,7 @@ Swagger: `/docs`.
 |-----------|--------------|----------|
 | `MARKET_DATA_MODE` | `auto` | `auto` / `live` / `demo` |
 | `PORT` | `8400` | порт HTTP |
-| `V3_COMMAND` | `daemon` | `daemon` / `serve` / `watch` / `bot` / `scan` / `signal` / `backtest` / `walkforward` / `calibrate` / `status` |
+| `V3_COMMAND` | `daemon` | `daemon` / `serve` / `watch` / `bot` / `scan` / `signal` / `backtest` / `walkforward` / `calibrate` / `status` / `pulse` |
 | `V3_API_TOKEN` | *(пусто)* | если задан — `X-API-Token` обязателен для тяжёлых endpoint'ов |
 | `TELEGRAM_BOT_TOKEN` | *(пусто)* | Telegram-бот + уведомления |
 | `SCAN_MIN_TURNOVER_USD` | `20M` | минимальный turnover для входа во вселенную |
