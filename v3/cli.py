@@ -22,7 +22,13 @@ from v3.store import SignalLifecycle, SignalStore
 
 logger = get_logger("v3.cli")
 
-_cfg = SignalConfig()
+try:
+    _cfg = SignalConfig()
+except Exception as exc:  # например MARKET_DATA_MODE=demo — запрещено
+    _cfg = None  # type: ignore[assignment]
+    _CFG_ERROR: str | None = str(exc)
+else:
+    _CFG_ERROR = None
 
 
 def _engine(data: FuturesDataService | None = None) -> tuple[FuturesDataService, FuturesSignalEngine]:
@@ -38,8 +44,8 @@ async def run_signal(symbol: str, mode: str = "beginner", deposit: float | None 
         try:
             await data.probe()
         except Exception as exc:  # noqa: BLE001
-            print(f"⚠️ Не удалось подключиться к источнику данных: {exc}")
-            print("Проверьте сеть или установите MARKET_DATA_MODE=auto/demo.")
+            print(f"⚠️ Нет реальных данных — анализ невозможен: {exc}")
+            print("Все реальные источники недоступны. Проверьте сеть; MARKET_DATA_MODE=live|auto (demo удалён).")
             return 1
         sig = await engine.analyze(symbol.upper(), refresh=True)
         store.save_signal(sig)
@@ -48,7 +54,7 @@ async def run_signal(symbol: str, mode: str = "beginner", deposit: float | None 
         if not ok:
             print(f"\n[!] Публикация подавлена: {reason}")
         print("\n" + "=" * 60)
-        print(f"Режим данных: {data.mode} | demo: {sig.is_demo}")
+        print(f"Источник данных: {data.mode} (только реальные данные)")
         return 0
     finally:
         await data.close()
@@ -65,18 +71,23 @@ async def run_scan(limit: int | None = None, top: int | None = None, mode: str =
         try:
             await data.probe()
         except Exception as exc:  # noqa: BLE001
-            print(f"⚠️ Не удалось подключиться к источнику данных: {exc}")
+            print(f"⚠️ Нет реальных данных — скан невозможен: {exc}")
+            print("Все реальные источники недоступны. Проверьте сеть; MARKET_DATA_MODE=live|auto (demo удалён).")
             return 1
         tickers = await data.tickers()
+        if not tickers:
+            print("⚠️ Нет реальных данных — скан невозможен: биржа вернула 0 тикеров.")
+            return 1
         scanner = Scanner(engine, _cfg)
         print(f"Сканирую все ликвидные USDT-perp при режиме {data.mode}…")
         result = await scanner.run(tickers, limit=limit, top=top)
         top_n = top or _cfg.SCAN_TOP
-        print(
-            f"Кандидатов: {len(result.candidates)} | "
-            f"глубоко проанализировано: {len(result.analyzed)} | "
-            f"{result.duration_sec:.1f}с"
-        )
+        from v3.tg import render as _rv
+
+        print(_rv.scan_summary(
+            result.scanned_total, len(result.candidates), len(result.analyzed),
+            scanner.best_setups(), result.mode or data.mode, result.duration_sec, result.ts_ms,
+        ))
         for item in result.analyzed[: top_n or 10]:
             c = item["candidate"]
             s = item["signal"]
@@ -104,7 +115,7 @@ async def run_backtest(symbol: str, tf: str = "15m", bars: int = 1000, warmup: i
     data, engine = _engine()
     try:
         await data.probe()
-        print(f"Загружаю историю {symbol.upper()} @ {tf}…")
+        print(f"Загружаю РЕАЛЬНУЮ историю {symbol.upper()} @ {tf} ({data.mode})…")
         history = await data.history(symbol, tf, bars)
         res = run_v3_backtest(
             engine, symbol, history,
@@ -328,6 +339,16 @@ async def run_pulse() -> int:
     except Exception as exc:  # noqa: BLE001
         mode = f"error: {exc}"
     print(core.pulse_text(transport=transport, watcher=watcher, mode=mode))
+    rows = data.source_diagnostics()
+    if rows:
+        print("")
+        print("📡 Источники данных (только реальные):")
+        for row in rows:
+            state = "доступен" if (row.get("available") or row.get("healthy")) else "недоступен"
+            note = row.get("last_error") or ""
+            print(f"  • {row.get('source', '?')}: {state}"
+                  f" | попыток {row.get('attempts', '-')}, ошибок подряд {row.get('consecutive_errors', '-')}"
+                  + (f" | последняя ошибка: {note}" if note else ""))
     await data.close()
     store.close()
     return 0
@@ -377,8 +398,8 @@ async def run_market() -> int:
         try:
             await data.probe()
         except Exception as exc:  # noqa: BLE001
-            print(f"⚠️ Не удалось подключиться к источнику данных: {exc}")
-            print("Режим `auto` переключится на демо, либо проверьте сеть / BYBIT_TESTNET.")
+            print(f"⚠️ Нет реальных данных — обзор рынка невозможен: {exc}")
+            print("Все реальные источники недоступны. Проверьте сеть; MARKET_DATA_MODE=live|auto (demo удалён).")
             return 1
         overview = await data.market_overview()
         from v3.tg.render import render_market
@@ -497,14 +518,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     from v3.config import validate_config
 
+    if _cfg is None:
+        # ошибка валидации конфигурации при старте (например MARKET_DATA_MODE=demo)
+        print(f"❌ Ошибка конфигурации: {_CFG_ERROR}")
+        print("Исправьте переменные окружения и перезапустите. Платформа работает только на реальных данных.")
+        return 2
+
     setup_logging(_cfg.LOG_LEVEL)
     parser = build_parser()
     args = parser.parse_args(argv)
 
     config_errors = validate_config(_cfg)
-    if config_errors:
-        for err in config_errors:
-            logger.warning("config: %s", err)
+    fatal = [e for e in config_errors if "MARKET_DATA_MODE" in e]
+    if fatal:
+        for err in fatal:
+            print(f"❌ Ошибка конфигурации: {err}")
+        return 2
+    for err in config_errors:
+        logger.warning("config: %s", err)
 
     cmd = args.command.lower()
     if cmd == "signal":

@@ -67,8 +67,10 @@ class FuturesDataService:
       * fetch OHLCV for multiple timeframes and derivatives/order-flow context;
       * detect stale, duplicate or corrupted data and record ``degraded``;
       * cache short-lived context (tickers, klines, order book, BTC, news);
-      * never silently turn an exchange failure into a "fake" live signal --
-        demo mode is only used when explicitly configured by MARKET_DATA_MODE.
+      * own the real Bybit liquidation WebSocket stream (when Bybit is active);
+      * never fabricate a value: if a source is unavailable the bundle records
+        it in ``degraded`` and the engine answers NO TRADE — синтетических
+        данных в продакшн-путях нет вообще.
     """
 
     def __init__(self, source: MarketDataSource | None = None, cfg: SignalConfig | None = None) -> None:
@@ -82,21 +84,64 @@ class FuturesDataService:
         self._context_ts: dict[str, float] = {}
         self._oi_history: dict[str, deque[tuple[float, float]]] = {}
         self._funding_history: dict[str, deque[tuple[float, float]]] = {}
-
-    @property
-    def is_demo(self) -> bool:
-        return bool(getattr(self.source, "is_demo", False))
+        self._liq_stream: Any = None
 
     @property
     def mode(self) -> str:
         return getattr(self.source, "mode", getattr(self.source, "name", "unknown"))
 
     async def probe(self) -> str:
+        mode = self.mode
         if hasattr(self.source, "probe"):
-            return await self.source.probe()  # type: ignore[no-any-return]
-        return self.mode
+            mode = await self.source.probe()  # type: ignore[no-any-return]
+        await self._ensure_liquidation_stream()
+        return mode
+
+    # ── реальный WS-поток ликвидаций Bybit ───────────────────────
+    async def _ensure_liquidation_stream(self) -> None:
+        """Запустить WS-коллектор ликвидаций, если активна Bybit и WS включён."""
+        if not self.cfg.LIQUIDATIONS_WS_ENABLED:
+            return
+        if self.mode != "bybit":
+            return
+        if self._liq_stream is not None:
+            return
+        from src.data.liquidations_ws import BybitLiquidationStream
+
+        stream = BybitLiquidationStream(max_age_seconds=self.cfg.LIQUIDATIONS_WS_MAX_AGE_SECONDS)
+        symbols = list(self.cfg.watchlist)
+        try:
+            tickers = await self.tickers(force=True)
+            top = sorted(tickers.values(), key=lambda t: float(getattr(t, "turnover_24h", 0) or 0), reverse=True)
+            symbols += [t.symbol for t in top[:40]]
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await stream.start(symbols)
+            self._liq_stream = stream
+            logger.info("WS-поток ликвидаций Bybit запущен (%d символов)", len(stream.symbols))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("WS-поток ликвидаций не запустился: %s (ликвидации будут «н/д»)", exc)
+
+    @property
+    def liquidation_stream(self) -> Any:
+        return self._liq_stream
+
+    def source_diagnostics(self) -> list[dict[str, Any]]:
+        """Диагностика по каждому реальному источнику (для pulse/status/health)."""
+        diag_fn = getattr(self.source, "diagnostics", None)
+        rows: list[dict[str, Any]] = diag_fn() if callable(diag_fn) else []
+        if self._liq_stream is not None:
+            rows.append({"source": "bybit-liquidations-ws", **self._liq_stream.diagnostics()})
+        return rows
 
     async def close(self) -> None:
+        if self._liq_stream is not None:
+            try:
+                await self._liq_stream.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._liq_stream = None
         await self.source.close()
 
     # ── TTL cache helper ─────────────────────────────────────────
@@ -167,13 +212,28 @@ class FuturesDataService:
         return await self._cached(key, self.cfg.FUNDING_CACHE_TTL_SECONDS, _fetch)
 
     async def liquidations(self, symbol: str, limit: int = 200) -> list[dict[str, Any]]:
-        """Return liquidation-like events for ``symbol``.
+        """Реальные ликвидации ``symbol`` с биржевыми timestamp.
 
-        Bybit has no public liquidation REST feed, so the exchange layer uses a
-        large-trade proxy; the proxy result is global and cached for
-        ``LIQUIDATIONS_CACHE_TTL_SECONDS`` so per-symbol bundles never trigger
-        the expensive top-12 fetch path again.
+        Bybit — живой публичный WS-поток (``src/data/liquidations_ws.py``);
+        Binance — публичный REST ``allForceOrders``. Прокси «крупных сделок»
+        за ликвидации НЕ выдаётся: поток недоступен → пусто, а аналитика
+        показывает «н/д» (без влияния на скоринг).
         """
+        # 1) живой WS-поток Bybit — без HTTP-запросов вовсе
+        if self._liq_stream is not None and self.mode == "bybit":
+            rows = self._liq_stream.events(symbol, self.cfg.LIQUIDATIONS_WS_MAX_AGE_SECONDS)
+            return [
+                {
+                    "symbol": liq.symbol,
+                    "side": str(liq.side),
+                    "size": float(liq.size or 0),
+                    "price": float(liq.price or 0),
+                    "ts_ms": int(liq.ts_ms or 0),
+                }
+                for liq in rows[:limit]
+            ]
+
+        # 2) остальные биржи — какой РЕАЛЬНЫЙ фид умеет источник (Binance REST)
         key = "liquidations:*"
 
         async def _fetch() -> list[dict[str, Any]]:
@@ -420,7 +480,7 @@ class FuturesDataService:
         degraded: list[str] = []
         data_age_seconds: float | None = None
         if t is None:
-            degraded.append("ticker unavailable")
+            degraded.append("ticker unavailable (нет реальных данных биржи)")
         elif _finite(getattr(t, "ts_ms", None)):
             data_age_seconds = max(0.0, (ts_ms - float(t.ts_ms)) / 1000.0)
             if data_age_seconds > self.cfg.MAX_DATA_AGE_SECONDS:
@@ -431,6 +491,10 @@ class FuturesDataService:
             degraded.append("order book unavailable")
         if global_change is None:
             degraded.append("global context unavailable")
+        if self.cfg.LIQUIDATIONS_WS_ENABLED and self.mode == "bybit":
+            # ликвидации либо реальные (WS), либо честное «н/д» — без прокси
+            if self._liq_stream is None or not self._liq_stream.healthy:
+                degraded.append("liquidations unavailable — показатель «н/д»")
 
         return DataBundle(
             symbol=symbol,
@@ -459,7 +523,6 @@ class FuturesDataService:
             btc_dominance=dominance,
             news_sentiment=news_sent,
             news_items=news_items[:3],
-            is_demo=self.is_demo,
             degraded=degraded,
             data_age_seconds=data_age_seconds,
             symbol_price_history=[float(t.open_24h)] if t is not None and _finite(getattr(t, "open_24h", None)) else [],
@@ -517,7 +580,6 @@ class FuturesDataService:
         return {
             "ts_ms": int(time.time() * 1000),
             "mode": self.mode,
-            "is_demo": self.is_demo,
             "btc": _small(btc) if btc else None,
             "eth": _small(eth) if eth else None,
             "btc_trend": btc_trend,

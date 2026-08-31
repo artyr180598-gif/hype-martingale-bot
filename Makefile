@@ -1,5 +1,9 @@
 .PHONY: help install test lint check run serve scan signal backtest walkforward calibrate watch bot status clean
 
+# инструменты: сначала локальный .venv (если есть), иначе системный PATH
+PYTEST := $(shell if [ -x .venv/bin/pytest ]; then echo .venv/bin/pytest; else echo pytest; fi)
+RUFF := $(shell if [ -x .venv/bin/ruff ]; then echo .venv/bin/ruff; else echo ruff; fi)
+
 help:
 	@echo "HYPE Futures Signal Intelligence — единый движок v3"
 	@echo ""
@@ -23,10 +27,10 @@ install:
 	pip install -r requirements.txt
 
 test:
-	pytest -q
+	$(PYTEST) -q
 
 lint:
-	ruff check .
+	$(RUFF) check .
 
 check: lint test
 

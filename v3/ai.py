@@ -64,8 +64,6 @@ class RuleBasedReasoner:
                 risks.append("Фандинг перегрет по лонгам — риск обратного сквиза.")
             if der.get("funding_trend") == "overheated_short" and signal.direction == "SHORT":
                 risks.append("Фандинг перегрет по шортам — риск сквиза вверх.")
-            if signal.is_demo:
-                risks.append("Данные демо — не живой сигнал.")
         else:
             if signal.no_trade_reasons:
                 reasons.append(f"NO TRADE: {signal.no_trade_reasons[0]}.")

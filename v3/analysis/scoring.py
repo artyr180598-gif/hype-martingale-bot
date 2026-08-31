@@ -176,8 +176,6 @@ def score_signal(
         penalties["overheated_funding"] = 5.0
     if derivatives.funding_trend == "overheated_short" and direction == "SHORT":
         penalties["overheated_funding"] = 5.0
-    if bundle.is_demo:
-        penalties["demo_data"] = 10.0
     if context.btc_trend == "flat" and direction != "NO_TRADE":
         penalties["btc_no_trend"] = 2.0
     penalty_total = sum(penalties.values())

@@ -2,6 +2,13 @@
 
 The full analysis card lives in ``v3/report.py``; this module renders *lists*
 and *explainers* used by the interactive platform UI.
+
+Beginner-facing rules (жёстко):
+  * никаких внутренних переменных движка (heat/adx/vol_z/trend_score/...) —
+    только слова и понятные числа;
+  * «Оценка сетапа» — качество сетапа, а не вероятность прибыли. Никаких
+    формулировок вида «шанс 72%»;
+  * у каждого вывода — реальный источник данных и timestamp.
 """
 
 from __future__ import annotations
@@ -9,7 +16,18 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from v3.config import SignalConfig
 from v3.models import TradingSignal
+
+QUALITY_LEGEND = (
+    "Шкала оценки сетапов:\n"
+    "  S 82–100 — отличный\n"
+    "  A 72–81 — хороший\n"
+    "  B 62–71 — средний, нужна дисциплина\n"
+    "  C 50–61 — слабый, обычно не входим\n"
+    "  ниже 50 — не входим\n"
+    "Оценка — это качество сетапа, а не вероятность прибыли."
+)
 
 # ── glossary ────────────────────────────────────────────────────
 GLOSSARY: dict[str, str] = {
@@ -27,7 +45,12 @@ GLOSSARY: dict[str, str] = {
     "oi": "Open Interest — общий объём открытых контрактов. Рост OI + рост цены = "
           "входят новые деньги; падение OI + рост цены = короткое покрытие.",
     "rr": "R:R (risk/reward) — отношение потенциальной прибыли к риску. 1:2 означает "
-          "риск 1, потенциал 2. HYPE не публикует сетапы с R:R ниже MIN_RISK_REWARD.",
+          "риск 1, потенциал 2. HYPE не публикует сетапы с R:R ниже порога.",
+    "score": "Оценка сетапа (0..100) — насколько факторы рынка совпали: тренд, структура, "
+             "объёмы, стакан, деривативы. Это НЕ вероятность прибыли: сетап 90/100 тоже "
+             "может закрыться по стопу. " + QUALITY_LEGEND.replace("\n", " · "),
+    "tp": "TP (тейк-профит) — цели фиксации прибыли. SL (стоп-лосс) — цена, при достижении "
+          "которой выходим: идея отменена. Стоп НЕ двигать дальше от цены.",
     "regime": "Режим рынка — глобальная обстановка (тренд/диапазон/высокая волатильность). "
               "От него зависят критерии сигналов: в сильном ап-тренде шорты не ищут «на RSI».",
     "vwap": "VWAP — средневзвешенная цена по объёму. Часто служит уровнем "
@@ -59,41 +82,234 @@ def render_glossary(term: str) -> str:
     return f"❓ **{term.upper()}**\n\n{body}"
 
 
-# ── setup lists ─────────────────────────────────────────────────
-def render_setup_row(item: dict[str, Any], place: int) -> str:
-    sig: TradingSignal = item["signal"]
-    cand = item.get("candidate", {})
-    emoji = "🟢" if sig.direction == "LONG" else "🔻"
-    return (
-        f"{place}. {emoji} **{sig.symbol}** — {sig.direction} | "
-        f"Quality {sig.quality:.0f}/100 ({sig.tier})\n"
-        f"   Вход {sig.entry_zone[0]:.6g}–{sig.entry_zone[1]:.6g} · SL {sig.stop_loss:.6g} "
-        f"· R:R 1:{sig.rr:.1f} · {sig.regime}\n"
-        f"   _heat {cand.get('heat', 0):.1f}, {sig.features.get('regime', {}).get('note', '')[:80]}_"
+# ── оценка сетапа ───────────────────────────────────────────────
+def quality_label(quality: float, tier: str = "", cfg: SignalConfig | None = None) -> str:
+    """«72/100 (A — хороший)». Оценка = качество сетапа, НЕ вероятность прибыли."""
+    cfg = cfg or SignalConfig()
+    if quality >= cfg.S_TIER_MIN:
+        label = "S — отличный"
+    elif quality >= cfg.A_TIER_MIN:
+        label = "A — хороший"
+    elif quality >= cfg.B_TIER_MIN:
+        label = "B — средний, нужна дисциплина"
+    elif quality >= cfg.C_TIER_MIN:
+        label = "C — слабый, обычно не входим"
+    else:
+        label = "ниже порога — не входим"
+    return f"{quality:.0f}/100 ({label})"
+
+
+def source_stamp(source: str = "", ts_ms: int = 0, data_age_seconds: float | None = None) -> str:
+    """«📡 Bybit v5 · обновлено 17:31:02 UTC · возраст 12с» — всегда виден."""
+    src = {"bybit": "Bybit v5", "binance": "Binance Futures", "mexc": "MEXC Futures"}.get(
+        (source or "").lower(), (source or "реальная биржа").capitalize()
     )
+    when = time.strftime("%H:%M:%S UTC", time.gmtime(ts_ms / 1000.0)) if ts_ms else "?"
+    age = f" · возраст {data_age_seconds:.0f}с" if data_age_seconds is not None else ""
+    return f"📡 {src}{' · обновлено ' + when if ts_ms else ''}{age}"
 
 
-def render_setup_list(items: list[dict[str, Any]], title: str, page: int, pages: int) -> str:
+def plain_reasons(signal: TradingSignal) -> list[str]:
+    """2–3 объяснения обычными словами — генерируются из признаков сигнала."""
+    features = signal.features or {}
+    views = features.get("timeframes", []) or []
+    der = features.get("derivatives", {}) or {}
+    of = features.get("orderflow", {}) or {}
+    ctx = features.get("context", {}) or {}
+    scenario = features.get("scenario") or signal.scenario
+    out: list[str] = []
+    direction = signal.direction
+    want = "up" if direction == "LONG" else "down"
+
+    if scenario == "liquidity_sweep":
+        out.append("уровень пробили фитилём и цена вернулась — ложный пробой (вынос стопов)")
+    elif scenario == "reversal_choch":
+        out.append("структура сменила характер (CHoCH) — ранний разворотный сценарий")
+    elif scenario == "range_reversion":
+        out.append("цена у границы диапазона — игра на возврат к середине")
+    elif scenario == "breakout_watch":
+        out.append("волатильность сжата — ждём подтверждённый пробой")
+    else:
+        aligned = [str(v.get("timeframe")) for v in views[:4] if v.get("trend") == want]
+        if aligned:
+            verb = "растёт" if direction == "LONG" else "падает"
+            out.append(f"цена {verb} на {', '.join(aligned[:3])}")
+        entry = views[0] if views else {}
+        if "BOS" in str(entry.get("structure_signal", "")):
+            out.append("пробой структуры (BOS) подтверждён")
+
+    ft = der.get("funding_trend")
+    if ft in ("neutral", "falling"):
+        out.append("фандинг нейтральный — перегрева нет")
+    elif (ft == "overheated_long" and direction == "LONG") or (ft == "overheated_short" and direction == "SHORT"):
+        out.append("внимание: фандинг перегрет на стороне сделки")
+
+    grade = of.get("liquidity_grade")
+    if grade in ("excellent", "ok"):
+        out.append("стакан плотный, ликвидность хорошая")
+    elif grade == "thin":
+        out.append("стакан тонковат — входим аккуратно")
+
+    btc = ctx.get("btc_trend")
+    if btc == "up" and direction == "LONG":
+        out.append("BTC растёт — рынок поддерживает лонг")
+    elif btc == "down" and direction == "SHORT":
+        out.append("BTC падает — рынок поддерживает шорт")
+
+    dedup: list[str] = []
+    for r in out:
+        if r and r not in dedup:
+            dedup.append(r)
+    return dedup[:3]
+
+
+# ── setup lists ─────────────────────────────────────────────────
+def _targets_pct_line(sig: TradingSignal) -> str | None:
+    """«цели: 0.0887 (+2.9%) → 0.0910 (+5.6%) → 0.0935 (+8.5%)» от входа."""
+    if not sig.targets or not sig.entry_zone or not sig.entry_zone[0]:
+        return None
+    entry = (sig.entry_zone[0] + sig.entry_zone[1]) / 2
+    parts = []
+    for t in sig.targets[:3]:
+        if sig.direction == "LONG":
+            pct = (t / entry - 1.0) * 100.0 if entry else 0.0
+        else:
+            pct = (1.0 - t / entry) * 100.0 if entry else 0.0
+        parts.append(f"{t:.6g} ({pct:+.1f}%)")
+    return " • ".join([f"цели: {' → '.join(parts)}"])
+
+
+def render_setup_row(item: dict[str, Any], place: int, cfg: SignalConfig | None = None) -> str:
+    sig: TradingSignal = item["signal"]
+    emoji = "🟢" if sig.direction == "LONG" else "🔻"
+    lines = [
+        f"{place}. {emoji} **{sig.symbol}** — {sig.direction}",
+        f"   Оценка сетапа: {quality_label(sig.quality, sig.tier, cfg)}",
+        f"   • вход {sig.entry_zone[0]:.6g}–{sig.entry_zone[1]:.6g} · стоп {sig.stop_loss:.6g}",
+    ]
+    targets = _targets_pct_line(sig)
+    if targets:
+        lines.append(f"   • {targets}")
+    rb = sig.risk_brief if sig.risk_brief is not None else None
+    leverage = sig.leverage or (rb.leverage if rb else 1)
+    risk_pct = rb.max_deposit_pct if rb and rb.max_deposit_pct else 0.0
+    lines.append(f"   • плечо до {leverage}x · риск ~{risk_pct:.1f}% депозита")
+    why = plain_reasons(sig)
+    if why:
+        lines.append(f"   Почему: {' · '.join(why)}")
+    if sig.condition:
+        lines.append(f"   ⚠️ Условный сетап: {sig.condition}")
+    return "\n".join(lines)
+
+
+def render_setup_list(
+    items: list[dict[str, Any]],
+    title: str,
+    page: int,
+    pages: int,
+    cfg: SignalConfig | None = None,
+    stats_line: str = "",
+    empty_hint: str = "",
+) -> str:
     if not items:
-        return (f"{title}\n\n"
-                "😶 Сейчас нет подходящих сетапов. "
-                "Сначала запустите «🔎 СКАНИРОВАТЬ РЫНОК» — и/или рынок пока не даёт чистой структуры.\n\n"
-                "Система честно говорит NO TRADE вместо того, чтобы выдумывать сигнал.")
+        lines = [
+            title,
+            "",
+            "😶 Сейчас нет подходящих сетапов.",
+        ]
+        if empty_hint:
+            lines += ["", empty_hint]
+        lines += [
+            "",
+            "Система честно говорит NO TRADE вместо того, чтобы выдумывать сигнал.",
+            "❗ Это аналитика, не гарантия результата.",
+        ]
+        return "\n".join(lines)
     start = page * 8
     chunk = items[start : start + 8]
-    lines = [title, "", f"Страница {page + 1}/{pages}. Отсортировано по качеству:", ""]
+    lines = [title]
+    if stats_line:
+        lines.append(stats_line)
+    lines += ["", f"Страница {page + 1}/{pages}. Отсортировано по качеству:", ""]
     for i, item in enumerate(chunk, start + 1):
-        lines.append(render_setup_row(item, i))
+        lines.append(render_setup_row(item, i, cfg))
+        lines.append("")
     lines.extend([
-        "",
-        "Раздел: ⭐ ТОП ВОЗМОЖНОСТИ",
-        "❗ Это аналитика, не гарантия результата.",
+        "❗ Оценка — качество сетапа, а не вероятность прибыли. Это аналитика, не гарантия результата.",
     ])
     return "\n".join(lines)
 
 
+# ── scan summary ────────────────────────────────────────────────
+_REJECT_LABELS: list[tuple[str, str]] = [
+    ("r:r", "R:R ниже порога"),
+    ("risk score", "риск выше лимита"),
+    ("quality", "качество ниже порога"),
+    ("spread", "широкий спред"),
+    ("timeframe conflict", "конфликт таймфреймов"),
+    ("order-book liquidity", "тонкий стакан"),
+    ("turnover", "слабый оборот"),
+    ("stale", "устаревшие данные"),
+    ("no directional setup", "нет направления в текущем режиме"),
+    ("no usable timeframe", "нет данных свечей"),
+    ("no real market data", "нет реальных данных"),
+]
+
+
+def scan_summary(
+    scanned_total: int,
+    candidates: int,
+    analyzed: int,
+    setups: list[dict[str, Any]],
+    mode: str,
+    duration_sec: float = 0.0,
+    ts_ms: int = 0,
+) -> str:
+    """«Сканировано 250 · кандидатов 47 · сетапов 6 (A:1 B:3 C:2) · Bybit · 17:31 UTC»."""
+    tiers: dict[str, int] = {}
+    for item in setups:
+        t = item["signal"].tier
+        tiers[t] = tiers.get(t, 0) + 1
+    tier_bits = " ".join(f"{t}:{tiers[t]}" for t in ("S", "A", "B", "C") if tiers.get(t)) or "—"
+    when = time.strftime("%H:%M UTC", time.gmtime(ts_ms / 1000.0)) if ts_ms else time.strftime("%H:%M UTC", time.gmtime())
+    src = {"bybit": "Bybit", "binance": "Binance", "mexc": "MEXC"}.get((mode or "").lower(), mode or "?")
+    dur = f" · {duration_sec:.1f}с" if duration_sec else ""
+    return (
+        f"Сканировано {scanned_total} · кандидатов {candidates} · сетапов {len(setups)} ({tier_bits})"
+        f" · источник: {src} · {when}{dur}"
+    )
+
+
+def empty_list_hint(analyzed: list[dict[str, Any]], candidates_count: int = 0) -> str:
+    """Почему список пуст: топ причин гейта по техническим (pro) причинам."""
+    counts: dict[str, int] = {}
+    passed_base = 0
+    for item in analyzed:
+        sig = item["signal"]
+        if sig.direction in ("LONG", "SHORT"):
+            passed_base += 1  # прошли движок, но ниже list-порога качества
+            continue
+        reasons = sig.no_trade_reasons or ["no directional setup"]
+        seen: set[str] = set()
+        for reason in reasons[:3]:
+            low = reason.lower()
+            for needle, label in _REJECT_LABELS:
+                if needle in low and label not in seen:
+                    counts[label] = counts.get(label, 0) + 1
+                    seen.add(label)
+                    break
+    total = len(analyzed)
+    if passed_base and total and passed_base == total:
+        return f"все {total} кандидатов прошли движок, но слабее порога показа — рынок не даёт сильных сетапов"
+    bits = ", ".join(f"{label} у {n}" for label, n in sorted(counts.items(), key=lambda x: -x[1])[:4])
+    if not bits:
+        return "последний скан не нашёл даже базовых кандидатов: рынок вне критериев ликвидности"
+    prefix = f"все {total} кандидатов не прошли гейт: " if total else ""
+    return prefix + bits
+
+
 # ── market overview ─────────────────────────────────────────────
-def render_market(overview: dict[str, Any]) -> str:
+def render_market(overview: dict[str, Any], source: str = "") -> str:
     ts = overview.get("ts_ms", 0) / 1000
     when = time.strftime("%H:%M:%S UTC", time.gmtime(ts)) if ts else "?"
     btc = overview.get("btc") or {}
@@ -101,15 +317,16 @@ def render_market(overview: dict[str, Any]) -> str:
     g = overview.get("global") or {}
     fg = g.get("fear_greed") or {}
     trend_emoji = {"up": "🟢", "down": "🔴", "flat": "🟡"}.get(str(overview.get("btc_trend", "flat")), "🟡")
+    mode = source or overview.get("mode", "?")
 
     lines = [
         "📊 **МОЙ РЫНОК**",
-        f"🕐 {when} · режим: {overview.get('mode', '?')}" + (" · demo" if overview.get("is_demo") else ""),
+        f"{source_stamp(mode, overview.get('ts_ms', 0))} · {when}",
         "",
         f"₿ **BTC** {btc.get('price', 0):.6g} | 24h {btc.get('price_24h_pct', 0):+.2f}%",
         f"   {trend_emoji} тренд (1h): {overview.get('btc_trend', '?')} | ATR {overview.get('btc_atr_pct') or 0:.2f}%",
-        f"   funding {overview.get('btc_funding_rate') or 0 * 1:.4%} | доминация {g.get('btc_dominance') or 0:.1f}%",
-        f"Ξ **ETH** {eth.get('price', 0):.6g} | 24h {overview.get('eth_24h_pct') or eth.get('price_24h_pct', 0):+.2f}% | funding {overview.get('eth_funding_rate') or 0 * 1:.4%}",
+        f"   funding {(overview.get('btc_funding_rate') or 0) * 1:.4%} | доминация {g.get('btc_dominance') or 0:.1f}%",
+        f"Ξ **ETH** {eth.get('price', 0):.6g} | 24h {overview.get('eth_24h_pct') or eth.get('price_24h_pct', 0):+.2f}% | funding {(overview.get('eth_funding_rate') or 0) * 1:.4%}",
         "",
         f"🌐 Рынок: {g.get('market_cap_change_24h_pct') or 0:+.2f}% за 24ч",
         f"😨 Fear & Greed: {fg.get('value', '?')}/100 ({fg.get('classification', '?')})",
@@ -127,6 +344,32 @@ def render_market(overview: dict[str, Any]) -> str:
     for t in (overview.get("losers") or [])[:5]:
         lines.append(f"  {t['symbol']} {t['price_24h_pct']:+.2f}% (${t['turnover_24h']/1e6:.0f}M)")
     lines += ["", "❗ Обзор, не инвестиционная рекомендация."]
+    return "\n".join(lines)
+
+
+# ── нет реальных данных ─────────────────────────────────────────
+def render_no_data(reasons: list[str], diagnostics: list[dict[str, Any]] | None = None) -> str:
+    """Анализ не запускается без минимального набора реальных данных."""
+    lines = [
+        "⚠️ **НЕТ РЕАЛЬНЫХ ДАННЫХ — анализ невозможен**",
+        "",
+        "Платформа работает только на реальных данных бирж и не подставляет "
+        "синтетику. Сейчас минимальный набор (тикер + свечи) недоступен.",
+        "",
+        "Причины:",
+    ]
+    for r in reasons[:5]:
+        lines.append(f"  • {r}")
+    if diagnostics:
+        lines += ["", "Источники:"]
+        for row in diagnostics[:6]:
+            state = "✅ доступен" if (row.get("available") or row.get("healthy")) else "❌ недоступен"
+            err = f" — {row.get('last_error')}" if row.get("last_error") else ""
+            lines.append(f"  • {row.get('source', '?')}: {state}{err}")
+    lines += [
+        "",
+        "Нажмите «🔄 ПОПРОБОВАТЬ СНОВА» — система перепроверит реальные источники.",
+    ]
     return "\n".join(lines)
 
 

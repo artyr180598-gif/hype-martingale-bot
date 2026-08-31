@@ -59,7 +59,6 @@ class BacktestResult:
     signals: int = 0
     trades: list[BacktestTrade] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
-    is_demo: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,7 +69,6 @@ class BacktestResult:
             "signals": self.signals,
             "trades": [t.to_dict() for t in self.trades],
             "metrics": self.metrics,
-            "is_demo": self.is_demo,
         }
 
 
@@ -118,7 +116,7 @@ def run_backtest(
     signals = 0
     tradable_signals = 0
     i = warmup
-    result = BacktestResult(symbol=symbol.upper(), start_ts=int(df["ts"].iloc[0]), end_ts=int(df["ts"].iloc[-1]), bars=len(df), is_demo=engine.data.is_demo)
+    result = BacktestResult(symbol=symbol.upper(), start_ts=int(df["ts"].iloc[0]), end_ts=int(df["ts"].iloc[-1]), bars=len(df))
 
     while i < len(df) - 3:
         current_bar = df.iloc[i]
@@ -145,7 +143,6 @@ def run_backtest(
             price_24h_pct=0.0,
             turnover_24h=turnover or 1e9,
             volume_24h=volume_24h,
-            is_demo=engine.data.is_demo,
             degraded=["funding unavailable", "order book unavailable", "global context unavailable"],
         )
         try:
@@ -204,6 +201,10 @@ def run_backtest(
     result.trades = trades
     result.signals = signals
     result.metrics = metrics_from_trades(trades, signals_generated=tradable_signals)
+    # setups_per_scan: сколько исполняемых сетапов движок выдаёт на 100 баров
+    # (примерный аналог «сетапов на 100 сканов» в живом контуре)
+    bars_evaluated = max(1, len(df) - warmup)
+    result.metrics["setups_per_100_bars"] = round(tradable_signals / bars_evaluated * 100.0, 3)
     return result
 
 

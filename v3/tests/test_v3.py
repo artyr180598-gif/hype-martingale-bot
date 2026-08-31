@@ -66,8 +66,8 @@ def make_bundle(orderbook: bool = True) -> DataBundle:
         btc_turnover_24h=20_000_000_000.0,
         btc_dominance=55.0,
         global_change_pct=1.0,
-        is_demo=False,
         degraded=[],
+        data_age_seconds=2.0,
     )
 
 
@@ -154,11 +154,19 @@ def test_engine_no_trade_when_low_quality():
 
 
 def test_validator_rejects_demo():
+    """Инвариант «нет реальных данных → нет сигнала»: построенный без биржевых
+    данных сигнал (нет источника / возраста / истекло) не публикуется."""
     cfg = SignalConfig()
-    sig = TradingSignal(uid="x", symbol="X", ts_ms=1, direction="LONG", is_demo=True, score=90, confidence=0.9, rr=2.0, risk_score=3, price=100, stop_loss=99, targets=[102, 104])
+    sig = TradingSignal(
+        uid="x", symbol="X", ts_ms=1, direction="LONG",
+        score=90, quality=90, confidence=0.9, rr=2.0, risk_score=3,
+        price=100, entry_zone=(99.5, 100.0), stop_loss=99, targets=[102, 104],
+        # fabricated: no source, no data age, created ages ago
+        created_ms=1,
+    )
     ok, why = validate_for_publish(sig, cfg)
     assert not ok
-    assert any("demo" in w for w in why)
+    assert any("real market data" in w for w in why)
 
 
 def test_score_breakdown_has_factors():
@@ -195,7 +203,7 @@ def test_backtest_walk_forward_smoke():
     from v3.backtest import run_backtest
 
     class FakeData:
-        is_demo = False
+        mode = "fake"
 
     cfg = SignalConfig()
     engine = FuturesSignalEngine(FakeData(), cfg)  # type: ignore[arg-type]
@@ -232,7 +240,6 @@ def test_walkforward_smoke():
     from v3.walkforward import WalkForwardConfig, walk_forward
 
     class FakeData:
-        is_demo = False
         mode = "fake"
 
     cfg = SignalConfig()
@@ -339,11 +346,10 @@ async def test_watcher_cycle_persists_and_tracks():
 
     store = SignalStore("/tmp/v3_test_watcher.db")
     lifecycle = SignalLifecycle(store, cooldown_seconds=60, max_active=3)
-    sig = TradingSignal(uid="w1", symbol="X", ts_ms=1, direction="LONG", status="CONFIRMED", score=90, confidence=0.9, quality=90, tier="S", rr=2, risk_score=3, price=100, entry_zone=(99.5, 100.0), stop_loss=98.0, targets=[102, 104, 106])
+    sig = TradingSignal(uid="w1", symbol="X", ts_ms=1, direction="LONG", status="CONFIRMED", score=90, confidence=0.9, quality=90, tier="S", rr=2, risk_score=3, price=100, entry_zone=(99.5, 100.0), stop_loss=98.0, targets=[102, 104, 106], data_age_seconds=2.0)
 
     class FakeData:
         mode = "fake"
-        is_demo = False
         async def tickers(self, symbols):
             class T:
                 symbol = "X"
@@ -369,7 +375,7 @@ async def test_telegram_core_help_status():
     lifecycle = SignalLifecycle(store, cooldown_seconds=60, max_active=3)
     dummy_data = type("D", (), {"mode": "auto"})()
     core = V3Core(dummy_data, None, store, lifecycle, SignalConfig())  # type: ignore[arg-type]
-    assert "v3" in await core.handle_message("help")
+    assert "реальные данные" in await core.handle_message("help")
     assert "Сохранено" in core.status_text()
     assert "не гарантия результата" in core.status_text()
     store.close()
@@ -447,7 +453,7 @@ async def test_handle_message_routes_all_commands():
     assert await core.handle_message("help") == HELP_TEXT
 
     status = await core.handle_message("/status")
-    assert "Сохранено" in status and "Режим" in status
+    assert "Сохранено" in status and "Режим" in status and "реальные данные" in status
 
     assert await core.handle_message("/scan") == "SCAN_OK"
     assert core.calls[-1] == ("scan", "beginner")
@@ -511,12 +517,13 @@ def test_pulse_text_diagnostics():
 
     store = SignalStore("/tmp/v3_test_pulse.db")
     lifecycle = SignalLifecycle(store, cooldown_seconds=60, max_active=3)
-    dummy_data = type("D", (), {"mode": "demo"})()
+    dummy_data = type("D", (), {"mode": "bybit"})()
     core = V3Core(dummy_data, None, store, lifecycle, SignalConfig())  # type: ignore[arg-type]
     V3TelegramTransport(core, SignalConfig())
 
-    text = core.pulse_text(mode="demo")
-    assert "Режим данных: demo" in text
+    text = core.pulse_text(mode="bybit")
+    assert "Режим данных: bybit" in text
+    assert "только реальные данные" in text
     assert "TELEGRAM_BOT_TOKEN: не задан" in text
     assert "Telegram transport: выключен" in text
     assert "Ошибка Telegram-поллинга: нет" in text
@@ -544,7 +551,6 @@ async def test_scanner_ranks_and_filters():
     class FakeEngine:
         class FakeData:
             mode = "fake"
-            is_demo = False
 
         data = FakeData()
 
@@ -614,7 +620,6 @@ async def test_calibrate_smoke():
 
     class FakeData:
         mode = "fake"
-        is_demo = False
 
         async def history(self, symbol, tf, bars):
             df = make_df(min(bars, 600), "up")

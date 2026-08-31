@@ -26,7 +26,8 @@ trading are fully separated.
 ## Architecture
 
 ```
-Shared data kernel: src/data (Bybit/Binance/MEXC failover + demo, indicators),
+Shared data kernel: src/data (Bybit/Binance/MEXC failover — только реальные
+данные, demo-источник удалён, Bybit WS ликвидации, indicators),
 src/core (logging/time/errors), src/config, src/analysis/waves
         │
         ▼
@@ -95,10 +96,8 @@ src/core (logging/time/errors), src/config, src/analysis/waves
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# offline demo first
-MARKET_DATA_MODE=demo python -m v3 signal BTCUSDT
-MARKET_DATA_MODE=demo python -m v3 market
-MARKET_DATA_MODE=demo python -m v3 status
+# самодиагностика источников (только реальные данные; demo-режим удалён)
+python -m v3 pulse
 
 # live/auto (public endpoints, no keys required)
 python -m v3 market
@@ -159,7 +158,7 @@ curl localhost:8400/api/v3/outcomes
 | BTC context | 7 |
 
 Risk penalties: wide spread, overheated funding, timeframe conflicts,
-uncertain/high-vol regime, poor R:R, demo data, etc.
+uncertain/high-vol regime, poor R:R, отсутствие биржевого timestamp, etc.
 
 ## NO TRADE is a feature
 
@@ -291,6 +290,7 @@ Root `.env` and `v3/.env.example` are both read. Key variables:
 
 * Order flow is a **public-depth/CVD proxy**, not exchange private order flow.
 * Funding/OI/liquidation data depends on exchange endpoints and current
-  availability; absence only degrades confidence.
-* Backtest on demo data proves mechanics, not edge.
+  availability; absence is shown as «н/д» and only degrades confidence.
+* **Demo mode deleted (round 3)**: no synthetic fallback anywhere. Backtests
+  run only on real exchange history downloaded via REST.
 * No guarantee of profit. Quality > quantity.
