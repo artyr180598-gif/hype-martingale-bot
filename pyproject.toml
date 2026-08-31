@@ -24,7 +24,7 @@ hype-advisor = "main:main"
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = "-ra -q --asyncio-mode=auto"
-testpaths = ["tests", "v2/tests"]
+testpaths = ["tests", "v2/tests", "v3/tests"]
 pythonpath = ["."]
 
 [tool.ruff]

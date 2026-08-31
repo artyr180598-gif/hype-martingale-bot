@@ -35,6 +35,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY src/ ./src/
 COPY v2/ ./v2/
+COPY v3/ ./v3/
 COPY main.py pyproject.toml ./
 COPY entrypoint.sh ./
 RUN chmod +x ./entrypoint.sh \

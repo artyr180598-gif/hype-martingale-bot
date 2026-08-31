@@ -1,5 +1,6 @@
 .PHONY: help install test lint check format run run-api run-scan analyze spectrum plan backtest clean \
-	v2-scan v2-analyze v2-watch v2-serve v2-bot v2-status v2-test v2-check
+	v2-scan v2-analyze v2-watch v2-serve v2-bot v2-status v2-test v2-check \
+	v3-signal v3-scan v3-backtest v3-walkforward v3-serve v3-bot v3-watch v3-status v3-test v3-check
 
 help:
 	@echo "HYPE Advisor — аналитический крипто-советник"
@@ -25,13 +26,25 @@ help:
 	@echo "  make v2-status - активные фильтры и метрики"
 	@echo "  make v2-test   - тесты v2"
 	@echo "  make v2-check  - ruff + тесты v2"
+	@echo ""
+	@echo "  ── v3 (futures signal intelligence: scanner + walk-forward + AI) ──"
+	@echo "  make v3-signal SYM=BTCUSDT MODE=pro - разовый сигнал USDT-perp"
+	@echo "  make v3-scan MODE=pro            - скан вселенной USDT-perp"
+	@echo "  make v3-backtest SYM=BTCUSDT TF=15m BARS=2000 - бэктест"
+	@echo "  make v3-walkforward SYM=BTCUSDT TF=15m BARS=5000 FOLDS=5 - walk-forward"
+	@echo "  make v3-serve PORT=8400          - FastAPI-стенд v3"
+	@echo "  make v3-bot                     - Telegram-бот v3"
+	@echo "  make v3-watch SYMS=BTCUSDT,ETHUSDT - фоновый watcher v3"
+	@echo "  make v3-status                  - сохранённые v3-сигналы и health"
+	@echo "  make v3-test                    - тесты v3"
+	@echo "  make v3-check                   - ruff + тесты v3"
 	@echo "  make clean       - очистить кэши"
 
 install:
 	pip install -r requirements.txt
 
 test:
-	pytest tests/ v2/tests -q
+	pytest tests/ v2/tests v3/tests -q
 
 lint:
 	ruff check .
@@ -89,3 +102,35 @@ v2-test:
 v2-check:
 	ruff check v2
 	pytest v2/tests -q
+
+# ── v3: futures signal intelligence (USDT perpetual) ──────────
+v3-signal:
+	python -m v3 signal $(SYM) --mode $(or $(MODE),beginner)
+
+v3-scan:
+	python -m v3 scan --mode $(or $(MODE),beginner)
+
+v3-backtest:
+	python -m v3 backtest $(or $(SYM),BTCUSDT) --tf $(or $(TF),15m) --bars $(or $(BARS),1000) --warmup $(or $(WARMUP),120)
+
+v3-walkforward:
+	python -m v3 walkforward $(or $(SYM),BTCUSDT) --tf $(or $(TF),15m) --bars $(or $(BARS),5000) --folds $(or $(FOLDS),5)
+
+v3-serve:
+	python -m v3 serve --host $(or $(HOST),0.0.0.0) --port $(or $(PORT),8400)
+
+v3-bot:
+	python -m v3 bot
+
+v3-status:
+	python -m v3 status
+
+v3-test:
+	pytest v3/tests -q
+
+v3-check:
+	ruff check v3
+	pytest v3/tests -q
+
+v3-watch:
+	python -m v3 watch $(if $(SYMS),$(SYMS),) 

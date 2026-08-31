@@ -1,5 +1,30 @@
 # HYPE Advisor — профессиональный крипто-советник (спот + фьючерсы)
 
+> ## 🆕 v3 — Futures Signal Intelligence (USDT perpetual)
+> Отдельная production-архитектура для **perpetual futures** в [`v3/`](v3/README.md):
+> автоматический сканер вселенной USDT-perp → multi-timeframe (1m/5m/15m/1h/4h) →
+> regime detection → derivatives (funding/OI/liquidations) → order flow/liquidity →
+> BTC/market context → интерпретируемый scoring → entry/SL/TP от ATR → риск → 
+> **детерминированный NO-TRADE gate** → lifecycle + SQLite → walk-forward backtest
+> → beginner/pro отчёты → объяснимый AI-слой (rule-based по умолчанию, OpenAI
+> опционально) → observability `/health` → stale-data-блокировка. Это **не**
+> автотрейдинг: сигнальный движок и исполнение полностью разделены, v3 по
+> умолчанию только пишет сигналы.
+>
+> ```bash
+> python -m v3 signal BTCUSDT            # анализ/сигнал
+> python -m v3 signal BTCUSDT pro        # полный факторный разбор
+> python -m v3 scan                      # скан вселенной фьючерсов
+> python -m v3 backtest BTCUSDT --tf 15m # бэктест с realistic execution
+> python -m v3 walkforward BTCUSDT       # walk-forward стабильность
+> python -m v3 watch                     # фоновый lifecycle-наблюдатель
+> python -m v3 bot                       # Telegram (beginner/pro + /walkforward)
+> python -m v3 serve                     # FastAPI: /health, /api/v3/...
+> python -m v3 status                    # сохранённые сигналы + health
+> ```
+> Документация модуля: [`v3/README.md`](v3/README.md). Полный список переменных:
+> [`v3/.env.example`](v3/.env.example).
+
 > ## 🆕 v2 — новая архитектура (каталог [`v2/`](v2/README.md))
 > Асинхронный ввод/вывод с WebSocket, **трёхуровневый сканер**
 > (объём за 5 минут → скам-фильтр по холдерам/LP/контракту → ончейн-профиль
@@ -11,7 +36,7 @@
 > Текущая версия ниже (`src/`, `main.py`) сохранена как есть и продолжает работать.
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-91%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-302%20passed-brightgreen.svg)]()
 [![Telegram](https://img.shields.io/badge/Telegram-кнопочный%20бот-2ca5e0.svg)]()
 
 **Бот НЕ торгует.** Он не имеет доступа к твоему счёту и не выставляет ордера.
@@ -351,6 +376,8 @@ python main.py            # дашборд + сканер + наблюдение
 |-----------|--------------|----------|
 | `RUN_V2` | `false` | `true` — `python -m v2 ${V2_COMMAND:-serve}`; иначе `python main.py` |
 | `V2_COMMAND` | `serve` | команда v2: `serve` / `bot` / `watch` / `scan` / `status` |
+| `RUN_V3` | `false` | `true` — `python -m v3 ${V3_COMMAND:-serve}` |
+| `V3_COMMAND` | `serve` | команда v3: `serve` / `watch` / `bot` / `scan` / `signal` / `backtest` / `walkforward` / `status` |
 | `PORT` | `8000` | порт HTTP; Railway задаёт сам |
 
 `V2_COMMAND=serve` теперь поднимает **HTTP/дашборд и Telegram-кнопки
@@ -361,6 +388,25 @@ python main.py            # дашборд + сканер + наблюдение
 
 Локально то же самое: `docker compose up`, `RUN_V2=true docker compose up`,
 или без Docker — `python main.py v2 serve --data-mode demo`.
+
+**v3 в compose** (`RUN_V3=true`) поднимается как три сервиса:
+
+| Сервис | Команда | Что делает |
+|--------|---------|------------|
+| `v3-api` | `python -m v3 serve` | FastAPI `/health`, `/api/v3/*`, `/docs` |
+| `v3-worker` | `python -m v3 watch` | фоновый lifecycle-наблюдатель по `WATCHLIST_SYMBOLS` |
+| `v3-bot`* | `python -m v3 bot` | Telegram-команды `/signal`, `/scan`, `/walkforward`, `/status` |
+
+Оба сервиса используют общий volume `./data` → общий SQLite `data/signals_v3.db`.
+*`v3-bot` не описан в дефолтном compose, чтобы не создавать второй поллер без
+токена; запускается отдельно: `docker compose run --rm v3-worker ...` либо
+`RUN_V3=true V3_COMMAND=bot python -m v3 bot`.
+
+Весь стек из одного файла:
+
+```bash
+docker compose up --build v3-api v3-worker
+```
 
 ⚠️ **Файловая система Railway эфемерная**: при редеплое SQLite (`./data`) очищается.
 Настройки депозита и журнал позиций сбросятся. Чтобы этого избежать, подключи
@@ -392,6 +438,17 @@ python main.py api              # только веб-дашборд
 python main.py api --port 9000  # дашборд на другом порту
 python main.py v2 scan          # делегировать в v2 (то же, что python -m v2 scan)
 python main.py v2 analyze AURORA --data-mode demo
+
+# ── v3: futures signal intelligence ──
+python -m v3 signal BTCUSDT                 # сигнал beginner
+python -m v3 signal BTCUSDT --mode pro      # полный факторный разбор
+python -m v3 scan --mode pro                # скан вселенной USDT-perp
+python -m v3 backtest BTCUSDT --tf 15m --bars 2000
+python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
+python -m v3 watch BTCUSDT,ETHUSDT   # фоновый наблюдатель
+python -m v3 bot                            # Telegram-бот v3
+python -m v3 serve --port 8400              # FastAPI v3
+python -m v3 status                         # сигнал + health
 ```
 
 ---
@@ -415,6 +472,21 @@ python main.py v2 analyze AURORA --data-mode demo
 | POST / DELETE | `/api/watch`, `/api/watch/{symbol}` | управление наблюдением |
 
 Swagger: `/docs`.
+
+### v3 API (`python -m v3 serve`, порт 8400)
+
+| Метод | Путь | Что возвращает |
+|-------|------|----------------|
+| GET | `/health` | режим, кол-во сигналов, `health`-снапшот (latency, ошибки, данные) |
+| GET | `/api/v3/status` | счётчики, последний цикл, recent-сигналы, ошибки |
+| POST | `/api/v3/scan?limit=&top=` | авто-скан вселенной, кандидаты, `tradable` |
+| GET | `/api/v3/signal/{symbol}?refresh=true` | полный сигнал с уровнями и explain |
+| GET | `/api/v3/history/{symbol}` | история v3-сигналов |
+| POST | `/api/v3/track` | `{XY: price}` → lifecycle-события (TP/SL) |
+| GET | `/api/v3/backtest/{symbol}?tf=&bars=&warmup=` | бэктест с честными метриками |
+| GET | `/api/v3/walk-forward/{symbol}?tf=&bars=&folds=&train=&test=&step=&warmup=` | walk-forward стабильность |
+| GET | `/api/v3/explain/{uid}` | score breakdown/risk/no-trade для конкретного uid |
+| GET | `/api/v3/outcomes?symbol=` | lifecycle-исходы |
 
 ---
 
@@ -441,6 +513,20 @@ Swagger: `/docs`.
 | `RUN_V2` | `false` | `true` — деплой поднимает v2 через `entrypoint.sh` |
 | `V2_COMMAND` | `serve` | команда v2 при `RUN_V2=true` (`serve` = HTTP + Telegram, `bot` = только Telegram) |
 | `PORT` | `8000` | порт HTTP (Railway инжектит сам; healthcheck — `${PORT:-8000}`) |
+
+v3-специфичные (полный список — [`v3/.env.example`](v3/.env.example)):
+
+| Переменная | По умолчанию | Значение |
+|-----------|--------------|----------|
+| `SCAN_TOP` | `20` | сколько кандидатов после ранжирования идёт в глубокий анализ |
+| `SCAN_LIMIT` | `250` | верхний порог кандидатов по heat/ликвидности |
+| `SCAN_MIN_TURNOVER_USD` | `20M` | минимальный turnover за 24ч для входа во вселенную |
+| `WATCHLIST_SYMBOLS` | `BTCUSDT,…` | что смотрит `v3 watch` |
+| `MAX_DATA_AGE_SECONDS` | `90` | после этого ticker/свечи считаются stale и сигнал блокируется |
+| `AI_ENABLED` | `true` | включает rule-based reasoning (без ключа) |
+| `OPENAI_API_KEY` | *(пусто)* | при заполнении — опциональный LLM-обогатитель текста; слой всё равно не меняет direction/levels/score |
+| `OPENAI_MODEL` | `gpt-4o-mini` | модель AI-аннотатора |
+| `OPENAI_TIMEOUT_SECONDS` | `20` | таймаут AI-вызова; при сбое — fallback на rule-based |
 
 ---
 
@@ -473,10 +559,12 @@ make check      # ruff + pytest
 make test       # только тесты
 ```
 
-**91 тест** покрывают: индикаторы, демо-источник, движок анализа, волны,
-скоринг, сканер, наблюдение, хранилище, **спектральный анализ**,
+**302 теста** (v1 + v2 + v3) покрывают: индикаторы, демо-источник, движок
+анализа, волны, скоринг, сканер, наблюдение, хранилище, **спектральный анализ**,
 **риск-движок и карточку сделки**, **Telegram-клавиатуры и хендлеры**,
-настройки (включая алиасы имён переменных для Railway) и REST API.
+настройки и REST API. В `v3/tests` отдельно проверены: `Scanner` (ранжирование
+вселенной), `walk_forward` (folds/stability), `RuleBasedReasoner` (AI не меняет
+уровни/направление/score), stale-data-блокировка и расширенные backtest-метрики.
 
 ---
 

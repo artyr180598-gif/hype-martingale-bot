@@ -227,11 +227,15 @@ async def run_all() -> int:
 
 
 def main() -> int:
-    # python main.py v2 [args...] — до argparse, чтобы «v2» не стал неизвестной командой
+    # python main.py v2 [args...] / python main.py v3 [args...] — до argparse
     if len(sys.argv) > 1 and str(sys.argv[1]).lower() == "v2":
         from v2.cli import main as v2_main
 
         return v2_main(sys.argv[2:])
+    if len(sys.argv) > 1 and str(sys.argv[1]).lower() == "v3":
+        from v3.cli import main as v3_main
+
+        return v3_main(sys.argv[2:])
 
     parser = argparse.ArgumentParser(description="HYPE Advisor — крипто-советник")
     parser.add_argument(

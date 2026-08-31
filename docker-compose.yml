@@ -8,6 +8,8 @@ services:
       PORT: ${PORT:-8000}
       RUN_V2: ${RUN_V2:-false}
       V2_COMMAND: ${V2_COMMAND:-serve}
+      RUN_V3: ${RUN_V3:-false}
+      V3_COMMAND: ${V3_COMMAND:-serve}
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
     volumes:
@@ -20,3 +22,45 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # v3 — live signal intelligence stack. Both services share the same SQLite DB.
+  # HTTP/API for dashboards and Telegram/worker for passive monitoring.
+  v3-api:
+    image: hype-advisor
+    build: .
+    container_name: hype-v3-api
+    env_file:
+      - .env
+    environment:
+      RUN_V3: "true"
+      V3_COMMAND: "serve"
+      PORT: ${V3_PORT:-8400}
+    ports:
+      - "${V3_PORT:-8400}:${V3_PORT:-8400}"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    command: ["python", "-m", "v3", "serve", "--host", "0.0.0.0", "--port", "${V3_PORT:-8400}"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:${V3_PORT:-8400}/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  v3-worker:
+    image: hype-advisor
+    build: .
+    container_name: hype-v3-worker
+    env_file:
+      - .env
+    environment:
+      RUN_V3: "true"
+      V3_COMMAND: "watch"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    command: ["python", "-m", "v3", "watch"]
+    depends_on:
+      - v3-api
+
