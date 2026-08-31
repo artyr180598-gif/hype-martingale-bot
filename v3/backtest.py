@@ -321,7 +321,41 @@ def metrics_from_trades(trades: list[BacktestTrade], signals_generated: int | No
         "recall": round(recall, 2),
         "false_positive_rate": round(false_positive_rate, 2),
         "signals_generated": signals_generated or 0,
+        "by_direction": _direction_breakdown(trades),
+        "by_regime": _regime_breakdown(trades),
     }
+
+
+def _group_stats(r: np.ndarray) -> dict[str, Any]:
+    if len(r) == 0:
+        return {"trades": 0, "win_rate": 0.0, "expectancy_r": 0.0, "total_r": 0.0}
+    wins = float((r > 0).mean() * 100.0)
+    return {
+        "trades": int(len(r)),
+        "win_rate": round(wins, 2),
+        "expectancy_r": round(float(r.mean()), 3),
+        "total_r": round(float(r.sum()), 3),
+    }
+
+
+def _direction_breakdown(trades: list[BacktestTrade]) -> dict[str, Any]:
+    groups: dict[str, list[float]] = {}
+    for t in trades:
+        sig = getattr(t, "signal", None)
+        direction = sig.get("direction") if isinstance(sig, dict) else None
+        groups.setdefault(str(direction or "UNKNOWN"), []).append(float(t.r_multiple))
+    return {k: _group_stats(np.array(v, dtype=float)) for k, v in sorted(groups.items())}
+
+
+def _regime_breakdown(trades: list[BacktestTrade]) -> dict[str, Any]:
+    groups: dict[str, list[float]] = {}
+    for t in trades:
+        sig = getattr(t, "signal", None)
+        regime = "UNKNOWN"
+        if isinstance(sig, dict):
+            regime = str((sig.get("features") or {}).get("regime", {}).get("regime") or "UNKNOWN")
+        groups.setdefault(regime, []).append(float(t.r_multiple))
+    return {k: _group_stats(np.array(v, dtype=float)) for k, v in sorted(groups.items())}
 
 
 def _max_drawdown(equity: list[float]) -> float:

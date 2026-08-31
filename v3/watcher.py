@@ -41,9 +41,14 @@ class V3Watcher:
         self.last_cycle_ms = 0
 
     async def run_cycle(self, notify: AlertSender | None = None) -> list[dict[str, Any]]:
+        from v3.publisher import sanitize_for_publish
+
         signals = await self.engine.analyze_batch(self.watchlist, concurrency=4)
         emitted: list[dict[str, Any]] = []
-        for sig in signals:
+        for raw in signals:
+            sig, violations = sanitize_for_publish(raw, self.cfg)
+            if violations:
+                raw.no_trade_reasons = list(dict.fromkeys(raw.no_trade_reasons + violations))[:8]
             self.store.save_signal(sig)
             allowed, reason = self.lifecycle.should_emit(sig)
             if allowed:

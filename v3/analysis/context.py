@@ -28,6 +28,18 @@ def build_context(bundle: DataBundle, btc_view: TimeframeView | None, cfg: Signa
         btc_score -= 8.0  # fast move = risk for alts
     btc_score = max(0.0, min(100.0, btc_score))
 
+    # ETH is a secondary market-wide risk gauge (24h + funding; no klines kept
+    # on the bundle to avoid extra API calls per analysed symbol).
+    eth_pct = bundle.eth_price_24h_pct
+    eth_score = 50.0
+    eth_trend = "flat"
+    if eth_pct is not None:
+        eth_trend = "up" if eth_pct > 1.0 else "down" if eth_pct < -1.0 else "flat"
+        eth_score += 10.0 if eth_trend == "up" else -10.0 if eth_trend == "down" else 0.0
+        if abs(eth_pct) >= 3.0:
+            eth_score -= 8.0
+    eth_score = max(0.0, min(100.0, eth_score))
+
     direction = (
         "up" if btc_view.trend == "up"
         else "down" if btc_view.trend == "down"
@@ -44,6 +56,10 @@ def build_context(bundle: DataBundle, btc_view: TimeframeView | None, cfg: Signa
         btc_adx=round(btc_view.adx, 1),
         btc_volatility=round(btc_view.atr_pct, 3),
         btc_score=round(btc_score, 1),
+        eth_trend=eth_trend,
+        eth_24h_pct=eth_pct,
+        eth_funding_rate=bundle.eth_funding_rate,
+        eth_score=round(eth_score, 1),
         dominance=bundle.btc_dominance,
         global_change_pct=bundle.global_change_pct,
         sentiment=bundle.news_sentiment,

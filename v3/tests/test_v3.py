@@ -339,7 +339,7 @@ async def test_watcher_cycle_persists_and_tracks():
 
     store = SignalStore("/tmp/v3_test_watcher.db")
     lifecycle = SignalLifecycle(store, cooldown_seconds=60, max_active=3)
-    sig = TradingSignal(uid="w1", symbol="X", ts_ms=1, direction="LONG", status="CONFIRMED", score=90, quality=90, tier="S", rr=2, risk_score=3, price=100, entry_zone=(99.5, 100.0), stop_loss=98.0, targets=[102, 104, 106])
+    sig = TradingSignal(uid="w1", symbol="X", ts_ms=1, direction="LONG", status="CONFIRMED", score=90, confidence=0.9, quality=90, tier="S", rr=2, risk_score=3, price=100, entry_zone=(99.5, 100.0), stop_loss=98.0, targets=[102, 104, 106])
 
     class FakeData:
         mode = "fake"

@@ -47,12 +47,15 @@ def build_levels(
             stop = view.resistance
             why.append(f"stop moved to structural resistance {view.resistance:.8g}")
 
-    # Entry zone: around price, pulled toward the market so limit orders can fill
+    # Entry zone: anchored to market structure when it is near the price.
+    # A zone is always bounded to 1.0 ATR and stays close enough to fill
     # (a zone 2-4% away produces a ~9% fill rate on historical backtests).
+    zone_lo, zone_hi, zone_why = _entry_zone(price, atr, view, is_long)
     if is_long:
-        entry_zone = (price - 0.5 * atr, price)
+        entry_zone = (zone_lo, zone_hi)
     else:
-        entry_zone = (price, price + 0.5 * atr)
+        entry_zone = (zone_lo, zone_hi)
+    why.extend(zone_why)
 
     risk = abs(entry_zone[1] - stop) if is_long else abs(stop - entry_zone[0])
     risk = max(risk, 0.2 * atr)  # avoid zero-risk degenerate plans
@@ -102,6 +105,59 @@ def build_levels(
         invalidation=invalidation,
         why=why,
     )
+
+
+def _entry_zone(
+    price: float,
+    atr: float,
+    view: TimeframeView | None,
+    is_long: bool,
+) -> tuple[float, float, list[str]]:
+    """Return (entry_zone_lo, entry_zone_hi, explanation).
+
+    The zone starts at the current price and extends toward the nearest
+    structural anchor (support for longs, resistance for shorts, VWAP, EMA-50)
+    when that anchor is within ``0.2..1.0 × ATR`` -- i.e. a realistic retest
+    target, not a manufactured level far away from the market.
+    """
+    lo, hi = (price - 0.5 * atr, price) if is_long else (price, price + 0.5 * atr)
+    why: list[str] = []
+
+    if view is None:
+        return lo, hi, why
+
+    anchors: list[tuple[float, str]] = []
+    if is_long:
+        if view.support is not None and view.support < price:
+            anchors.append((view.support, "support"))
+        if view.vwap_dist_pct > 0:  # price above VWAP -> pullback target
+            vwap = price * (1.0 - view.vwap_dist_pct / 100.0)
+            anchors.append((vwap, "VWAP"))
+    else:
+        if view.resistance is not None and view.resistance > price:
+            anchors.append((view.resistance, "resistance"))
+        if view.vwap_dist_pct < 0:  # price below VWAP -> pullback target
+            vwap = price * (1.0 - view.vwap_dist_pct / 100.0)
+            anchors.append((vwap, "VWAP"))
+
+    for anchor_price, label in anchors:
+        dist = abs(price - anchor_price)
+        if 0.2 * atr <= dist <= 1.0 * atr:
+            if is_long:
+                lo, hi = anchor_price, price
+            else:
+                lo, hi = price, anchor_price
+            why.append(f"entry anchored to {label} {anchor_price:.8g} ({dist / atr:.2f}×ATR)")
+            break
+
+    # keep the zone readable: never wider than 1.0 ATR from price
+    if is_long:
+        lo = max(lo, price - 1.0 * atr)
+        hi = min(hi, price + 0.05 * atr)
+    else:
+        lo = max(lo, price - 0.05 * atr)
+        hi = min(hi, price + 1.0 * atr)
+    return round(lo, 8), round(hi, 8), why
 
 
 def structure_anchor(views: list[TimeframeView], is_long: bool) -> float | None:

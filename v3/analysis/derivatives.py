@@ -46,6 +46,15 @@ def analyze_derivatives(bundle: DataBundle, cfg: SignalConfig) -> DerivativesSna
             score += 5.0
         elif funding is not None and funding < avg:
             score -= 5.0
+    lsr = bundle.long_short_ratio
+    if lsr is not None:
+        # account ratio: >0.65 = перекос в длинные (риск ликвидаций лонгов),
+        # <0.35 = перекос в короткие (потенциальный шорт-сквиз) -- контекст,
+        # а не самостоятельный триггер.
+        if lsr > 0.65:
+            score -= 8.0
+        elif lsr < 0.35:
+            score += 8.0
     if total_liq > 0:
         if imbalance > 0.4 and funding is not None and funding < 0:
             score += 10.0
@@ -55,6 +64,8 @@ def analyze_derivatives(bundle: DataBundle, cfg: SignalConfig) -> DerivativesSna
     note_bits: list[str] = []
     if funding is not None:
         note_bits.append(f"funding {funding * 100:.3f}%/{funding_trend}")
+    if lsr is not None:
+        note_bits.append(f"LS ratio {lsr:.2f}")
     if bundle.open_interest_usd:
         note_bits.append(f"OI ${bundle.open_interest_usd / 1e6:.1f}M")
     if total_liq > 0:
@@ -70,6 +81,10 @@ def analyze_derivatives(bundle: DataBundle, cfg: SignalConfig) -> DerivativesSna
         liq_sell_usd=sell_liq,
         liq_imbalance=round(imbalance, 3),
         liq_count=liq_count,
+        taker_buy_sell_ratio=lsr,
+        long_short_ratio=round(lsr, 3) if lsr is not None else None,
+        mark_price=bundle.mark_price,
+        index_price=bundle.index_price,
         score=round(min(100.0, max(0.0, score)), 1),
         note=" | ".join(note_bits),
     )

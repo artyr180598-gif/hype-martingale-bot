@@ -102,6 +102,11 @@ class MarketDataSource(abc.ABC):
     @abc.abstractmethod
     async def get_news(self, limit: int = 20) -> list[NewsItem]: ...
 
+    async def get_account_ratio(self, symbol: str) -> float | None:
+        """Количество длинных позиций по символу (0..1) — только Bybit,
+        остальные источники не отдают этот публичный эндпоинт."""
+        return None
+
     def get_instrument(self, symbol: str) -> Instrument | None:
         return None
 
@@ -123,12 +128,12 @@ class MarketDataSource(abc.ABC):
 #  HTTP-БАЗА: ретраи, backoff, таймауты (как в ccxt)
 # ════════════════════════════════════════════════════════════════
 class _Http:
-    def __init__(self, settings: Settings, base_url: str, headers: dict | None = None):
+    def __init__(self, settings: Settings, base_url: str, headers: dict | None = None, client: httpx.AsyncClient | None = None):
         self.settings = settings
         self.base_url = base_url.rstrip("/")
         hdrs = {"User-Agent": "hype-advisor/5.0"}
         hdrs.update({k: v for k, v in (headers or {}).items() if v})
-        self._client = httpx.AsyncClient(
+        self._client = client or httpx.AsyncClient(
             base_url=self.base_url,
             timeout=settings.HTTP_TIMEOUT_SECONDS,
             headers=hdrs,
@@ -137,26 +142,51 @@ class _Http:
         self._sem = asyncio.Semaphore(8)
 
     async def get(self, path: str, params: dict | None = None, retries: int | None = None) -> Any:
+        """GET with retry + exponential backoff, including HTTP 429.
+
+        429 (rate limit) is transient: we back off (honouring Retry-After when
+        the exchange provides it) and retry instead of failing immediately.
+        Other 4xx are treated as permanent and raised right away.
+        """
         retries = self.settings.HTTP_MAX_RETRIES if retries is None else retries
         last_err: Exception | None = None
         for attempt in range(retries):
             try:
                 async with self._sem:
-                    r = await self._client.get(path, params=params or {})
+                    r = await self._client.get(f"{self.base_url}{path}", params=params or {})
                 if r.status_code == 429:
+                    retry_after = _retry_after_seconds(r.headers)
+                    await asyncio.sleep(max(retry_after, 0.4 * (2**attempt)))
                     raise RateLimitError(f"{path}: 429 rate limit")
+                if r.status_code == 404:
+                    raise UnknownSymbol(f"{path}: 404 {r.text[:120]}")
+                if r.status_code >= 500:
+                    raise DataSourceError(f"{path}: HTTP {r.status_code} {r.text[:120]}")
                 if r.status_code >= 400:
                     raise DataSourceError(f"{path}: HTTP {r.status_code} {r.text[:120]}")
                 return r.json()
-            except RateLimitError:
-                raise
+            except RateLimitError as e:
+                last_err = e
+                if attempt >= retries - 1:
+                    raise
             except Exception as e:  # noqa: BLE001
                 last_err = e
-                await asyncio.sleep(0.4 * (2**attempt))
-        raise DataSourceError(f"{self.name} {path}: {last_err}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(0.4 * (2**attempt))
+        raise DataSourceError(f"{getattr(self, 'name', 'http')} {path}: {last_err}")
 
     async def close(self) -> None:
         await self._client.aclose()
+
+
+def _retry_after_seconds(headers: Any) -> float:
+    try:
+        raw = (headers or {}).get("retry-after")
+        if raw is None:
+            return 0.0
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _tf_to_bybit(timeframe: str) -> str:
@@ -180,6 +210,7 @@ class BybitSource(_Http, MarketDataSource):
         host = "https://api-testnet.bybit.com" if settings.BYBIT_TESTNET else "https://api.bybit.com"
         super().__init__(settings, host)
         self._instruments: list[Instrument] = []
+        self._lsr_cache: dict[str, tuple[float, float | None]] = {}
 
     @staticmethod
     def _unwrap(payload: dict, path: str) -> Any:
@@ -311,10 +342,33 @@ class BybitSource(_Http, MarketDataSource):
                     next_funding_ms=_none_or_int(t.get("nextFundingTime")),
                     open_interest=_none_or_float(t.get("openInterest")),
                     open_interest_usd=_none_or_float(t.get("openInterestValue")),
+                    mark_price=_none_or_float(t.get("markPrice")),
+                    index_price=_none_or_float(t.get("indexPrice")),
                     ts_ms=now_ms(),
                 )
             )
         return out
+
+    async def get_account_ratio(self, symbol: str) -> float | None:
+        """Публичный ratio «длинные счета / все счета» (0..1) по символу."""
+        symbol = symbol.upper()
+        cached = self._lsr_cache.get(symbol)
+        if cached and time.time() - cached[0] < 300:
+            return cached[1]
+        try:
+            raw = await self.get(
+                "/v5/market/account-ratio",
+                {"category": "linear", "symbol": symbol, "period": "1h", "limit": 1},
+            )
+            res = self._unwrap(raw, "account-ratio") or {}
+            rows = res.get("list", []) or []
+            value = _none_or_float(rows[0].get("buyRatio")) if rows else None
+        except DataSourceError:
+            # публичный эндпоинт может быть недоступен в регионе/тестнете —
+            # это контекст, а не причина отказывать в анализе
+            value = None
+        self._lsr_cache[symbol] = (time.time(), value)
+        return value
 
     async def get_funding(self, symbol: str, limit: int = 12) -> list[FundingEntry]:
         raw = await self.get(
@@ -976,6 +1030,9 @@ class EnrichedSource(MarketDataSource):
         self._news_cache = (time.time(), out)
         return out[:limit]
 
+    async def get_account_ratio(self, symbol: str) -> float | None:
+        return await self.primary.get_account_ratio(symbol)
+
     async def close(self) -> None:
         await self.primary.close()
         for c in (self._cg, self._alt, self._cc):
@@ -1097,6 +1154,9 @@ class FailoverSource(MarketDataSource):
 
     async def get_news(self, limit: int = 20) -> list[NewsItem]:
         return await self._call("get_news", limit)
+
+    async def get_account_ratio(self, symbol: str) -> float | None:
+        return await self._call("get_account_ratio", symbol)
 
     async def close(self) -> None:
         for d in self._delegates:

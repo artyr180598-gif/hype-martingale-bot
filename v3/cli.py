@@ -35,7 +35,12 @@ async def run_signal(symbol: str, mode: str = "beginner", deposit: float | None 
     store = SignalStore(_cfg.db_path)
     lifecycle = SignalLifecycle(store, _cfg.COOLDOWN_SECONDS, _cfg.MAX_ACTIVE_SIGNALS)
     try:
-        await data.probe()
+        try:
+            await data.probe()
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️ Не удалось подключиться к источнику данных: {exc}")
+            print("Проверьте сеть или установите MARKET_DATA_MODE=auto/demo.")
+            return 1
         sig = await engine.analyze(symbol.upper(), refresh=True)
         store.save_signal(sig)
         ok, reason = lifecycle.should_emit(sig)
@@ -57,7 +62,11 @@ async def run_scan(limit: int | None = None, top: int | None = None, mode: str =
     data, engine = _engine()
     store = SignalStore(_cfg.db_path)
     try:
-        await data.probe()
+        try:
+            await data.probe()
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️ Не удалось подключиться к источнику данных: {exc}")
+            return 1
         tickers = await data.tickers()
         scanner = Scanner(engine, _cfg)
         print(f"Сканирую все ликвидные USDT-perp при режиме {data.mode}…")
@@ -140,7 +149,9 @@ def _print_startup_report(
     print(f"Режим данных: {mode}")
     if transport.enabled:
         admin = _cfg.TELEGRAM_ADMIN_CHAT_ID or "не задан"
-        print(f"Telegram: включён (admin chat: {admin})")
+        allowed = _cfg.allowed_user_ids
+        auth = f"allow-list: {allowed}" if allowed else "⚠️ ALLOW-LIST ПУСТА — ДОСТУП БУДЕТ ЗАКРЫТ"
+        print(f"Telegram: включён (admin chat: {admin}, {auth})")
     else:
         print("Telegram: выключен — задайте TELEGRAM_BOT_TOKEN (алиас TELEGRAM_TOKEN) в .env")
     print(f"Watcher: запущен, интервал {_cfg.SCAN_INTERVAL_SECONDS}с, watchlist: {len(watcher.watchlist)} символов")
@@ -359,6 +370,25 @@ async def run_watch(symbols: list[str] | None = None, interval: int | None = Non
     return 0
 
 
+async def run_market() -> int:
+    """Print the market-wide overview (same data as Telegram «Мой рынок»)."""
+    data, _ = _engine()
+    try:
+        try:
+            await data.probe()
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️ Не удалось подключиться к источнику данных: {exc}")
+            print("Режим `auto` переключится на демо, либо проверьте сеть / BYBIT_TESTNET.")
+            return 1
+        overview = await data.market_overview()
+        from v3.tg.render import render_market
+
+        print(render_market(overview))
+        return 0
+    finally:
+        await data.close()
+
+
 async def run_status() -> int:
     from v3.observability import metrics
 
@@ -465,9 +495,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from v3.config import validate_config
+
     setup_logging(_cfg.LOG_LEVEL)
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    config_errors = validate_config(_cfg)
+    if config_errors:
+        for err in config_errors:
+            logger.warning("config: %s", err)
 
     cmd = args.command.lower()
     if cmd == "signal":
@@ -494,6 +531,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(run_calibrate(syms, args.tf, args.bars, args.warmup))
     if cmd == "status":
         return asyncio.run(run_status())
+    if cmd == "market":
+        return asyncio.run(run_market())
     if cmd == "pulse":
         return asyncio.run(run_pulse())
     if cmd == "serve":
@@ -505,5 +544,5 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "watch":
         syms = [s.strip().upper() for s in args.symbol.split(",") if s.strip()] if args.symbol else None
         return asyncio.run(run_watch(syms))
-    print("Доступные команды: signal, scan, backtest, walkforward, calibrate, status, pulse, serve, daemon, bot, watch")
+    print("Доступные команды: signal, scan, market, backtest, walkforward, calibrate, status, pulse, serve, daemon, bot, watch")
     return 2

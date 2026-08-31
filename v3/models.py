@@ -12,8 +12,6 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-import pandas as pd
-
 Direction = Literal["LONG", "SHORT", "WAIT", "NO_TRADE"]
 SignalStatus = Literal[
     "GENERATED", "CONFIRMED", "ACTIVE", "TP1_HIT", "TP2_HIT", "TP3_HIT",
@@ -45,15 +43,22 @@ class DataBundle:
     funding_rate: float | None = None
     funding_history: list[float] = field(default_factory=list)
     open_interest_usd: float | None = None
-    open_interest_history: list[float] = field(default_factory=list)
+    open_interest_history: list[tuple[float, float]] = field(default_factory=list)
+    oi_change_24h_pct: float | None = None
+    long_short_ratio: float | None = None          # 0..1 (Bybit account ratio)
+    mark_price: float | None = None
+    index_price: float | None = None
     liquidations: list[dict[str, Any]] = field(default_factory=list)
     orderbook: dict[str, Any] | None = None
     btc_price_24h_pct: float | None = None
     btc_turnover_24h: float | None = None
     btc_funding_rate: float | None = None
+    eth_price_24h_pct: float | None = None
+    eth_funding_rate: float | None = None
     global_change_pct: float | None = None
     btc_dominance: float | None = None
     news_sentiment: float | None = None
+    news_items: list[dict[str, Any]] = field(default_factory=list)
     is_demo: bool = False
     degraded: list[str] = field(default_factory=list)
     data_age_seconds: float | None = None
@@ -107,6 +112,9 @@ class DerivativesSnapshot:
     liq_imbalance: float = 0.0                  # -1 .. +1 ; + = shorts squeezed
     liq_count: int = 0
     taker_buy_sell_ratio: float | None = None
+    long_short_ratio: float | None = None       # 0..1 доля длинных счетов
+    mark_price: float | None = None
+    index_price: float | None = None
     score: float = 0.0
     note: str = ""
 
@@ -139,6 +147,10 @@ class MarketContext:
     btc_adx: float = 0.0
     btc_volatility: float = 0.0
     btc_score: float = 50.0
+    eth_trend: str = "flat"
+    eth_24h_pct: float | None = None
+    eth_funding_rate: float | None = None
+    eth_score: float = 50.0
     dominance: float | None = None
     global_change_pct: float | None = None
     sentiment: float | None = None
@@ -266,6 +278,8 @@ class TradingSignal:
     score_breakdown: ScoreBreakdown = field(default_factory=ScoreBreakdown)
     risk_brief: RiskBrief = field(default_factory=RiskBrief)
     is_demo: bool = False
+    data_age_seconds: float | None = None
+    stale: bool = False
     created_ms: int = field(default_factory=now_ms)
     updated_ms: int = field(default_factory=now_ms)
     duration_sec: float = 0.0
@@ -308,6 +322,8 @@ class TradingSignal:
             "score_breakdown": self.score_breakdown.to_dict(),
             "risk_brief": self.risk_brief.to_dict(),
             "is_demo": self.is_demo,
+            "data_age_seconds": self.data_age_seconds,
+            "stale": self.stale,
             "created_ms": self.created_ms,
             "updated_ms": self.updated_ms,
             "duration_sec": round(self.duration_sec, 2),
@@ -331,8 +347,3 @@ class ScanCandidate:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-# Convenience for JSON/numpy output
-def bundle_to_df(bundle: DataBundle) -> pd.DataFrame | None:
-    return None

@@ -28,7 +28,7 @@ class SignalConfig(BaseSettings):
 
     # ── App ─────────────────────────────────────────────────────
     APP_NAME: str = "FuturesSignalIntelligence"
-    APP_VERSION: str = "3.0.0"
+    APP_VERSION: str = "3.1.0"
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool = False
     V3_API_TOKEN: str = ""
@@ -47,14 +47,16 @@ class SignalConfig(BaseSettings):
 
     # ── Universe / scanner ──────────────────────────────────────
     SCAN_INTERVAL_SECONDS: int = 600
-    SCAN_TOP: int = 20
+    SCAN_TOP: int = 20                  # deep-analysis top-N (Stage 2)
     SCAN_LIMIT: int = 250
     SCAN_MIN_TURNOVER_USD: float = 20_000_000.0
     SCAN_MIN_VOLUME_USD: float = 5_000_000.0
+    SCAN_SHOW_QUALITY_MIN: float = 72.0  # setups below this are hidden from "TOP"
     WATCHLIST_SYMBOLS: str = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,SUIUSDT,TIAUSDT"
 
     # ── Timeframes ──────────────────────────────────────────────
-    TIMEFRAMES: str = "1m,5m,15m,1h,4h"          # order matters: fast -> slow
+    # Mission default mapping: 5m (entry timing) / 15m / 1h / 4h / 1d (macro).
+    TIMEFRAMES: str = "5m,15m,1h,4h,1d"          # order matters: fast -> slow
     ENTRY_TF: str = "15m"
     INTERMEDIATE_TF: str = "1h"
     MACRO_TF: str = "4h"
@@ -62,12 +64,19 @@ class SignalConfig(BaseSettings):
     MIN_BARS: int = 60
 
     # ── Data freshness / quality ────────────────────────────────
-    MAX_DATA_AGE_SECONDS: float = 90.0
+    MAX_DATA_AGE_SECONDS: float = 120.0
     BACKTEST_FUNDING_RATE: float = 0.0002     # per 8h funding interval (0.02%)
     MAX_SPREAD_PCT: float = 0.35
     MIN_SPREAD_PCT: float = 0.005               # absurd quote -> suspicious
     MIN_BID_ASK_LEVELS: int = 5
     MIN_ORDERBOOK_DEPTH_USD: float = 250_000.0
+    TICKER_CACHE_TTL_SECONDS: float = 10.0
+    KLINES_CACHE_TTL_SECONDS: float = 15.0
+    ORDERBOOK_CACHE_TTL_SECONDS: float = 5.0
+    FUNDING_CACHE_TTL_SECONDS: float = 300.0
+    LIQUIDATIONS_CACHE_TTL_SECONDS: float = 60.0
+    ORDERBOOK_DEPTH: int = 50
+    ETH_CONTEXT_ENABLED: bool = True
 
     # ── Technical / scoring ─────────────────────────────────────
     ADX_TREND_MIN: float = 22.0
@@ -125,6 +134,10 @@ class SignalConfig(BaseSettings):
     TELEGRAM_ADMIN_CHAT_ID: str = Field(
         default="", validation_alias=AliasChoices("TELEGRAM_ADMIN_CHAT_ID", "TELEGRAM_CHAT_ID")
     )
+    # Comma-separated telegram user ids allowed to use the bot. The bot is
+    # closed by default: when this list is empty the transport denies every
+    # user (fallback: TELEGRAM_ADMIN_CHAT_ID when it is a numeric id).
+    TELEGRAM_ALLOWED_USER_IDS: str = ""
 
     # ── AI explanation layer (optional, used only for annotations) ─
     AI_ENABLED: bool = True
@@ -164,11 +177,86 @@ class SignalConfig(BaseSettings):
         return out
 
     @property
+    def allowed_user_ids(self) -> list[int]:
+        """Telegram user ids allowed to interact with the bot.
+
+        Sources (merged, deduplicated):
+          * TELEGRAM_ALLOWED_USER_IDS, comma separated;
+          * TELEGRAM_ADMIN_CHAT_ID / TELEGRAM_CHAT_ID when it is a numeric id.
+        """
+        out: list[int] = []
+        raw = f"{self.TELEGRAM_ALLOWED_USER_IDS},{self.TELEGRAM_ADMIN_CHAT_ID}"
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                value = int(part)
+            except ValueError:
+                continue
+            if value and value not in out:
+                out.append(value)
+        return out
+
+    @property
     def db_path(self) -> Path:
         if self.DB_PATH:
             return Path(self.DB_PATH)
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         return self.DATA_DIR / "signals_v3.db"
+
+    @property
+    def horizon(self) -> str:
+        tfs = self.timeframes
+        return f"{tfs[0]}-{tfs[-1]}" if tfs else "15m-4h"
+
+
+def validate_config(cfg: SignalConfig | None = None) -> list[str]:
+    """Startup validation. Returns error messages (empty == OK).
+
+    Checked: timeframes format, entry timeframe presence, positive thresholds,
+    allowed-user-ids format, a writable data directory. Never raises — a bad
+    value must degrade into a readable startup warning, not a traceback.
+    """
+    cfg = cfg or load_config()
+    errors: list[str] = []
+    tfs = cfg.timeframes
+    if not tfs:
+        errors.append("TIMEFRAMES is empty")
+    else:
+        known = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"}
+        unknown = [t for t in tfs if t not in known]
+        if unknown:
+            errors.append(f"TIMEFRAMES contains unsupported values: {', '.join(unknown)}")
+        if cfg.ENTRY_TF not in tfs and cfg.ENTRY_TF not in known:
+            errors.append(f"ENTRY_TF={cfg.ENTRY_TF} is not a supported timeframe")
+    for name, value in (
+        ("SCAN_MIN_TURNOVER_USD", cfg.SCAN_MIN_TURNOVER_USD),
+        ("SCAN_MIN_VOLUME_USD", cfg.SCAN_MIN_VOLUME_USD),
+        ("QUALITY_MIN", cfg.QUALITY_MIN),
+        ("CONFIDENCE_MIN", cfg.CONFIDENCE_MIN),
+        ("MIN_RISK_REWARD", cfg.MIN_RISK_REWARD),
+        ("MAX_DATA_AGE_SECONDS", cfg.MAX_DATA_AGE_SECONDS),
+    ):
+        if value <= 0:
+            errors.append(f"{name}={value} must be positive")
+    if cfg.MAX_RISK_SCORE_TO_ENTER > 10:
+        errors.append("MAX_RISK_SCORE_TO_ENTER must be <= 10")
+    if cfg.SCAN_TOP < 1:
+        errors.append("SCAN_TOP must be >= 1")
+    if cfg.TELEGRAM_ALLOWED_USER_IDS:
+        for part in cfg.TELEGRAM_ALLOWED_USER_IDS.split(","):
+            part = part.strip()
+            if part and not part.lstrip("-").isdigit():
+                errors.append(f"TELEGRAM_ALLOWED_USER_IDS contains non-numeric id: {part!r}")
+    try:
+        cfg.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        probe = cfg.DATA_DIR / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        errors.append(f"DATA_DIR is not writable: {exc}")
+    return errors
 
 
 def load_config(**overrides: object) -> SignalConfig:

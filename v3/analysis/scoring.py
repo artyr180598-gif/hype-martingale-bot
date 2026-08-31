@@ -50,7 +50,7 @@ def score_signal(
         "Order Flow": 10.0,
         "Derivatives": 10.0,
         "Liquidity": 6.0,
-        "BTC Context": 7.0,
+        "Market Context": 7.0,
     }
 
     factors: list[FactorScore] = []
@@ -145,13 +145,18 @@ def score_signal(
     liq_raw = _clip(liq_raw)
     factors.append(FactorScore("Liquidity", liq_raw, 1.0, weights["Liquidity"], weights["Liquidity"] * liq_raw))
 
-    # ── BTC context ─────────────────────────────────────────────
+    # ── Market context (BTC + ETH) ───────────────────────────────
     btc_raw = _clip(context.btc_score / 100.0)
     if direction == "LONG" and context.btc_trend == "down":
         btc_raw = _clip(btc_raw - 0.25)
     if direction == "SHORT" and context.btc_trend == "up":
         btc_raw = _clip(btc_raw - 0.25)
-    factors.append(FactorScore("BTC Context", btc_raw, 1.0, weights["BTC Context"], weights["BTC Context"] * btc_raw))
+    eth_raw = _clip(context.eth_score / 100.0)
+    if context.eth_24h_pct is None:
+        ctx_raw = btc_raw
+    else:
+        ctx_raw = _clip(0.7 * btc_raw + 0.3 * eth_raw)
+    factors.append(FactorScore("Market Context", ctx_raw, 1.0, weights["Market Context"], weights["Market Context"] * ctx_raw))
 
     total = sum(f.value for f in factors)
 
