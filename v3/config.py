@@ -63,6 +63,7 @@ class SignalConfig(BaseSettings):
 
     # ── Data freshness / quality ────────────────────────────────
     MAX_DATA_AGE_SECONDS: float = 90.0
+    BACKTEST_FUNDING_RATE: float = 0.0002     # per 8h funding interval (0.02%)
     MAX_SPREAD_PCT: float = 0.35
     MIN_SPREAD_PCT: float = 0.005               # absurd quote -> suspicious
     MIN_BID_ASK_LEVELS: int = 5

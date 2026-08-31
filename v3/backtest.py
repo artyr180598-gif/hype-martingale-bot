@@ -165,6 +165,20 @@ def run_backtest(
             i += 1
             continue
 
+        # Model conservative funding cost when the trade is held across
+        # funding intervals. We do not have a live funding series per bar, so we
+        # use the configured per-8h rate against the position (worst case for
+        # both sides). This keeps backtest honest about carry cost.
+        funding_rate = getattr(cfg, "BACKTEST_FUNDING_RATE", 0.0)
+        if sim.bars_held > 0 and funding_rate > 0 and TF_MS.get(entry_tf):
+            intervals_per_8h = (8 * 3600 * 1000) / TF_MS[entry_tf]
+            hold_intervals = sim.bars_held / max(intervals_per_8h, 1.0)
+            charge_pct = hold_intervals * funding_rate * 100.0
+            risk_price = abs(sim.entry_price - signal.stop_loss)
+            risk_pct = (risk_price / sim.entry_price * 100.0) if risk_price and sim.entry_price else 0.0
+            sim.r_multiple -= (charge_pct / risk_pct) if risk_pct > 0 else 0.0
+            sim.pnl_pct -= charge_pct
+
         trades.append(
             BacktestTrade(
                 signal=signal.to_dict(),

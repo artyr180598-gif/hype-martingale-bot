@@ -169,7 +169,8 @@ user requested one.
 * only **closed** higher-TF bars are visible at each decision;
 * same `evaluate_bundle` as live;
 * fees 0.055% per side, slippage 0.02%, partial exits, gap-through-stop is a
-  loss;
+  loss, and a conservative `BACKTEST_FUNDING_RATE` carry cost is charged per
+  held funding interval;
 * metrics: trade count, win rate, profit factor, expectancy R, avg win/loss,
   max drawdown, Sharpe, Sortino, `max_consecutive_losses`, `trades_per_day`,
   `precision`, `recall`, `false_positive_rate`, `signals_generated`.
@@ -249,7 +250,8 @@ Root `.env` and `v3/.env.example` are both read. Key variables:
 
 `MARKET_DATA_MODE`, `TIMEFRAMES`, `ENTRY_TF`, `ANALYSIS_BARS`,
 `SCAN_MIN_TURNOVER_USD`, `SCAN_MIN_VOLUME_USD`, `SCAN_TOP`, `SCAN_LIMIT`,
-`WATCHLIST_SYMBOLS`, `MAX_DATA_AGE_SECONDS`, `AI_ENABLED`, `OPENAI_API_KEY`,
+`WATCHLIST_SYMBOLS`, `MAX_DATA_AGE_SECONDS`, `BACKTEST_FUNDING_RATE`,
+`AI_ENABLED`, `OPENAI_API_KEY`,
 `OPENAI_MODEL`, `OPENAI_TIMEOUT_SECONDS`, `V3_API_TOKEN`, `QUALITY_MIN`,
 `CONFIDENCE_MIN`,
 `MIN_RISK_REWARD`, `MAX_RISK_SCORE_TO_ENTER`, `ATR_SL_MULTIPLIER`,

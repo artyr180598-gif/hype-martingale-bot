@@ -526,6 +526,7 @@ v3-специфичные (полный список — [`v3/.env.example`](v3/
 | `SCAN_MIN_TURNOVER_USD` | `20M` | минимальный turnover за 24ч для входа во вселенную |
 | `WATCHLIST_SYMBOLS` | `BTCUSDT,…` | что смотрит `v3 watch` |
 | `MAX_DATA_AGE_SECONDS` | `90` | после этого ticker/свечи считаются stale и сигнал блокируется |
+| `BACKTEST_FUNDING_RATE` | `0.0002` | консервативная стоимость funding за 8h интервал в бэктесте |
 | `AI_ENABLED` | `true` | включает rule-based reasoning (без ключа) |
 | `OPENAI_API_KEY` | *(пусто)* | при заполнении — опциональный LLM-обогатитель текста; слой всё равно не меняет direction/levels/score |
 | `OPENAI_MODEL` | `gpt-4o-mini` | модель AI-аннотатора |
