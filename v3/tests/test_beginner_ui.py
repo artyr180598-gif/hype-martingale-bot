@@ -117,6 +117,24 @@ def test_scan_header_and_zero_setup_explanation():
     assert "не прошли гейт" in hint and "R:R" in hint
 
 
+def test_market_overview_speaks_human():
+    text = rv.render_market({
+        "ts_ms": int(time.time() * 1000), "mode": "beginner", "btc_trend": "up",
+        "btc": {"price": 65000, "price_24h_pct": 1.2},
+        "btc_atr_pct": 1.23, "btc_funding_rate": 0.0001,
+        "eth": {"price": 3000, "price_24h_pct": 0.5}, "eth_24h_pct": 0.5,
+        "eth_funding_rate": 0.0001, "g": {}, "global": {"btc_dominance": 55.1},
+        "fear_greed": {"value": 60, "classification": "Greed"},
+        "universe_count": 250, "total_turnover_24h": 5e10, "avg_move_24h_pct": 1.0,
+        "top_turnover": [], "gainers": [], "losers": [],
+    })
+    low = text.lower()
+    assert "волатильность ≈ 1.23% за час" in low
+    assert "фандинг" in low and "доля btc" in low and "тренд (1ч): растёт" in low
+    for token in ("atr ", "funding ", "доминация", " btc |"):
+        assert token not in low
+
+
 def test_no_trade_card_human():
     text = render_no_trade(TradingSignal(
         uid="nt1", symbol="X", ts_ms=int(time.time() * 1000), direction="NO_TRADE",
