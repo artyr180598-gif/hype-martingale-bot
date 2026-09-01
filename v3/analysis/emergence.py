@@ -118,33 +118,33 @@ def detect_emergence(
     ignition = 0.0
     notes: list[str] = []
 
-    # 1) объём проснулся
+    # 1) объём проснулся (простые слова — это текст для новичка)
     if rvol >= cfg.EMERGENCE_RVOL_MIN:
         ignition += 25.0
-        notes.append(f"объём проснулся (RVOL {rvol:.1f})")
+        notes.append(f"объём заметно выше обычного (×{rvol:.1f}) — кто-то активно заходит")
     elif rvol > 1.0:
         ignition += min(10.0, (rvol - 1.0) * 15.0)
 
     # 2) сжатие/выход из сжатия
     if squeeze_release:
         ignition += 25.0
-        notes.append("сжатие → полосы расширяются (готовится импульс)")
+        notes.append("волатильность сжималась и теперь расширяется — часто перед резким движением")
     elif squeeze_now:
         ignition += 10.0
-        notes.append("сжатие волатильности")
+        notes.append("волатильность сжалась: цена «затихла» перед возможным импульсом")
 
     # 3) консолидация (накопление)
     if consolidated:
         ignition += 15.0
-        notes.append("узкий диапазон при нормальном ATR (накопление)")
+        notes.append("цена ходит в узком коридоре (накопление)")
 
     # 4) близость к экстремуму диапазона
     if near_breakout:
         ignition += 15.0
-        notes.append("цена у вершины 24h-диапазона на растущем объёме")
+        notes.append("цена у верхней границы дневного диапазона, объём растёт")
     elif near_breakdown:
         ignition += 15.0
-        notes.append("цена у дна 24h-диапазона на растущих продажах")
+        notes.append("цена у нижней границы дневного диапазона, продажи нарастают")
 
     # 5) позиционирование: OI растёт, цена ещё спокойна
     oi_build = None
@@ -152,7 +152,7 @@ def detect_emergence(
         oi_build = float(oi_delta_pct)
         if oi_build >= cfg.OI_CHANGE_BUILD_PCT and abs(price_24h_pct or 0.0) <= cfg.POSITIONING_QUIET_PRICE_CHANGE_PCT:
             ignition += 10.0
-            notes.append(f"OI +{oi_build:.1f}% при спокойной цене (позиции строятся)")
+            notes.append(f"открытые позиции растут (+{oi_build:.1f}%), а цена спокойна — кто-то готовится")
 
     pct = price_24h_pct or 0.0
 
@@ -161,10 +161,10 @@ def detect_emergence(
         ignition += 5.0
     if rs24 > 3.0 and 0.30 <= dpos <= 0.80:
         ignition += 8.0
-        notes.append(f"раньше BTC ({rs24:+.1f}%) и ещё есть место в диапазоне")
+        notes.append(f"сильнее BTC ({rs24:+.1f}%), но не на вершине диапазона")
     elif rs24 < -3.0 and 0.20 <= dpos <= 0.70:
         ignition += 8.0
-        notes.append(f"отстаёт от BTC ({rs24:+.1f}%) — кандидат на разворот вниз")
+        notes.append(f"слабее BTC ({rs24:+.1f}%) — кандидат на разворот вниз")
 
     # 7) АНТИ-chase: уже разогрето у экстремума → снижаем подогрев
     if dpos >= 0.95 and pct >= 14.0:

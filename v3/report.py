@@ -57,7 +57,7 @@ def _stale_line(signal: TradingSignal) -> list[str]:
 
 
 def _emergence_lines(signal: TradingSignal) -> list[str]:
-    """«⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ» — если ignition выше порога (ранний отбор)."""
+    """«⚡ Похоже, движение только начинается» — если ignition выше порога (ранний отбор)."""
     e = (signal.features or {}).get("emergence") or {}
     if not e:
         return []
@@ -66,12 +66,19 @@ def _emergence_lines(signal: TradingSignal) -> list[str]:
     if ignition < threshold:
         return []
     direction = str(e.get("early_direction", "FLAT"))
-    d = {"LONG": "вверх", "SHORT": "вниз", "FLAT": "в обе стороны"}.get(direction, "в обе стороны")
+    d = {"LONG": "вверх", "SHORT": "вниз", "FLAT": "пока неясно"}.get(direction, "пока неясно")
     notes = [n for n in e.get("notes", []) if n][:3]
-    lines = ["", f"⚡ **Намечается движение** ({ignition:.0f}/100, подсказка: {d}) — движение ещё НЕ разгорелось"]
+    lines = [
+        "",
+        f"⚡ **Похоже, движение только начинается** (подогрев {ignition:.0f} из 100)",
+        f"• Возможное направление: {d} — это подсказка, а не команда.",
+    ]
     for n in notes:
         lines.append(f"• {n}")
-    lines.append("• Это признак раннего отбора, а не гарантия: вход только после подтверждения движком")
+    lines.append(
+        "• Что это значит: бот заметил ранние признаки (объём, сжатие, позиции), "
+        "но вход — только после подтверждения движком; гарантии движения нет."
+    )
     return lines
 
 

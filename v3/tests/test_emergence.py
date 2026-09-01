@@ -21,6 +21,7 @@ from v3.analysis.derivatives import analyze_derivatives
 from v3.analysis.emergence import detect_emergence
 from v3.analysis.timeframes import build_timeframe_view
 from v3.config import SignalConfig
+from v3.engine import FuturesSignalEngine
 from v3.models import DataBundle
 from v3.scanner import Scanner
 
@@ -50,7 +51,7 @@ def test_emergence_detects_volume_wakeup_and_consolidation():
     assert e.enabled
     assert e.rvol >= 1.5
     assert e.ignition >= 25.0
-    assert "объём проснулся" in " ".join(e.notes)
+    assert "объём" in " ".join(e.notes)
     assert e.early_direction in ("LONG", "SHORT", "FLAT")
 
 
@@ -297,15 +298,86 @@ def test_report_shows_emergence_when_ignition_high():
         regime="RANGING", features={
             "emergence": {
                 "ignition": 78.0, "early_direction": "LONG", "rvol": 1.9,
-                "notes": ["объём проснулся (RVOL 1.9)", "сжатие → полосы расширяются"],
+                "notes": ["объём заметно выше обычного — кто-то активно заходит",
+                          "волатильность сжималась и теперь расширяется"],
             },
             "timeframes": [], "derivatives": {}, "orderflow": {}, "context": {},
         },
     )
     beginner = render_beginner(sig)
-    assert "⚡" in beginner and "Намечается движение" in beginner
+    assert "⚡" in beginner and "движение только начинается" in beginner.lower()
     pro = render_pro(sig)
     assert "Emergence" in pro
+
+
+# ── beginner UX: понятные объяснения новых признаков ────────────
+def test_plain_reasons_includes_emergence_and_positioning():
+    from v3.models import TradingSignal
+    from v3.tg.render import plain_reasons
+
+    sig = TradingSignal(
+        uid="x", symbol="XUSDT", ts_ms=int(time.time() * 1000), direction="LONG",
+        status="CONFIRMED", features={
+            "emergence": {
+                "ignition": 74.0, "early_direction": "LONG",
+                "notes": ["объём заметно выше обычного — кто-то активно заходит",
+                          "открытые позиции растут (+4.0%), а цена спокойна — кто-то готовится"],
+            },
+            "derivatives": {"positioning": "healthy_long"},
+            "timeframes": [], "orderflow": {}, "context": {},
+        },
+    )
+    out = plain_reasons(sig)
+    joined = " ".join(out)
+    assert "движение только намечается" in joined
+    assert "строят лонг" in joined
+    # человеческие объяснения не должны содержать внутренние коды движка
+    for token in ("ignition", "RVOL", "dpos", "oi_delta", "heat", "OI +"):
+        assert token not in joined
+
+
+def test_setup_row_shows_emergence_marker():
+    from v3.models import TradingSignal
+    from v3.tg.render import render_setup_row
+
+    sig = TradingSignal(
+        uid="x", symbol="XUSDT", ts_ms=int(time.time() * 1000), direction="LONG",
+        status="CONFIRMED", quality=74, tier="A", price=100.0, entry_zone=(99.0, 100.0),
+        stop_loss=98.0, targets=[103.0, 106.0], rr=2.0,
+        features={"emergence": {"ignition": 73.0, "early_direction": "LONG"}},
+    )
+    row = render_setup_row({"signal": sig}, 1)
+    assert "⚡" in row
+    assert "только намечается" in row
+    assert "ignition" not in row
+
+
+def test_glossary_has_new_terms():
+    from v3.tg.render import GLOSSARY, render_glossary
+
+    assert "emergence" in GLOSSARY and "rvol" in GLOSSARY and "positioning" in GLOSSARY
+    text = render_glossary("emergence").lower()
+    assert "намечается" in text and "не гарантия" in text
+
+
+def test_engine_risks_include_positioning_warning():
+    from v3.tests.test_v3 import make_tf_map
+
+    cfg = SignalConfig()
+    engine = FuturesSignalEngine(data=None, cfg=cfg)  # type: ignore[arg-type]
+    bundle = DataBundle(
+        symbol="TESTUSDT", ts_ms=int(time.time() * 1000), price=100.0, price_24h_pct=-3.0,
+        turnover_24h=100_000_000.0, volume_24h=1_000_000.0, funding_rate=0.003,
+        funding_history=[0.003, 0.003, 0.003], open_interest_usd=50_000_000.0,
+        open_interest_history=[(0.0, 6.0)],
+        orderbook={"bids": [(99.98 + i * 0.01, 100) for i in range(20)],
+                   "asks": [(100.02 + i * 0.01, 100) for i in range(20)], "ts_ms": 0},
+        btc_price_24h_pct=1.5, btc_turnover_24h=20_000_000_000.0, btc_dominance=55.0,
+        global_change_pct=1.0, degraded=[], data_age_seconds=2.0,
+    )
+    sig = engine.evaluate_bundle(bundle, make_tf_map(), btc_tf=None, strict_liquidity=False)
+    if sig.direction in ("LONG", "SHORT"):
+        assert any("перегреты" in r for r in sig.risks)
 
 
 def test_scanner_run_works_with_fake_engine_and_no_klines():

@@ -59,6 +59,19 @@ GLOSSARY: dict[str, str] = {
                  "выше риск проскальзывания; HYPE применяет повышенные требования к малым монетам.",
     "squeeze": "Squeeze — сжатие волатильности (Bollinger внутри Keltner). Часто "
                "предшествует резкому движению, но направление не гарантируется.",
+    "emergence": "«Намечается движение» (подогрев 0–100) — HYPE ищет монеты ДО начала "
+                 "движения: объём проснулся (RVOL), волатильность сжалась и начинает "
+                 "расширяться, монета в узком диапазоне (накопление) или у границы "
+                 "24h-диапазона на растущем объёме. Это признак раннего отбора, а НЕ "
+                 "гарантия и НЕ приказ входить: направление всегда подтверждает "
+                 "основной движок с детерминированным гейтом.",
+    "rvol": "RVOL (относительный объём) — объём последнего часа по сравнению со средним "
+            "объёмом этой монеты. RVOL 2 = объём вдвое выше обычного: кто-то активно "
+            "заходит. Один из главных признаков «движение только начинается».",
+    "positioning": "Positioning («кто и где стоит») — сочетание OI (открытые контракты), "
+                   "фандинга и цены: входят ли новые деньги (OI растёт), не перегреты ли "
+                   "лонги/шорты, нет ли капитуляции. Например: OI растёт + цена падает + "
+                   "высокий фандинг = перегрев лонгов, риск резкой коррекции.",
     "cvd": "CVD (delta) — оценка агрессивных покупок/продаж по объёму баров. "
            "Используется как подтверждение, не как самостоятельный сигнал.",
     "entry": "Entry zone — зона входа (диапазон цен). HYPE якорит её на структуру "
@@ -110,7 +123,7 @@ def source_stamp(source: str = "", ts_ms: int = 0, data_age_seconds: float | Non
 
 
 def plain_reasons(signal: TradingSignal) -> list[str]:
-    """2–3 объяснения обычными словами — генерируются из признаков сигнала."""
+    """2–4 объяснения обычными словами — генерируются из признаков сигнала."""
     features = signal.features or {}
     views = features.get("timeframes", []) or []
     der = features.get("derivatives", {}) or {}
@@ -138,6 +151,29 @@ def plain_reasons(signal: TradingSignal) -> list[str]:
         if "BOS" in str(entry.get("structure_signal", "")):
             out.append("пробой структуры (BOS) подтверждён")
 
+    # ⚡ «намечается движение» — простыми словами (раунд 4)
+    em = features.get("emergence") or {}
+    if em and signal.direction in ("LONG", "SHORT"):
+        ignition = float(em.get("ignition", 0.0) or 0.0)
+        if ignition >= SignalConfig().EMERGENCE_IGNITION_MIN:
+            hint = {"LONG": "вверх", "SHORT": "вниз"}.get(str(em.get("early_direction")), "")
+            lead = f"движение только намечается ({'возможно ' + hint if hint else 'направление пока неясно'})"
+            notes = [n for n in em.get("notes", []) if n][:2]
+            out.append(lead + (": " + "; ".join(notes) if notes else ""))
+
+    # кто и где стоит (positioning) — простыми словами
+    pos = der.get("positioning")
+    if pos == "healthy_long":
+        out.append("в монету заходят деньги: открытые позиции (OI) растут при спокойной цене — строят лонг")
+    elif pos == "overheated_long":
+        out.append("внимание: монета перегрета — лонги перегружены, риск резкой коррекции")
+    elif pos == "short_build":
+        out.append("сейчас ставят на падение: открытые позиции (OI) растут, а цена идёт вниз")
+    elif pos == "capitulation":
+        out.append("признак капитуляции: массовое закрытие лонгов — часто разворот")
+    elif pos == "short_squeeze":
+        out.append("шорты выкупают — резкий рост может быть избыточным")
+
     ft = der.get("funding_trend")
     if ft in ("neutral", "falling"):
         out.append("фандинг нейтральный — перегрева нет")
@@ -160,7 +196,7 @@ def plain_reasons(signal: TradingSignal) -> list[str]:
     for r in out:
         if r and r not in dedup:
             dedup.append(r)
-    return dedup[:3]
+    return dedup[:4]
 
 
 # ── setup lists ─────────────────────────────────────────────────
@@ -181,12 +217,19 @@ def _targets_pct_line(sig: TradingSignal) -> str | None:
 
 def render_setup_row(item: dict[str, Any], place: int, cfg: SignalConfig | None = None) -> str:
     sig: TradingSignal = item["signal"]
+    cfg = cfg or SignalConfig()
     emoji = "🟢" if sig.direction == "LONG" else "🔻"
+    em = (sig.features or {}).get("emergence") or {}
+    ignite = float(em.get("ignition", 0.0) or 0.0)
+    marker = " ⚡" if ignite >= cfg.EMERGENCE_IGNITION_MIN else ""
     lines = [
-        f"{place}. {emoji} **{sig.symbol}** — {sig.direction}",
+        f"{place}. {emoji} **{sig.symbol}** — {sig.direction}{marker}",
         f"   Оценка сетапа: {quality_label(sig.quality, sig.tier, cfg)}",
         f"   • вход {sig.entry_zone[0]:.6g}–{sig.entry_zone[1]:.6g} · стоп {sig.stop_loss:.6g}",
     ]
+    if ignite >= cfg.EMERGENCE_IGNITION_MIN:
+        hint = {"LONG": "вверх", "SHORT": "вниз"}.get(str(em.get("early_direction")), "")
+        lines.append("   ⚡ движение только намечается" + (f" (вероятно, {hint})" if hint else ""))
     targets = _targets_pct_line(sig)
     if targets:
         lines.append(f"   • {targets}")

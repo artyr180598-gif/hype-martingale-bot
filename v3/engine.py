@@ -295,6 +295,19 @@ class FuturesSignalEngine:
                 risks.append("вход в диапазоне — меньший размер, выход у середины")
             if condition:
                 risks.append("условный сетап: вход только после подтверждения условия")
+            # positioning-риски простыми словами (раунд 4)
+            pos = derivatives.positioning
+            if pos == "overheated_long" and direction == "LONG":
+                risks.append("позиции перегреты: OI растёт, цена падает, фандинг высокий — риск резкой коррекции")
+            elif pos == "short_squeeze" and direction == "SHORT":
+                risks.append("шорты выкупаются (short squeeze) — резкое движение может быть избыточным")
+            elif pos == "capitulation" and direction == "SHORT":
+                risks.append("капитуляция лонгов — шорт в зоне возможного разворота")
+            if derivatives.liq_accel_usd >= 1_000_000:
+                risks.append(
+                    f"каскад ликвидаций ${derivatives.liq_accel_usd / 1e6:.1f}M "
+                    f"за последние ~{self.cfg.LIQ_ACCELERATION_WINDOW_SEC // 60} мин — повышенная волатильность"
+                )
             if levels is not None:
                 risks.extend(level_risks(levels, view=entry_view))
             if score.total >= self.cfg.A_TIER_MIN:
