@@ -25,6 +25,7 @@ from typing import Any
 from v3.ai import build_reasoner
 from v3.analysis.context import build_context
 from v3.analysis.derivatives import analyze_derivatives
+from v3.analysis.emergence import detect_emergence
 from v3.analysis.levels import build_levels
 from v3.analysis.orderflow import analyze_orderflow
 from v3.analysis.regime import detect_regime
@@ -132,6 +133,7 @@ class FuturesSignalEngine:
         signal = self.evaluate_bundle(bundle, tf_map, btc_tf=btc_df)
         signal.source = getattr(self.data, "mode", "") or ""
         signal.duration_sec = time.time() - started
+        self._attach_emergence(signal, bundle, tf_map)
         self._cache[key] = (time.time(), signal)
         metrics.mark_mode(getattr(self.data, "mode", "unknown"), True)
         metrics.record_analysis(symbol, signal.duration_sec)
@@ -293,6 +295,19 @@ class FuturesSignalEngine:
                 risks.append("вход в диапазоне — меньший размер, выход у середины")
             if condition:
                 risks.append("условный сетап: вход только после подтверждения условия")
+            # positioning-риски простыми словами (раунд 4)
+            pos = derivatives.positioning
+            if pos == "overheated_long" and direction == "LONG":
+                risks.append("позиции перегреты: OI растёт, цена падает, фандинг высокий — риск резкой коррекции")
+            elif pos == "short_squeeze" and direction == "SHORT":
+                risks.append("шорты выкупаются (short squeeze) — резкое движение может быть избыточным")
+            elif pos == "capitulation" and direction == "SHORT":
+                risks.append("капитуляция лонгов — шорт в зоне возможного разворота")
+            if derivatives.liq_accel_usd >= 1_000_000:
+                risks.append(
+                    f"каскад ликвидаций ${derivatives.liq_accel_usd / 1e6:.1f}M "
+                    f"за последние ~{self.cfg.LIQ_ACCELERATION_WINDOW_SEC // 60} мин — повышенная волатильность"
+                )
             if levels is not None:
                 risks.extend(level_risks(levels, view=entry_view))
             if score.total >= self.cfg.A_TIER_MIN:
@@ -355,6 +370,46 @@ class FuturesSignalEngine:
             except Exception as exc:  # noqa: BLE001
                 signal.risks.append(f"AI explanation degraded: {exc}")
         return signal
+
+    def _attach_emergence(self, signal: TradingSignal, bundle: DataBundle, tf_map: dict[str, Any]) -> None:
+        """«Намечается движение» — признак объяснения/ранжирования, НЕ гейт.
+
+        В бэктесте (``evaluate_bundle``) не считается: у нас нет живого OI/24h
+        контекста на исторических барах, а подставлять фикции нельзя.
+        """
+        if not self.cfg.SCAN_EMERGENCE_ENABLED or bundle.price <= 0:
+            return
+        try:
+            edf = tf_map.get(self.cfg.INTERMEDIATE_TF) or tf_map.get(self.cfg.ENTRY_TF)
+            if edf is None or len(edf) < 30:
+                return
+            # 24h-диапазон оцениваем по последним ~24 барам целевого ТФ
+            tf_ms = self.TF_MS_MAP.get(self.cfg.INTERMEDIATE_TF, 3_600_000) if self.cfg.INTERMEDIATE_TF in tf_map else self.TF_MS_MAP.get(self.cfg.ENTRY_TF, 3_600_000)
+            bars_24h = max(12, int(86_400_000 / tf_ms))
+            tail = edf.tail(bars_24h)
+            oi_delta = None
+            if bundle.open_interest_history:
+                oi_delta = float(bundle.open_interest_history[-1][1])
+            elif bundle.oi_change_24h_pct is not None:
+                oi_delta = float(bundle.oi_change_24h_pct)
+            e = detect_emergence(
+                edf,
+                price_24h_pct=bundle.price_24h_pct,
+                high_24h=float(tail["high"].max()) if len(tail) else None,
+                low_24h=float(tail["low"].min()) if len(tail) else None,
+                btc_24h_pct=bundle.btc_price_24h_pct,
+                oi_delta_pct=oi_delta,
+                funding_rate=bundle.funding_rate,
+                cfg=self.cfg,
+            )
+            if not e.enabled:
+                return
+            signal.features["emergence"] = e.to_dict()
+            notes = [n for n in e.notes if n]
+            if notes:
+                signal.reasons = dedupe(signal.reasons + notes)[:10]
+        except Exception as exc:  # noqa: BLE001
+            signal.risks.append(f"emergence degraded: {exc}")
 
     # ── gates ───────────────────────────────────────────────────
     def validate(

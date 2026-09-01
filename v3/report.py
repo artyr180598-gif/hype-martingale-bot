@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 
+from v3.config import SignalConfig
 from v3.models import TradingSignal
 from v3.tg.render import plain_reasons, quality_label
 
@@ -55,6 +56,32 @@ def _stale_line(signal: TradingSignal) -> list[str]:
     return []
 
 
+def _emergence_lines(signal: TradingSignal) -> list[str]:
+    """«⚡ Похоже, движение только начинается» — если ignition выше порога (ранний отбор)."""
+    e = (signal.features or {}).get("emergence") or {}
+    if not e:
+        return []
+    ignition = float(e.get("ignition", 0.0) or 0.0)
+    threshold = SignalConfig().EMERGENCE_IGNITION_MIN
+    if ignition < threshold:
+        return []
+    direction = str(e.get("early_direction", "FLAT"))
+    d = {"LONG": "вверх", "SHORT": "вниз", "FLAT": "пока неясно"}.get(direction, "пока неясно")
+    notes = [n for n in e.get("notes", []) if n][:3]
+    lines = [
+        "",
+        f"⚡ **Похоже, движение только начинается** (подогрев {ignition:.0f} из 100)",
+        f"• Возможное направление: {d} — это подсказка, а не команда.",
+    ]
+    for n in notes:
+        lines.append(f"• {n}")
+    lines.append(
+        "• Что это значит: бот заметил ранние признаки (объём, сжатие, позиции), "
+        "но вход — только после подтверждения движком; гарантии движения нет."
+    )
+    return lines
+
+
 def render_signal(signal: TradingSignal, mode: str = "beginner") -> str:
     if mode.lower() == "pro":
         return render_pro(signal)
@@ -74,6 +101,9 @@ def render_beginner(signal: TradingSignal) -> str:
         f"⭐ Оценка сетапа: {quality_label(signal.quality, signal.tier)}",
         f"Уверенность в данных: {signal.confidence:.1f}/1",
         f"📈 Рынок: {signal.regime} | горизонт: {signal.horizon}",
+    ]
+    lines += _emergence_lines(signal)
+    lines += [
         "",
         "**Что делать:**",
     ]
@@ -170,6 +200,13 @@ def render_pro(signal: TradingSignal) -> str:
         lines.append(f"Scenario: {scenario_names.get(signal.scenario, signal.scenario)}")
     if signal.condition:
         lines.append(f"Condition: {signal.condition}")
+    e = (signal.features or {}).get("emergence") or {}
+    if e:
+        lines.append(
+            f"⚡ Emergence {e.get('ignition', 0):.0f}/100 | RVOL {e.get('rvol', 1):.2f} | "
+            f"squeeze_release {e.get('squeeze_release')} | consol {e.get('consolidation')} | "
+            f"dpos {e.get('dpos', 0.5):.2f} | hint {e.get('early_direction')}"
+        )
     lines.extend([
         "",
         "## 📊 Score breakdown",
@@ -181,9 +218,18 @@ def render_pro(signal: TradingSignal) -> str:
     lines.extend(["", "🧭 Timeframes:"])
 
     for v in signal.features.get("timeframes", []):
+        extra = ""
+        if v.get("mfi") is not None:
+            extra += f" MFI {v.get('mfi', 0):.0f}"
+        if v.get("rvol", 1.0) != 1.0:
+            extra += f" RVOL {v.get('rvol', 1.0):.2f}"
+        if v.get("ema_stack", 0) != 0:
+            extra += f" EMA-stack {v.get('ema_stack', 0):+d}"
+        if v.get("macd_cross", 0):
+            extra += f" MACD×{'↑' if v.get('macd_cross') > 0 else '↓'}"
         lines.append(
             f"  {v['timeframe']:<4} {v['trend']:<5} ADX {v['adx']:.0f} RSI {v['rsi']:.0f} "
-            f"ATR {v['atr_pct']:.2f}% vol_z {v['vol_z']:+.2f}"
+            f"ATR {v['atr_pct']:.2f}% vol_z {v['vol_z']:+.2f}{extra}"
         )
 
     der = signal.features.get("derivatives", {})
@@ -197,7 +243,8 @@ def render_pro(signal: TradingSignal) -> str:
         "📉 Derivatives:",
         f"  funding {der.get('funding_rate')} / {der.get('funding_trend')}",
         f"  OI ${(der.get('open_interest_usd') or 0) / 1e6:.1f}M",
-        f"  liq {liq_note} | imbalance {der.get('liq_imbalance', 0):+.2f}",
+        f"  OI Δ {der.get('oi_change_24h_pct')}% | positioning {der.get('positioning', 'unknown')} ({der.get('positioning_score', 50):.0f}/100)",
+        f"  liq {liq_note} | imbalance {der.get('liq_imbalance', 0):+.2f} | accel ${(der.get('liq_accel_usd') or 0) / 1e3:.1f}k/5m",
     ])
     if der.get("long_short_ratio") is not None:
         lines.append(f"  long/short accounts {float(der['long_short_ratio']):.2f} (0..1)")

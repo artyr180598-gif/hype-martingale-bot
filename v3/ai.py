@@ -37,6 +37,7 @@ class RuleBasedReasoner:
         of = features.get("orderflow", {}) or {}
         ctx = features.get("context", {}) or {}
         reg = features.get("regime", {}) or {}
+        em = features.get("emergence") or {}
 
         reasons = list(signal.reasons)
         risks = list(signal.risks)
@@ -55,6 +56,16 @@ class RuleBasedReasoner:
                     f"Ликвидность: {of.get('liquidity_grade')}, "
                     f"перекос стакана {float(of.get('imbalance', 0)):+.2f}."
                 )
+            if em and float(em.get("ignition", 0.0) or 0.0) >= 50.0:
+                reasons.append(
+                    f"Намечается движение (подогрев {float(em.get('ignition', 0.0)):.0f}/100): "
+                    + "; ".join([n for n in em.get("notes", []) if n][:2])
+                )
+            pos = der.get("positioning")
+            if pos == "healthy_long":
+                reasons.append("Позиционирование здоровое: OI растёт, цена спокойно идёт вверх.")
+            elif pos == "short_build":
+                reasons.append("Позиционирование: построение шортов (OI растёт при снижении).")
 
             # What could go wrong
             conflicts = reg.get("conflicts") or []
@@ -64,6 +75,12 @@ class RuleBasedReasoner:
                 risks.append("Фандинг перегрет по лонгам — риск обратного сквиза.")
             if der.get("funding_trend") == "overheated_short" and signal.direction == "SHORT":
                 risks.append("Фандинг перегрет по шортам — риск сквиза вверх.")
+            if pos == "overheated_long" and signal.direction == "LONG":
+                risks.append("Перегрев позиций: OI растёт при падении цены — риск каскада.")
+            elif pos == "short_squeeze" and signal.direction == "SHORT":
+                risks.append("Выкуп шортов (short squeeze) — движение может быть избыточным.")
+            elif pos == "capitulation" and signal.direction == "SHORT":
+                risks.append("Капитуляция лонгов — возможен разворот против шорта.")
         else:
             if signal.no_trade_reasons:
                 reasons.append(f"NO TRADE: {signal.no_trade_reasons[0]}.")

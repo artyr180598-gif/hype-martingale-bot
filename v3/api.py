@@ -142,6 +142,36 @@ async def top(
     }
 
 
+@app.get("/api/v3/emerging")
+async def emerging(
+    ignition_min: float = Query(-1.0, ge=-1.0, le=100.0),
+    limit: int = Query(20, ge=1, le=50),
+    _: None = Depends(require_api_token),
+) -> dict[str, Any]:
+    """«⚡ Намечается движение»: кандидаты с высоким ignition (ранний отбор)."""
+    from v3.scanner import Scanner
+
+    scanner = Scanner(runtime.engine, runtime.cfg)
+    if scanner.last is None:
+        tickers = await runtime.data.tickers()
+        await scanner.run(tickers, limit=runtime.cfg.SCAN_LIMIT, top=runtime.cfg.SCAN_TOP)
+    threshold = ignition_min if ignition_min >= 0 else runtime.cfg.EMERGENCE_IGNITION_MIN
+    items = []
+    for item in scanner.emerging(threshold):
+        sig = item["signal"]
+        runtime.store.save_signal(sig)
+        items.append({
+            "symbol": item["candidate"]["symbol"],
+            "ignition": item["candidate"].get("ignition", 0.0),
+            "early_direction": item["candidate"].get("early_direction", "FLAT"),
+            "note": item["candidate"].get("emergence_note", ""),
+            "quality": sig.quality,
+            "direction": sig.direction,
+            "tier": sig.tier,
+        })
+    return {"ignition_min": threshold, "emerging": items[:limit], "ts_ms": now_ms()}
+
+
 @app.post("/api/v3/scan")
 async def scan(
     limit: int = Query(100, ge=1, le=500),

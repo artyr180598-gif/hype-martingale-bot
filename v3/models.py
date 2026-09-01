@@ -92,8 +92,46 @@ class TimeframeView:
     last_swing_high: float | None
     last_swing_low: float | None
     structure_signal: str                       # BOS_UP | CHoCH_UP | BOS_DOWN | ... | none
+    # ── раунд 4: экспонируем уже посчитанные индикаторы (они были «мёртвыми») ──
+    plus_di: float = 0.0
+    minus_di: float = 0.0
+    ema_stack: int = 0                          # -3..+3: ema9/20/50/200 выравнивание
+    mfi: float = 50.0                           # money flow index
+    bb_pctb: float = 0.5                        # Bollinger %B
+    wpr: float = -50.0                          # Williams %R
+    roc20: float = 0.0
+    macd_cross: int = 0                         # 1 свежий бычий, -1 медвежий
+    stoch_cross: int = 0                        # 1 бычий, -1 медвежий
+    rvol: float = 1.0                           # объём последнего бара / среднее окна
     score: float = 0.0
     note: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class EmergenceSnapshot:
+    """«Намечающееся движение» до того, как оно разгорелось (ранний отбор).
+
+    Это признак для ранжирования/объяснения, НЕ триггер и НЕ гейт: направление
+    всегда остаётся за ``FuturesSignalEngine`` и детерминированным gate.
+    """
+
+    enabled: bool = True
+    rvol: float = 1.0                           # объём последнего бара / среднее окна
+    squeeze: bool = False                       # сжатие волатильности сейчас
+    squeeze_release: bool = False               # сжатие было недавно и полосы расширяются
+    consolidation: bool = False                 # узкий диапазон при нормальном ATR
+    rs24: float = 0.0                           # 24h движение относительно BTC
+    dpos: float = 0.5                           # позиция цены в 24h диапазоне (0..1)
+    oi_build_pct: float | None = None           # рост OI за 24h (если есть история)
+    funding_neutral: bool = True
+    near_breakout: bool = False                 # у вершины диапазона на нарастающем объёме
+    near_breakdown: bool = False                # у дна диапазона на растущих продажах
+    ignition: float = 0.0                       # 0..100 — «подогрев»
+    early_direction: str = "FLAT"               # LONG | SHORT | FLAT (направление-подсказка)
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -110,10 +148,15 @@ class DerivativesSnapshot:
     liq_sell_usd: float = 0.0
     liq_imbalance: float = 0.0                  # -1 .. +1 ; + = shorts squeezed
     liq_count: int = 0
-    taker_buy_sell_ratio: float | None = None
+    taker_buy_sell_ratio: float | None = None   # legacy alias account ratio (не taker!)
     long_short_ratio: float | None = None       # 0..1 доля длинных счетов
+    account_long_ratio: float | None = None     # честное имя: доля длинных счетов Bybit
     mark_price: float | None = None
     index_price: float | None = None
+    # ── раунд 4: positioning-матрица OI × funding × цена ─────────
+    positioning: str = "unknown"                # healthy_long | overheated_long | short_build | capitulation | short_squeeze | unwinding | building
+    positioning_score: float = 50.0             # 0..100
+    liq_accel_usd: float = 0.0                  # ликвидации за последние ~5 мин
     score: float = 0.0
     note: str = ""
 
@@ -347,6 +390,15 @@ class ScanCandidate:
     liquidity_ok: bool = False
     volume_ok: bool = False
     reason: str = ""
+    # ── раунд 4: ранний отбор (появляется у «намечающихся» движений) ──
+    dpos: float = 0.5                       # позиция цены в 24h-диапазоне (0..1)
+    rs24: float = 0.0                       # 24h движение относительно BTC
+    oi_delta_pct: float | None = None       # изменение OI за 24h (если есть)
+    ignition: float = 0.0                   # «подогрев» из emergence (0..100)
+    early_direction: str = "FLAT"           # LONG | SHORT | FLAT (подсказка, не сигнал)
+    emergence_note: str = ""
+    age_days: float | None = None           # возраст листинга
+    fresh_listing: bool = False             # листинг младше порога (отдельный режим)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

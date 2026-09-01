@@ -35,6 +35,7 @@ class Instrument:
     maker_fee: float = 0.0002
     taker_fee: float = 0.00055
     turnover_24h: float = 0.0
+    launch_time_ms: int | None = None  # листинг (Bybit launchTime / Binance onboardDate)
 
     @property
     def is_spot(self) -> bool:
