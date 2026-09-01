@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import time
 
-from v3.config import SignalConfig
+import pytest
+
+from v3.config import APP_VERSION_DEFAULT, SignalConfig
 from v3.models import RiskBrief, TradingSignal
 from v3.report import render_no_trade, render_signal
-from v3.telegram import HELP_TEXT
+from v3.telegram import HELP_TEXT, MENU_TEXT
 from v3.tg import render as rv
 
 
@@ -80,6 +82,45 @@ def test_quality_label_legend():
 def test_help_text_has_tier_legend_and_no_guarantee():
     assert "S 82–100" in HELP_TEXT and "ниже 50 — не входим" in HELP_TEXT
     assert "качество сетапа, а не вероятность прибыли" in HELP_TEXT.lower()
+
+
+def test_build_version_is_visible_in_help_menu_and_settings():
+    """Пользователь должен видеть, какая сборка реально запущена.
+
+    Раунд 4 был смержен, но версия осталась 3.1.0 — визуально «ничего не
+    делалось». Теперь строка сборки есть в HELP, меню и настройках.
+    """
+    assert APP_VERSION_DEFAULT != "3.1.0"  # версия отличается от прошлого раунда
+    settings_text = rv.render_settings({"mode": "beginner", "deposit_usd": 1000, "risk_per_trade_pct": 1})
+    for text, where in ((HELP_TEXT, "HELP"), (MENU_TEXT, "MENU"), (settings_text, "SETTINGS")):
+        assert f"v{APP_VERSION_DEFAULT}" in text, f"в {where} не видна версия сборки"
+        assert "3.2.0" in text, f"в {where} не видна версия сборки"
+    # в настройках честно помечен ранний отбор
+    assert "намечающегося движения" in settings_text.lower()
+    assert "включён" in settings_text.lower()
+    # версия — это не внутренности движка: текст остаётся новичковым
+    for text, where in ((HELP_TEXT, "HELP"), (MENU_TEXT, "MENU"), (settings_text, "SETTINGS")):
+        low = text.lower()
+        for token in _INTERNAL_TOKENS:
+            assert token not in low, f"в {where} торчит внутренний токен {token}"
+    # HELP подсказывает, что делать, если версия старая
+    assert "git pull" in HELP_TEXT and "старый процесс" in HELP_TEXT
+
+
+def test_startup_banner_prints_version(capsys):
+    """Баннер при старте: «HYPE v3 (версия X)» — видно, какой процесс поднят."""
+    from v3 import cli
+
+    if cli._cfg is None:  # конфиг не прошёл валидацию — демон всё равно не стартует
+        pytest.skip("SignalConfig не собран в этом окружении")
+    fake_data = type("D", (), {"mode": "live"})()
+    transport = type("T", (), {"enabled": False})()
+    watcher = type("W", (), {"watchlist": ["BTCUSDT", "ETHUSDT"]})()
+    cli._print_startup_report(fake_data, "live", transport, watcher, "0.0.0.0", 8400)
+    out = capsys.readouterr().out
+    assert f"HYPE v3 (версия {APP_VERSION_DEFAULT})" in out
+    assert f"v{APP_VERSION_DEFAULT}" in out
+    assert "Режим данных: live" in out
 
 
 def test_plain_reasons_are_human_phrases():

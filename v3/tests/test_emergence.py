@@ -24,6 +24,7 @@ from v3.config import SignalConfig
 from v3.engine import FuturesSignalEngine
 from v3.models import DataBundle
 from v3.scanner import Scanner
+from v3.tg.render import EMERGING_DISCLAIMER
 
 
 def make_df(n: int = 200, direction: str = "up", vol_spike: float = 1.0, squeeze: bool = False, start: float = 100.0) -> pd.DataFrame:
@@ -411,3 +412,129 @@ def test_scanner_run_works_with_fake_engine_and_no_klines():
     assert result.analyzed
     assert isinstance(result.duration_sec, float)
     assert scanner.emerging() == []  # ignite не посчитан — честный пустой список
+
+
+# ── «⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ» в Telegram-скане ────────────────────
+def emerging_df(n: int = 150, spike: float = 2.0) -> pd.DataFrame:
+    """1h-свечи «до разгона»: цена стоит в узком коридоре, объём бара вырос."""
+    df = make_df(n, "up", vol_spike=spike)
+    idx = df.index[-14:]
+    base = df["close"].iloc[-14]
+    df.loc[idx, "close"] = base
+    df.loc[idx, "open"] = base
+    df.loc[idx, "high"] = base * 1.002
+    df.loc[idx, "low"] = base * 0.998
+    return df
+
+
+def _scan_core(cfg: SignalConfig, with_klines: bool, db_path: str):
+    """V3Core на фейковых данных: скан без сети, но с настоящим Scanner."""
+    from v3.models import TradingSignal
+    from v3.store import SignalLifecycle, SignalStore
+    from v3.telegram import V3Core
+
+    class FakeData:
+        mode = "fake"
+
+        async def klines(self, sym, tf, limit):
+            return emerging_df() if with_klines else None
+
+        async def tickers(self, symbols=None):
+            return {s: _T(s, 2.0, 103.0, 97.0, 100.0) for s in (symbols or ["AAAUSDT"])}
+
+        async def instruments(self):
+            return []
+
+    class FakeEngine:
+        data = FakeData()
+
+        async def analyze_batch(self, symbols, concurrency=4):
+            return [
+                TradingSignal(uid=f"scan-{s}-{i}", symbol=s, ts_ms=int(time.time() * 1000),
+                              direction="LONG", status="CONFIRMED", quality=70, tier="A",
+                              price=100.0, entry_zone=(99.0, 100.0), stop_loss=98.0,
+                              targets=[103.0, 105.0, 108.0], rr=2.0, score=70,
+                              confidence=0.9, risk_score=3, regime="RANGING",
+                              # инвариант «только реальные данные»: без возраста
+                              # данных сигнал честно превращается в NO TRADE
+                              data_age_seconds=2.0)
+                for i, s in enumerate(symbols)
+            ]
+
+    store = SignalStore(db_path)
+    lifecycle = SignalLifecycle(store, cooldown_seconds=60, max_active=3)
+    return V3Core(FakeData(), FakeEngine(), store, lifecycle, cfg)  # type: ignore[arg-type]
+
+
+def test_scan_text_shows_emerging_block_with_disclaimer(tmp_path):
+    """В Telegram-скане появился блок «⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ» (был только в CLI)."""
+    cfg = SignalConfig()
+    core = _scan_core(cfg, with_klines=True, db_path=str(tmp_path / "scan_kg.db"))
+    try:
+        text = asyncio.run(core.scan_text("beginner"))
+    finally:
+        core.store.close()
+
+    assert "НАМЕЧАЕТСЯ ДВИЖЕНИЕ" in text
+    assert EMERGING_DISCLAIMER in text
+    assert "AAAUSDT" in text and "ранний признак" in text
+    # заметки — человеческие, из emergence, а не сырые поля движка
+    assert "объём заметно выше обычного" in text or "узком коридоре" in text
+    low = text.lower()
+    assert "ignition" not in low and "early_direction" not in low
+    # блок раннего отбора не подменяет основной движок: сетапы и гейт на месте
+    assert "СКАН РЫНКА" in text and "НАЙДЕНО СЕТАПОВ" in text
+
+
+def test_scan_text_hides_emerging_block_when_empty(tmp_path):
+    """Пустой список → блока нет (не печатаем «для галочки»)."""
+    cfg = SignalConfig()
+    core = _scan_core(cfg, with_klines=False, db_path=str(tmp_path / "scan_empty.db"))
+    try:
+        text = asyncio.run(core.scan_text("beginner"))
+    finally:
+        core.store.close()
+    assert "НАМЕЧАЕТСЯ" not in text
+    assert "СКАН РЫНКА" in text
+
+
+def test_scan_text_pro_mode_may_show_raw_ignition(tmp_path):
+    """PRO-режиму можно сырые ignition/подсказку — новичку нет."""
+    cfg = SignalConfig()
+    core = _scan_core(cfg, with_klines=True, db_path=str(tmp_path / "scan_pro.db"))
+    try:
+        text = asyncio.run(core.scan_text("pro"))
+    finally:
+        core.store.close()
+    assert "НАМЕЧАЕТСЯ ДВИЖЕНИЕ" in text
+    assert "ignition" in text.lower()
+
+
+def test_render_emerging_block_rules():
+    """Хелпер блока: максимум 5 монет, заметки новичковые, дисклеймер, пусто → ''."""
+    from v3.tg.render import render_emerging
+
+    cfg = SignalConfig()
+    items = [
+        {"candidate": {"symbol": f"S{i}USDT", "ignition": 90.0 - i, "early_direction": "LONG",
+                       "emergence_note": "объём заметно выше обычного (×2.1) — кто-то активно заходит"},
+         "signal": None}
+        for i in range(8)
+    ]
+    text = render_emerging(items, cfg)
+    assert text.startswith("⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ")
+    assert text.count("— ранний признак:") == 5  # не больше 5 монет
+    assert "S0USDT" in text and "S7USDT" not in text
+    assert EMERGING_DISCLAIMER in text
+    assert "ignition" not in text.lower()
+    # пустой список → пустая строка
+    assert render_emerging([], cfg) == ""
+    assert render_emerging(None, cfg) == ""  # type: ignore[arg-type]
+    # анти-chase заметки (движение уже было) в блок «намечается» не идут
+    hot = [{"candidate": {"symbol": "HOTUSDT", "ignition": 60.0, "early_direction": "LONG",
+                          "emergence_note": ("объём заметно выше обычного (×2.1) — кто-то активно заходит"
+                                             " | уже у вершины после большого хода — не «намечается», а разогрето")},
+            "signal": None}]
+    hot_text = render_emerging(hot, cfg)
+    assert "объём заметно выше обычного" in hot_text
+    assert "уже у вершины" not in hot_text

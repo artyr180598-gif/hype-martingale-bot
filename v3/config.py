@@ -18,6 +18,24 @@ def _data_dir_default() -> Path:
     return Path(__import__("os").getenv("DATA_DIR", "./data"))
 
 
+# ── Сборка (видна пользователю) ─────────────────────────────────
+# Раунд 4 добавил ранний отбор «намечающегося движения», но версия осталась
+# 3.1.0 — из-за этого пользователь не видел, что код обновился. Версия и
+# подпись раунда теперь печатаются в HELP / меню / настройках / баннере
+# старта: по строке сборки видно, какой процесс реально запущен.
+APP_VERSION_DEFAULT = "3.2.0"
+APP_RELEASE_DEFAULT = "Раунд 4: ранний отбор «намечающегося движения»"
+
+
+def build_line(version: str | None = None, release: str | None = None) -> str:
+    """Одна строка сборки для всех интерфейсов: «🛠 Сборка: v3.2.0 · Раунд 4: …».
+
+    Функция (а не константа в классе) — чтобы тексты UI собирались без чтения
+    env и без риска словить ошибку конфигурации на этапе импорта модуля.
+    """
+    return f"🛠 Сборка: v{version or APP_VERSION_DEFAULT} · {release or APP_RELEASE_DEFAULT}"
+
+
 class SignalConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(".env", "v3/.env"),
@@ -28,7 +46,8 @@ class SignalConfig(BaseSettings):
 
     # ── App ─────────────────────────────────────────────────────
     APP_NAME: str = "FuturesSignalIntelligence"
-    APP_VERSION: str = "3.1.0"
+    APP_VERSION: str = APP_VERSION_DEFAULT          # видно в HELP / меню / настройках / баннере
+    APP_RELEASE: str = APP_RELEASE_DEFAULT          # человеческая подпись раунда
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool = False
     V3_API_TOKEN: str = ""

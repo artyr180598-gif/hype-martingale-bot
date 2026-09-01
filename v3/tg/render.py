@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from v3.config import SignalConfig
+from v3.config import SignalConfig, build_line
 from v3.models import TradingSignal
 
 QUALITY_LEGEND = (
@@ -93,6 +93,16 @@ def render_glossary(term: str) -> str:
     if not body:
         return "❓ Неизвестный термин. Откройте глоссарий кнопкой «📚 ПОМОЩЬ»."
     return f"❓ **{term.upper()}**\n\n{body}"
+
+
+def version_line(cfg: SignalConfig | None = None) -> str:
+    """«🛠 Сборка: v3.2.0 · Раунд 4: …» — одна и та же строка во всех интерфейсах.
+
+    Зачем: без неё пользователь не может отличить свежий процесс от старого
+    (код обновлён, а запущенный бот — прежний).
+    """
+    cfg = cfg or SignalConfig()
+    return build_line(cfg.APP_VERSION, cfg.APP_RELEASE)
 
 
 # ── оценка сетапа ───────────────────────────────────────────────
@@ -242,6 +252,61 @@ def render_setup_row(item: dict[str, Any], place: int, cfg: SignalConfig | None 
         lines.append(f"   Почему: {' · '.join(why)}")
     if sig.condition:
         lines.append(f"   ⚠️ Условный сетап: {sig.condition}")
+    return "\n".join(lines)
+
+
+# ── «⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ» (ранний отбор) ───────────────────────
+EMERGING_TITLE = "⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ (ранний отбор)"
+EMERGING_DISCLAIMER = (
+    "Это признак ранжирования и объяснения, а НЕ команда входа: "
+    "направление подтверждает движок; гарантии движения нет."
+)
+# Анти-chase заметки emergence объясняют, почему движение УЖЕ состоялось.
+# В блок «намечается» они не идут: там только ранние признаки.
+_EMERGENCE_NOT_EARLY = ("уже у вершины", "близко к вершине", "уже у дна", "близко к дну")
+
+
+def _emergence_notes(item: dict[str, Any]) -> list[str]:
+    """Готовые человеческие заметки emergence (из сигнала или из кандидата)."""
+    sig = item.get("signal")
+    em = (getattr(sig, "features", None) or {}).get("emergence") or {}
+    notes = [str(n).strip() for n in (em.get("notes") or []) if str(n).strip()]
+    if not notes:
+        raw = str((item.get("candidate") or {}).get("emergence_note") or "")
+        notes = [part.strip() for part in raw.split("|") if part.strip()]
+    return [n for n in notes if not n.lower().startswith(_EMERGENCE_NOT_EARLY)]
+
+
+def render_emerging(
+    items: list[dict[str, Any]],
+    cfg: SignalConfig | None = None,
+    *,
+    limit: int = 5,
+    pro: bool = False,
+) -> str:
+    """Блок «⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ» для ответа скана (Telegram; CLI печатает
+    свой операторский вариант с сырыми числами).
+
+    Пустой список → пустая строка: блок не печатается «для галочки».
+    Заметки берём уже готовыми человеческим языком (их пишет emergence);
+    сырые ignition / early_direction показываем только в PRO-режиме.
+    """
+    if not items:
+        return ""
+    cfg = cfg or SignalConfig()
+    lines = [EMERGING_TITLE]
+    for item in items[:limit]:
+        cand = item.get("candidate") or {}
+        sig = item.get("signal")
+        symbol = str(cand.get("symbol") or getattr(sig, "symbol", "") or "?")
+        notes = _emergence_notes(item)
+        hint = " · ".join(notes[:2]) if notes else "признаков хватает, но коротко их не описать"
+        line = f"• {symbol} — ранний признак: {hint}"
+        if pro:
+            ignition = float(cand.get("ignition", 0.0) or 0.0)
+            line += f" [ignition {ignition:.0f}/100, подсказка {cand.get('early_direction', 'FLAT')}]"
+        lines.append(line)
+    lines.append(EMERGING_DISCLAIMER)
     return "\n".join(lines)
 
 
@@ -417,12 +482,16 @@ def render_no_data(reasons: list[str], diagnostics: list[dict[str, Any]] | None 
     return "\n".join(lines)
 
 
-def render_settings(settings: dict[str, Any]) -> str:
+def render_settings(settings: dict[str, Any], cfg: SignalConfig | None = None) -> str:
+    cfg = cfg or SignalConfig()
+    early = "включён" if cfg.SCAN_EMERGENCE_ENABLED else "выключен"
     return (
         "⚙️ **НАСТРОЙКИ АНАЛИЗА**\n\n"
         f"🧠 Режим отчёта: **{'PRO' if settings.get('mode') == 'pro' else 'BEGINNER'}**\n"
         f"💰 Депозит: **${settings.get('deposit_usd', 0):,.0f}** — используется для расчёта позиции\n"
-        f"⚠️ Риск на сделку: **{settings.get('risk_per_trade_pct', 1):g}%**\n\n"
+        f"⚠️ Риск на сделку: **{settings.get('risk_per_trade_pct', 1):g}%**\n"
+        f"⚡ Ранний отбор «намечающегося движения»: **{early}**\n\n"
+        f"{version_line(cfg)}\n"
         "Настройки сохраняются локально для вашего Telegram-аккаунта.\n"
         "❗ Депозит и риск — это параметры расчёта, а не приказ торговать."
     )
