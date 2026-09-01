@@ -56,6 +56,15 @@ class SignalConfig(BaseSettings):
     SCAN_MIN_VOLUME_USD: float = 5_000_000.0
     SCAN_SHOW_QUALITY_MIN: float = 72.0  # строгий порог «⭐ ТОП» (A и выше)
     SCAN_LIST_QUALITY_MIN: float = 58.0  # тир-осознанные списки LONG/SHORT (B/C видны)
+    SCAN_MAJOR_PENALTY: float = 4.0      # штраф мажоров (по WATCHLIST_SYMBOLS, не хардкод)
+    # «намечающееся движение»: ловим до разгона, а не после (+ к heat ранга)
+    SCAN_EMERGENCE_ENABLED: bool = True
+    SCAN_EMERGENCE_POOL: int = 48        # сколько кандидатов проверяем на emergence (1h свечи)
+    SCAN_EMERGENCE_BARS: int = 120
+    SCAN_EMERGENCE_BOOST: float = 0.30   # вес ignition-балла в heat
+    SCAN_AGE_DAYS_MIN: int = 7           # листинг младше → метка fresh (не отсев)
+    # диверсификация корзины (долго связанные с конфигом, см. README)
+    DIVERSITY_MAX_PER_CLUSTER: int = 1   # сколько кандидатов из одного кластера в Stage 2
     WATCHLIST_SYMBOLS: str = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,SUIUSDT,TIAUSDT"
 
     # ── Timeframes ──────────────────────────────────────────────
@@ -95,6 +104,18 @@ class SignalConfig(BaseSettings):
     RSI_OVERSOLD: float = 28.0
     FUNDING_OVERHEATED: float = 0.002           # 0.2% per funding interval
     FUNDING_OVERBURDENED_SHORT: float = -0.001
+    # emergence (раннее движение): объём/сжатие/консолидация/позиционирование
+    EMERGENCE_RVOL_WINDOW: int = 20
+    EMERGENCE_RVOL_MIN: float = 1.5
+    EMERGENCE_SQUEEZE_LOOKBACK: int = 8
+    EMERGENCE_CONSOLIDATION_BARS: int = 12
+    EMERGENCE_CONSOLIDATION_ATR: float = 1.6
+    EMERGENCE_IGNITION_MIN: float = 50.0
+    # positioning (OI × funding × цена) — «кто и где стоит»
+    OI_CHANGE_BUILD_PCT: float = 2.0
+    OI_CHANGE_UNWIND_PCT: float = -2.0
+    POSITIONING_QUIET_PRICE_CHANGE_PCT: float = 2.0
+    LIQ_ACCELERATION_WINDOW_SEC: int = 300      # «рост ликвидаций за последние N секунд»
 
     # ── Entry / SL / TP ─────────────────────────────────────────
     ATR_SL_MULTIPLIER: float = 1.8

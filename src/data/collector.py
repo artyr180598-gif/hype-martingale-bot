@@ -246,6 +246,7 @@ class BybitSource(_Http, MarketDataSource):
                     max_leverage=int(it.get("leverageFilter", {}).get("maxLeverage", 50) or 50),
                     maker_fee=0.0002,
                     taker_fee=0.00055,
+                    launch_time_ms=int(it.get("launchTime", 0) or 0) or None,
                 )
             )
         self._instruments = out
@@ -462,6 +463,7 @@ class BinanceSource(_Http, MarketDataSource):
                     min_qty=float(filters.get("LOT_SIZE", {}).get("minQty", 0) or 0),
                     min_notional=float(filters.get("MIN_NOTIONAL", {}).get("notional", 5) or 5),
                     max_leverage=125,
+                    launch_time_ms=int(it.get("onboardDate", 0) or 0) or None,
                 )
             )
         self._instruments = out

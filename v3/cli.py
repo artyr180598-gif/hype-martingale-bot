@@ -88,6 +88,15 @@ async def run_scan(limit: int | None = None, top: int | None = None, mode: str =
             result.scanned_total, len(result.candidates), len(result.analyzed),
             scanner.best_setups(), result.mode or data.mode, result.duration_sec, result.ts_ms,
         ))
+        emerging = scanner.emerging()
+        if emerging:
+            print("\n⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ (ранний отбор, до разгона):")
+            for item in emerging[:8]:
+                c = item["candidate"]
+                print(
+                    f"  • {c['symbol']}: ignition {c.get('ignition', 0):.0f}/100 "
+                    f"hint {c.get('early_direction', 'FLAT')} | {c.get('emergence_note', '')}"
+                )
         for item in result.analyzed[: top_n or 10]:
             c = item["candidate"]
             s = item["signal"]
