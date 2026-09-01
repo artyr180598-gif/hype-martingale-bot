@@ -362,14 +362,15 @@ def render_market(overview: dict[str, Any], source: str = "") -> str:
     trend_emoji = {"up": "🟢", "down": "🔴", "flat": "🟡"}.get(str(overview.get("btc_trend", "flat")), "🟡")
     mode = source or overview.get("mode", "?")
 
+    trend_word = {"up": "растёт", "down": "падает", "flat": "боковик"}.get(str(overview.get("btc_trend", "flat")), "неясно")
     lines = [
         "📊 **МОЙ РЫНОК**",
         f"{source_stamp(mode, overview.get('ts_ms', 0))} · {when}",
         "",
-        f"₿ **BTC** {btc.get('price', 0):.6g} | 24h {btc.get('price_24h_pct', 0):+.2f}%",
-        f"   {trend_emoji} тренд (1h): {overview.get('btc_trend', '?')} | ATR {overview.get('btc_atr_pct') or 0:.2f}%",
-        f"   funding {(overview.get('btc_funding_rate') or 0) * 1:.4%} | доминация {g.get('btc_dominance') or 0:.1f}%",
-        f"Ξ **ETH** {eth.get('price', 0):.6g} | 24h {overview.get('eth_24h_pct') or eth.get('price_24h_pct', 0):+.2f}% | funding {(overview.get('eth_funding_rate') or 0) * 1:.4%}",
+        f"₿ **BTC** {btc.get('price', 0):.6g} | за 24ч {btc.get('price_24h_pct', 0):+.2f}%",
+        f"   {trend_emoji} тренд (1ч): {trend_word} | волатильность ≈ {overview.get('btc_atr_pct') or 0:.2f}% за час",
+        f"   фандинг {(overview.get('btc_funding_rate') or 0) * 1:.4%} | доля BTC {g.get('btc_dominance') or 0:.1f}%",
+        f"Ξ **ETH** {eth.get('price', 0):.6g} | за 24ч {overview.get('eth_24h_pct') or eth.get('price_24h_pct', 0):+.2f}% | фандинг {(overview.get('eth_funding_rate') or 0) * 1:.4%}",
         "",
         f"🌐 Рынок: {g.get('market_cap_change_24h_pct') or 0:+.2f}% за 24ч",
         f"😨 Fear & Greed: {fg.get('value', '?')}/100 ({fg.get('classification', '?')})",
