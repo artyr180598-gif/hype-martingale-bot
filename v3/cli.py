@@ -14,7 +14,7 @@ from typing import Any
 
 from src.core.logging import get_logger, setup_logging
 from v3.backtest import run_backtest as run_v3_backtest
-from v3.config import SignalConfig
+from v3.config import APP_RELEASE_DEFAULT, APP_VERSION_DEFAULT, SignalConfig, build_line
 from v3.data import FuturesDataService
 from v3.engine import FuturesSignalEngine
 from v3.report import render_signal
@@ -165,7 +165,12 @@ def _print_startup_report(
 ) -> None:
     """Operator-facing startup banner (deliberately NOT a `status` report)."""
     print("-" * 64)
-    print("HYPE v3 daemon — Futures Signal Intelligence (единый движок)")
+    # Версия в баннере: по ней видно, какой процесс реально запущен (старый или
+    # после обновления). _cfg бывает None, если конфиг не прошёл валидацию.
+    version = getattr(_cfg, "APP_VERSION", None) or APP_VERSION_DEFAULT
+    release = getattr(_cfg, "APP_RELEASE", None) or APP_RELEASE_DEFAULT
+    print(f"HYPE v3 (версия {version}) — Futures Signal Intelligence (единый движок)")
+    print(build_line(version, release))
     print(f"Режим данных: {mode}")
     if transport.enabled:
         admin = _cfg.TELEGRAM_ADMIN_CHAT_ID or "не задан"

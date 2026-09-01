@@ -21,7 +21,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 
 from src.core.timeutil import now_ms
 from v3.backtest import run_backtest
-from v3.config import SignalConfig
+from v3.config import APP_VERSION_DEFAULT, SignalConfig
 from v3.data import FuturesDataService
 from v3.engine import FuturesSignalEngine
 from v3.models import TradingSignal
@@ -74,7 +74,11 @@ async def _lifespan(_app: FastAPI):
         await runtime.stop()
 
 
-app = FastAPI(title="HYPE v3 Futures Signal Intelligence", version="3.1.0", lifespan=_lifespan)
+app = FastAPI(
+    title="HYPE v3 Futures Signal Intelligence",
+    version=APP_VERSION_DEFAULT,  # раньше здесь была зашита старая версия 3.1.0
+    lifespan=_lifespan,
+)
 
 
 @app.get("/health")

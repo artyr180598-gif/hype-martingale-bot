@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.core.logging import get_logger
-from v3.config import SignalConfig
+from v3.config import SignalConfig, build_line
 from v3.data import FuturesDataService
 from v3.engine import FuturesSignalEngine
 from v3.observability import metrics
@@ -34,7 +34,7 @@ from v3.tg.settings import UserSettingsService
 LOGGER_NAME = "v3.telegram"
 logger = get_logger(LOGGER_NAME)
 
-HELP_TEXT = """🤖 **HYPE — futures signal intelligence (только реальные данные)**
+HELP_TEXT = f"""🤖 **HYPE — futures signal intelligence (только реальные данные)**
 
 Платформа анализирует ТОЛЬКО реальные данные бирж (Bybit → Binance → MEXC):
 цены, свечи, стакан, фандинг, OI, ликвидации, L/S ratio, новости. Никаких
@@ -56,9 +56,13 @@ HELP_TEXT = """🤖 **HYPE — futures signal intelligence (только реа�
 `/walkforward BTCUSDT [15m]` — walk-forward проверка на истории
 `/status` — сохранённые сигналы/последний скан
 
-Бот **не торгует**. Это аналитический сигнал, не гарантия результата."""
+Бот **не торгует**. Это аналитический сигнал, не гарантия результата.
 
-MENU_TEXT = """🧠 **HYPE — CRYPTO MARKET INTELLIGENCE**
+{build_line()}
+Если строка сборки не совпадает с репозиторием — запущен старый процесс:
+сделайте `git pull` и перезапустите бота."""
+
+MENU_TEXT = f"""🧠 **HYPE — CRYPTO MARKET INTELLIGENCE**
 
 Аналитическая платформа USDT-perp: сканер рынка, multi-timeframe, деривативы,
 риск-менеджмент и честный NO TRADE.
@@ -72,7 +76,11 @@ MENU_TEXT = """🧠 **HYPE — CRYPTO MARKET INTELLIGENCE**
 • 📚 **ПОМОЩЬ** — простые объяснения терминов
 
 ❗ Система не торгует и не гарантирует результат.
-Дата данных и статус свежести показываются в каждом отчёте."""
+Дата данных и статус свежести показываются в каждом отчёте.
+
+{build_line()}
+Если строка сборки не совпадает с репозиторием — запущен старый процесс:
+сделайте `git pull` и перезапустите бота."""
 
 
 @dataclass
@@ -300,6 +308,12 @@ class V3Core:
             summary,
             "",
         ]
+        # «⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ» — ранний отбор до разгона (признак, а не вход).
+        # Пустой список → блок не печатается (render_emerging вернёт "").
+        emerging = scanner.emerging() if self.cfg.SCAN_EMERGENCE_ENABLED else []
+        block = rv.render_emerging(emerging, self.cfg, pro=(mode == "pro"))
+        if block:
+            lines += [block, ""]
         if not setups:
             hint = rv.empty_list_hint(result.analyzed, len(result.candidates))
             lines.append("😶 Ни один кандидат не прошёл гейт. Это нормально: "
@@ -399,7 +413,7 @@ class V3Core:
         )
 
     def settings_text(self, user_id: int) -> str:
-        return rv.render_settings(self.user_settings.get(user_id).to_dict())
+        return rv.render_settings(self.user_settings.get(user_id).to_dict(), self.cfg)
 
     async def _deposit_input(self, user_id: int, text: str) -> str:
         stripped = text.strip().replace(",", "").replace("$", "")
