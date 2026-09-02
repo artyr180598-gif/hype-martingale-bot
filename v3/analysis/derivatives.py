@@ -7,8 +7,47 @@ trigger.  This module turns funding, open interest and liquidation data into a
 
 from __future__ import annotations
 
+import math
+
 from v3.config import SignalConfig
 from v3.models import DataBundle, DerivativesSnapshot
+
+
+def oi_change_pct(bundle: DataBundle) -> float | None:
+    """Return OI change as a percentage without confusing it with raw OI.
+
+    The data service stores ``open_interest_history`` as ``(timestamp, raw OI)``
+    and publishes the derived percentage in ``oi_change_24h_pct``. Older test
+    and API payloads sometimes contain one ``(timestamp, percentage)`` tuple;
+    the bounded fallback keeps those payloads readable while never treating a
+    normal USD-denominated OI value as a percentage.
+    """
+    explicit = bundle.oi_change_24h_pct
+    if explicit is not None:
+        try:
+            return float(explicit) if math.isfinite(float(explicit)) else None
+        except (TypeError, ValueError):
+            return None
+
+    history = bundle.open_interest_history
+    if len(history) >= 2:
+        try:
+            first = float(history[0][1])
+            last = float(history[-1][1])
+            if first > 0 and math.isfinite(first) and math.isfinite(last):
+                return (last / first - 1.0) * 100.0
+        except (TypeError, ValueError, IndexError, ZeroDivisionError):
+            return None
+    # Compatibility with the pre-derived one-point representation. Real raw
+    # OI is USD and is normally orders of magnitude larger than this range.
+    if len(history) == 1:
+        try:
+            value = float(history[0][1])
+            if math.isfinite(value) and -100.0 <= value <= 100.0:
+                return value
+        except (TypeError, ValueError, IndexError):
+            pass
+    return None
 
 
 def _positioning(
@@ -114,9 +153,9 @@ def analyze_derivatives(bundle: DataBundle, cfg: SignalConfig) -> DerivativesSna
         score -= min(10.0, liq_accel / 1e6 * 3.0)  # каскад ликвидаций = стресс
 
     # ── positioning-матрица (раунд 4): OI-Δ теперь реально работает ──
-    oi_delta = bundle.open_interest_history[-1][1] if bundle.open_interest_history else None
-    if oi_delta is None:
-        oi_delta = bundle.oi_change_24h_pct
+    # History contains raw OI values; use the explicit derived percentage (or
+    # derive it from two raw points), never the last USD value as a percent.
+    oi_delta = oi_change_pct(bundle)
     positioning, pos_score = _positioning(oi_delta, bundle.price_24h_pct, funding, cfg)
     if positioning == "overheated_long":
         score -= 12.0

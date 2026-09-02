@@ -19,16 +19,16 @@ def _data_dir_default() -> Path:
 
 
 # ── Сборка (видна пользователю) ─────────────────────────────────
-# Раунд 4 добавил ранний отбор «намечающегося движения», но версия осталась
-# 3.1.0 — из-за этого пользователь не видел, что код обновился. Версия и
+# Раунды 4–5 добавили ранний отбор «намечающегося движения», а версия раньше
+# оставалась 3.1.0 — пользователь не видел, что код обновился. Версия и
 # подпись раунда теперь печатаются в HELP / меню / настройках / баннере
 # старта: по строке сборки видно, какой процесс реально запущен.
 APP_VERSION_DEFAULT = "3.2.0"
-APP_RELEASE_DEFAULT = "Раунд 4: ранний отбор «намечающегося движения»"
+APP_RELEASE_DEFAULT = "Раунд 5: закрытые свечи и подтверждение раннего импульса"
 
 
 def build_line(version: str | None = None, release: str | None = None) -> str:
-    """Одна строка сборки для всех интерфейсов: «🛠 Сборка: v3.2.0 · Раунд 4: …».
+    """Одна строка сборки для всех интерфейсов: «🛠 Сборка: v3.2.0 · Раунд 5: …».
 
     Функция (а не константа в классе) — чтобы тексты UI собирались без чтения
     env и без риска словить ошибку конфигурации на этапе импорта модуля.
@@ -80,8 +80,10 @@ class SignalConfig(BaseSettings):
     SCAN_EMERGENCE_ENABLED: bool = True
     SCAN_EMERGENCE_POOL: int = 48        # сколько кандидатов проверяем на emergence (1h свечи)
     SCAN_EMERGENCE_BARS: int = 120
-    SCAN_EMERGENCE_BOOST: float = 0.30   # вес ignition-балла в heat
+    SCAN_EMERGENCE_BOOST: float = 0.30   # вес готовности импульса в heat
+    SCAN_EXCLUDE_EXHAUSTED: bool = True  # не показывать «намечается», если движение уже выжато
     SCAN_AGE_DAYS_MIN: int = 7           # листинг младше → метка fresh (не отсев)
+    WATCHER_SCAN_UNIVERSE: bool = True   # daemon сам сканирует вселенную, а не только WATCHLIST
     # диверсификация корзины (долго связанные с конфигом, см. README)
     DIVERSITY_MAX_PER_CLUSTER: int = 1   # сколько кандидатов из одного кластера в Stage 2
     WATCHLIST_SYMBOLS: str = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,SUIUSDT,TIAUSDT"
@@ -129,6 +131,12 @@ class SignalConfig(BaseSettings):
     EMERGENCE_SQUEEZE_LOOKBACK: int = 8
     EMERGENCE_CONSOLIDATION_BARS: int = 12
     EMERGENCE_CONSOLIDATION_ATR: float = 1.6
+    EMERGENCE_COMPRESSION_ATR_RATIO: float = 0.80  # ATR ниже 80% своей нормы = сжатие
+    EMERGENCE_BREAKOUT_LOOKBACK: int = 20          # предыдущий коридор без текущего бара
+    EMERGENCE_MAX_TRIGGER_ATR: float = 0.75         # не преследуем пробой, ушедший дальше
+    EMERGENCE_MIN_BREAKOUT_PRESSURE: float = 0.25
+    EMERGENCE_MAX_RECENT_MOVE_ATR: float = 2.5      # импульс уже слишком далеко от базы
+    EMERGENCE_MIN_ROOM_PCT: float = 0.15            # минимум 15% диапазона до границы
     EMERGENCE_IGNITION_MIN: float = 50.0
     # positioning (OI × funding × цена) — «кто и где стоит»
     OI_CHANGE_BUILD_PCT: float = 2.0

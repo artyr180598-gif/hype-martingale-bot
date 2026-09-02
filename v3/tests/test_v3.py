@@ -341,6 +341,60 @@ def test_lifecycle_tracks_tp_and_sl():
     store.close()
 
 
+async def test_watcher_universe_scan_uses_scanner_and_reuses_ticker_map(monkeypatch, tmp_path):
+    """Daemon default scans the exchange universe, then tracks from same tickers."""
+    from types import SimpleNamespace
+
+    from v3.watcher import V3Watcher
+
+    store = SignalStore(tmp_path / "universe.db")
+    lifecycle = SignalLifecycle(store, cooldown_seconds=60, max_active=3)
+    signal = TradingSignal(
+        uid="universe-1", symbol="XUSDT", ts_ms=int(time.time() * 1000),
+        direction="LONG", status="CONFIRMED", score=90, confidence=0.9,
+        quality=90, tier="S", rr=2, risk_score=3, price=100,
+        entry_zone=(99.5, 100), stop_loss=98, targets=[102, 104, 106],
+        data_age_seconds=2.0,
+    )
+    calls: dict[str, object] = {}
+
+    class T:
+        symbol = "XUSDT"
+        last = 106.0
+
+    class FakeData:
+        mode = "fake"
+
+        async def tickers(self, symbols=None):
+            calls["symbols"] = symbols
+            return {"XUSDT": T()}
+
+    class FakeEngine:
+        data = FakeData()
+
+    class FakeScanner:
+        def __init__(self, engine, cfg):
+            calls["engine"] = engine
+            calls["cfg"] = cfg
+
+        async def run(self, ticker_map, limit, top):
+            calls["scan"] = (ticker_map, limit, top)
+            return SimpleNamespace(ts_ms=123456, analyzed=[{"signal": signal}])
+
+    monkeypatch.setattr("v3.scanner.Scanner", FakeScanner)
+    cfg = SignalConfig(WATCHER_SCAN_UNIVERSE=True, SCAN_LIMIT=11, SCAN_TOP=4)
+    watcher = V3Watcher(FakeData(), FakeEngine(), store, lifecycle, cfg, symbols=None)
+    events = await watcher.run_cycle()
+
+    assert watcher.universe_scan is True
+    assert calls["symbols"] is None
+    assert calls["scan"][1:] == (11, 4)
+    assert store.get_state("v3_last_scan_ms") == "123456"
+    assert any(event["symbol"] == "XUSDT" for event in events), events
+    assert not store.get_state("v3_last_error")
+    store.close()
+
+
 async def test_watcher_cycle_persists_and_tracks():
     from v3.watcher import V3Watcher
 

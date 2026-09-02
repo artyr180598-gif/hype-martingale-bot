@@ -58,6 +58,9 @@ def _rank_candidate(
     ask = float(getattr(t, "ask", 0) or 0)
     funding = getattr(t, "funding_rate", None)
     oi = getattr(t, "open_interest_usd", None) or getattr(t, "open_interest", None)
+    oi_delta = getattr(t, "oi_change_24h_pct", None)
+    if oi_delta is None:
+        oi_delta = getattr(t, "open_interest_change_24h_pct", None)
 
     if not symbol.endswith("USDT") or turnover <= 0 or turnover < cfg.SCAN_MIN_TURNOVER_USD:
         return None
@@ -91,6 +94,14 @@ def _rank_candidate(
             heat += 8.0
         elif abs(f) > cfg.FUNDING_OVERHEATED:
             heat -= 6.0
+    # Динамика OI — бонус только при спокойной цене. Рост OI на уже
+    # улетевшей монете означает толпу, а не раннее позиционирование.
+    if _fin(oi_delta):
+        oi_change = float(oi_delta)
+        if oi_change >= cfg.OI_CHANGE_BUILD_PCT and abs(pct) <= cfg.POSITIONING_QUIET_PRICE_CHANGE_PCT:
+            heat += 8.0
+        elif oi_change <= cfg.OI_CHANGE_UNWIND_PCT and abs(pct) >= 8.0:
+            heat -= 5.0
     # tighter spread is better
     if spread_pct is not None:
         heat += min(6.0, (cfg.MAX_SPREAD_PCT - spread_pct) / max(cfg.MAX_SPREAD_PCT, 0.01) * 6.0)
@@ -130,7 +141,10 @@ def _rank_candidate(
         funding_rate=float(funding) if _fin(funding) else None,
         open_interest_usd=float(oi) if _fin(oi) else None,
         spread_pct=spread_pct,
+        high_24h=high,
+        low_24h=low,
         heat=round(heat, 2),
+        oi_delta_pct=float(oi_delta) if _fin(oi_delta) else None,
         liquidity_ok=turnover >= cfg.SCAN_MIN_TURNOVER_USD,
         volume_ok=volume >= cfg.SCAN_MIN_VOLUME_USD,
         reason="",
@@ -226,7 +240,10 @@ class Scanner:
                 if e is not None:
                     boost = float(e.get("ignition", 0.0)) * self.cfg.SCAN_EMERGENCE_BOOST
                     c.heat = round(c.heat + boost, 2)
-                    c.ignition = float(e.get("ignition", 0.0))
+                    c.phase = str(e.get("phase", "NEUTRAL"))
+                    c.readiness = float(e.get("ignition", 0.0))
+                    c.room_pct = float(e.get("room_pct", 0.0))
+                    c.ignition = c.readiness  # backward-compatible API name
                     c.early_direction = str(e.get("early_direction", "FLAT"))
                     c.emergence_note = " | ".join(e.get("notes", [])[:3])
             candidates.sort(key=lambda c: c.heat, reverse=True)
@@ -234,7 +251,15 @@ class Scanner:
             result.top_by_heat = candidates[:top]
 
         # ── диверсификация: не 20 копий одного движения ──────────
-        pool_all = candidates[: max(top * 3, self.cfg.SCAN_EMERGENCE_POOL)]
+        # EXHAUSTED остаются в heatmap для прозрачности, но не попадают в
+        # обычный Stage 2: нельзя расходовать глубокие запросы на «вчерашний»
+        # импульс. Если ранних кандидатов мало, добираем нейтральными.
+        ranked_pool = candidates
+        if self.cfg.SCAN_EXCLUDE_EXHAUSTED:
+            fresh_pool = [c for c in candidates if c.phase != "EXHAUSTED"]
+            if len(fresh_pool) >= top:
+                ranked_pool = fresh_pool
+        pool_all = ranked_pool[: max(top * 3, self.cfg.SCAN_EMERGENCE_POOL)]
         selected = self._diversify(pool_all, top)
 
         if selected:
@@ -259,7 +284,7 @@ class Scanner:
     async def _emergence_pool(self, pool: list[ScanCandidate], btc_pct: float | None) -> dict[str, dict[str, Any]]:
         """RVOL/squeeze/консолидация по 1h свечам для кандидатов (только реальные данные)."""
         data = getattr(self.engine, "data", None)
-        if data is None or not hasattr(data, "klines") or not hasattr(data, "tickers"):
+        if data is None or not hasattr(data, "klines"):
             return {}
 
         sem = asyncio.Semaphore(6)
@@ -268,14 +293,16 @@ class Scanner:
             async with sem:
                 try:
                     df = await data.klines(c.symbol, "1h", self.cfg.SCAN_EMERGENCE_BARS)
-                    t = (await data.tickers([c.symbol])).get(c.symbol)
                     if df is None or len(df) < 30:
                         return c.symbol, None
+                    # Ticker уже был получен на Stage 1. Повторный запрос на
+                    # каждого кандидата создавал 48 лишних HTTP-вызовов и мог
+                    # смешать два разных снимка рынка.
                     e = detect_emergence(
                         df,
                         price_24h_pct=c.price_24h_pct,
-                        high_24h=float(getattr(t, "high_24h", 0) or 0) or None,
-                        low_24h=float(getattr(t, "low_24h", 0) or 0) or None,
+                        high_24h=float(getattr(c, "high_24h", 0) or 0) or None,
+                        low_24h=float(getattr(c, "low_24h", 0) or 0) or None,
                         btc_24h_pct=btc_pct,
                         oi_delta_pct=c.oi_delta_pct,
                         funding_rate=c.funding_rate,
@@ -366,6 +393,7 @@ class Scanner:
         items = [
             item for item in self.last.analyzed
             if (item.get("candidate") or {}).get("ignition", 0.0) >= threshold
+            and (item.get("candidate") or {}).get("phase", "NEUTRAL") != "EXHAUSTED"
         ]
         items.sort(key=lambda item: item["candidate"]["ignition"], reverse=True)
         return items

@@ -36,6 +36,10 @@ class V3Watcher:
         self.lifecycle = lifecycle
         self.cfg = cfg or SignalConfig()
         self.watchlist: list[str] = [s.upper() for s in (symbols or self.cfg.watchlist)]
+        # daemon без явного списка должен искать ранние импульсы по всей
+        # доступной вселенной. Команда `watch BTCUSDT,ETHUSDT` остаётся
+        # точечным режимом и не делает сотни запросов.
+        self.universe_scan = bool(self.cfg.WATCHER_SCAN_UNIVERSE and symbols is None)
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self.last_cycle_ms = 0
@@ -43,14 +47,48 @@ class V3Watcher:
     async def run_cycle(self, notify: AlertSender | None = None) -> list[dict[str, Any]]:
         from v3.publisher import sanitize_for_publish
 
-        signals = await self.engine.analyze_batch(self.watchlist, concurrency=4)
+        # Полный daemon-контур использует тот же двухэтапный Scanner, что и
+        # Telegram/API: сначала все ликвидные USDT-perp, затем глубокий анализ
+        # ранних кандидатов. Это исправляет главный практический недостаток
+        # «watchlist-only» режима — новая монета не должна ждать ручного scan.
+        signals = []
+        ticker_map: dict[str, Any] = {}
+        scanned_universe = False
+        if self.universe_scan:
+            try:
+                from v3.scanner import Scanner
+
+                ticker_map = await self.data.tickers()
+                if ticker_map:
+                    scanner = Scanner(self.engine, self.cfg)
+                    result = await scanner.run(
+                        ticker_map,
+                        limit=self.cfg.SCAN_LIMIT,
+                        top=self.cfg.SCAN_TOP,
+                    )
+                    signals = [item["signal"] for item in result.analyzed]
+                    scanned_universe = True
+                    self.store.set_state("last_scan_ms", str(result.ts_ms))
+                    self.store.set_state("v3_last_scan_ms", str(result.ts_ms))
+            except Exception as exc:  # noqa: BLE001
+                # Ошибка полного скана не должна остановить lifecycle. Ниже
+                # остаётся безопасный fallback на явный watchlist.
+                self.store.set_state("v3_last_error", f"universe scan: {exc}")
+
+        if not scanned_universe:
+            signals = await self.engine.analyze_batch(self.watchlist, concurrency=4)
+
         emitted: list[dict[str, Any]] = []
         for raw in signals:
             sig, violations = sanitize_for_publish(raw, self.cfg)
             if violations:
                 raw.no_trade_reasons = list(dict.fromkeys(raw.no_trade_reasons + violations))[:8]
-            self.store.save_signal(sig)
+            # Check cooldown before persisting this observation: latest_sent_at
+            # intentionally reads the store, so saving first would make a fresh
+            # signal look like its own previous emission and suppress the first
+            # alert of every watcher cycle.
             allowed, reason = self.lifecycle.should_emit(sig)
+            self.store.save_signal(sig)
             if allowed:
                 self.lifecycle.register(sig)
                 emitted.append(sig.to_dict())
@@ -60,11 +98,12 @@ class V3Watcher:
 
         # track active signals using latest ticker prices
         try:
-            tickers = await self.data.tickers(list(self.lifecycle._active.keys()))
-            if isinstance(tickers, list):
-                ticker_map = {t.symbol: t for t in tickers}
-            else:
-                ticker_map = tickers or {}
+            if not ticker_map:
+                tickers = await self.data.tickers(list(self.lifecycle._active.keys()))
+                if isinstance(tickers, list):
+                    ticker_map = {t.symbol: t for t in tickers}
+                else:
+                    ticker_map = tickers or {}
             prices = {
                 symbol: float(t.last)
                 for symbol, t in ticker_map.items()

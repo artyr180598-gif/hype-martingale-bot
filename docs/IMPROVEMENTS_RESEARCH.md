@@ -1,14 +1,23 @@
 # HYPE v3 — Исследование и план повышения качества отбора монет
 
-> **Статус (раунд 4, реализовано):** P0-1 (экспонированы ранее «мёртвые»
-> индикаторы: DI±, EMA-stack, MFI, BB %B, W%R, ROC, MACD/Stoch-кроссы, RVOL),
-> P0-2 (исправлен BOS/CHoCH — теперь BOS = по ходу тренда, CHoCH = первый
-> противо-трендовый пробой), P0-4 (ранний отбор: RVOL/squeeze-release/
-> консолидация/dpos/RS + анти-chase штраф + диверсификация корзины + возраст
-> листинга), часть P1-3 (positioning-матрица OI×funding×цена, ускорение
-> ликвидаций). Новые модули: `v3/analysis/emergence.py`, тесты
-> `v3/tests/test_emergence.py` (15 шт.). Остальное (P1-1 реальный WS-тапей,
-> P1-2 volume profile, P2-1..P2-3, ML-1) — следующие этапы.
+> **Статус (раунд 5, реализовано):** сохранены улучшения раунда 4 и добавлены
+> четыре практических фикса: (1) RVOL сравнивает последний бар с базой без
+> самого последнего объёма, (2) live data-service отбрасывает формирующуюся
+> свечу, (3) emergence различает `EARLY`, `TRIGGERED`, `EXHAUSTED` по давлению
+> закрытия, сжатию, пробою коридора и запасу до границы, (4) daemon запускает
+> тот же Scanner по всей ликвидной вселенной, а явный `watch SYMS` остаётся
+> точечным. В скоринг добавлен независимый `Impulse Readiness`, а объёмный
+> фактор использует RVOL/OBV/CVD/MFI вместо одного z-score. Всегда остаются
+> инварианты: только реальные данные, no-execution, deterministic gate и
+> backtest/live parity.
+>
+> Раунд 4 уже реализовал P0-1 (DI±, EMA-stack, MFI, BB %B, W%R, ROC,
+> MACD/Stoch-кроссы, RVOL), P0-2 (BOS/CHoCH), P0-4
+> (RVOL/squeeze-release/консолидация/dpos/RS + anti-chase + диверсификация +
+> возраст листинга), часть P1-3 (OI×funding×цена, ускорение ликвидаций).
+> Следующие исследовательские этапы (не заявляем как сделанные): P1-1
+> реальный WS public-trade CVD, P1-2 volume profile, P2-1..P2-3 строгая
+> статистика, ML-1.
 
 > Документ-результат глубокого аудита кода + analysis вендора и перспективных
 > open-source проектов. Цель: **что изменить, чтобы бот отбирал монеты лучше и
@@ -127,10 +136,11 @@ EMA-stack; разворотные триггеры: MACD-кросс, Stoch-кр�
 ### 2.3 Деривативы: есть все данные, но нет главного признака
 
 `v3/analysis/derivatives.py`:
-* `oi_change_24h_pct` **классётся в модель и... больше не используется**
-  (в `score` даже локально не фигурирует; в `scoring.py` тоже).
-* funding работает как «перегрев» (порог ±0.2%/-0.1%), но нет **матрицы
-  OI × funding × цена** — а это самый информативный деривативный паттерн
+* `oi_change_24h_pct` теперь считается из live-истории OI и используется в
+  positioning-матрице и emergence. Важно: `open_interest_history` хранит
+  сырые значения OI, а не проценты; преобразование должно быть единым.
+* funding работает как «перегрев» (порог ±0.2%/-0.1%), а матрица
+  **OI × funding × цена** добавляет контекст построения/перегрева/капитуляции
   (см. §3.6): рост OI + рост цены + нейтральный funding = здоровое построение
   позиции; рост OI + падение цены + высокий positive funding = накопление
   ликвидаций лонгов (риск каскада); падение OI + падение цены = капитуляция
@@ -448,7 +458,7 @@ CoinGlass/Coinalyze — индустриальный стандарт чтени
 | Funding history | Bybit `GET /v5/market/funding/history` (public) | уже есть |
 | OI history | live-накопление (уже есть) + при опц. внешнем фиде — расширение | **есть live, нет backtest** |
 | Ликвидации | Bybit WS (уже есть) | уже есть |
-| Возраст листинга | `instruments-info.launchTime` | **нет** — добавить |
+| Возраст листинга | `instruments-info.launchTime` | **есть** — метка `fresh`, не автосигнал |
 | Историч. волатильность | `GET /v5/market/historical-volatility` (public) | **нет** — опционально |
 | Sector/market-cap | CoinGecko (уже есть в auto-контексте) | опционально, только auto |
 
@@ -542,15 +552,15 @@ purge/embargo); в проде остаются из конфига (см. §6.4)
 | P0-1 | Использовать мертвое | DB-миграция/фичи: OI-Δ в `DerivativesSnapshot.score`, OBV/MFI/BB %B/DI/EMA-stack/MACD-кросс в `TimeframeView`, подключить `MAX_CORRELATED_POSITIONS` и `BTC_CORRELATION_PENALTY_THRESHOLD` в scanner | +ортогональность, −мёртвый код | низкий |
 | P0-2 | Исправить BOS/CHoCH | Переписать детектор: сначала определить тренд (DI/ADX), затем BOS = продолжение, CHoCH = первый проти-трендовый пробой; добавить тесты | сценарии «разворот» перестанут врать | низкий |
 | P0-3 | Калибровка score→исход | `v3/calibration.py`: бакеты по score, winrate, среднее R, CIs по `v3_outcomes`; эндпоинт `/api/v3/calibration` + команда /calibration | «качество» становится измеримым | низкий |
-| P0-4 | RVOL + RS в сканер | `rvol`, `rs24/rs7`, `dpos`, `oiΔ`, funding-нейтральность в `_rank_candidate`; heat-веса из конфига | отбор до «разогрева», меньше chase | низкий |
-| P0-5 | Возраст листинга + blacklist | `launchTime` → метка `fresh`/`mature`; блэк-лист synthetic/абуз-символов; передача в репорт | не даём «новые пузыри» как топ | низкий |
+| P0-4 | RVOL + RS в сканер | ✅ Реализовано: `rvol`, `rs24`, `dpos`, `oiΔ` (если источник отдаёт), funding-нейтральность и emergence heat | отбор до «разогрева», меньше chase | низкий |
+| P0-5 | Возраст листинга + blacklist | ✅ `launchTime` → метка `fresh`; blacklist остаётся отдельным этапом, если появится подтверждённый источник | не даём «новые пузыри» как топ | низкий |
 | P1-1 | Реальная микроструктура | `publicTrade` + `orderbook.50` deltas: real CVD, дельта, крупные принты, microprice, book slope, 2–3 окна imbalance, поглощения/инициативы | настоящий orderflow (сейчас — прокси) | средний (WS-нагрузка, fallback на текущий прокси) |
 | P1-2 | Volume profile | POC/VAH/VAL 24ч/7д из свечей; интеграция в `levels` (TP-якоря) и в отчёт | уровни «согласия рынка» вместо ATR-кратных TP | средний |
-| P1-3 | Positioning (OI×funding×цена) | Матрица в `derivatives.py`; penalties/бонусы; «derivatives-risk» свой аналог CDRI | ловим перегрев/капитуляцию до цены | средний |
+| P1-3 | Positioning (OI×funding×цена) | ✅ Матрица в `derivatives.py`; penalties/бонусы и ускорение ликвидаций | ловим перегрев/капитуляцию до цены | средний |
 | P1-4 | Режим рынка: второй контур | `hmmlearn` 3-state на (return,vol,trend) BTC + optional `ruptures` CPP; флаг disagreement, **не** гейт | меньше ложных «TRENDING» в чопе | средний |
 | P2-1 | Валидация строже | Purge+embargo в `walk_forward`; bootstrap CI; Monte Carlo (перемешанные сделки); deflated Sharpe; significance-тест «правило vs базовый» | честные метрики в отчёте | средний |
 | P2-2 | Calibrate на Optuna | Замена пороговых «подборов» на Optuna-поиск по walk-forward-метрике (read-only, отчёт) | меньше ручной настройки | средний |
-| P2-3 | Diversity-сканнер | Кластеризация кандидатов, «топ-корзина» с гарантией разнообразия; UI-пометки «корзина/кластер» | 10 монет ≠ 10 одинаковых альтов | средний |
+| P2-3 | Diversity-сканнер | ✅ Лёгкая корзина по RS + позиции в диапазоне; полная корреляция 30d остаётся следующим этапом | 10 монет ≠ 10 одинаковых альтов | средний |
 | ML-1 | Meta-labeler (эксперимент) | Отдельный `v3/ml/` (LightGBM/LogReg на фичах, лейблы = исходы, purge/embargo, walk-forward); **по умолчанию OFF**; только ранг/калибровка уверенности | если edge есть — он измерен, а не выдуман | высокий — требует **изменения инварианта №3** (см. §7) |
 | ML-2 | Опциональные провайдеры | CoinGlass/Coinalyze как **опциональное** обогащение (heatmap = модельные оценки → только контекст с пометкой) | шире взгляд | низкий (деньги/ключи) |
 
@@ -683,16 +693,16 @@ OI у Bybit нет** (`/v5/market/open-interest` — только текущий
 
 | Файл | Изменение |
 |---|---|
-| `v3/analysis/timeframes.py` | экспонирование DI/EMA-stack/MFI/BB %B/ROC/W%R/MACD-кросс/Stoch-кросс; исправление BOS/CHoCH; rolling VWAP24 |
+| `v3/analysis/timeframes.py` | экспонирование DI/EMA-stack/MFI/BB %B/ROC/W%R/MACD-кросс/Stoch-кросс; исправление BOS/CHoCH; RVOL без текущего бара |
 | `v3/models.py` | расширение `TimeframeView`, `PositioningSnapshot`, `VolumeProfile`, `RankFeatures`; честное переименование account-ratio |
-| `v3/analysis/scoring.py` | ортогональные группы (§4.3), веса из конфига, penalties от OI-матрицы/поглощений |
+| `v3/analysis/scoring.py` | ортогональные группы (§4.3), уменьшенное дублирование тренда, `Impulse Readiness`, RVOL/OBV/CVD/MFI и penalties от OI-матрицы |
 | `v3/analysis/derivatives.py` | PositioningScore (OI×funding×price), ускорение ликвидаций, свой derivatives-risk score |
-| `v3/analysis/orderflow.py` | WS-дельта/тапей: real CVD, microprice, slope, windows imbalance, absorption/exhaustion |
+| `v3/analysis/orderflow.py` | WS-дельта/тапей: real CVD, microprice, slope, windows imbalance, absorption/exhaustion (следующий этап) |
 | `v3/analysis/levels.py` | якоря TP от volume profile (POC/VAH/VAL) |
 | `v3/analysis/regime.py` | HMM/CPP-флаг disagree, единая логика vol_state |
-| `v3/scanner.py` | Rank-блок + RVOL/RS/OI-Δ/dpos + diversity-кластеризация + launchTime |
+| `v3/scanner.py` | Rank-блок + RVOL/RS/OI-Δ/dpos + diversity-кластеризация + launchTime; фазы EARLY/TRIGGERED/EXHAUSTED |
 | `src/data/liquidations_ws.py` | расширение до `publicTrade`+`orderbook.50` (общий коллектор) |
-| `v3/data.py` | funding history в бэктест, OI-трейк на период, instruments metadata |
+| `v3/data.py` | funding history в бэктест, OI-трейк на период, instruments metadata, удаление незакрытой live-свечи |
 | `v3/walkforward.py` | purge/embargo, bootstrap CI, Monte Carlo, deflated Sharpe |
 | `v3/calibrate.py` | Optuna-поиск + walk-forward-отчёт |
 | `v3/calibration.py` (новый) | score→исход, IC по факторам, CUSUM drift |
@@ -703,19 +713,23 @@ OI у Bybit нет** (`/v5/market/open-interest` — только текущий
 
 ## 10. Вывод
 
-Три вещи дадут наибольший прирост качества отбора при наименьшем риске:
+Раунд 5 уже закрыл самые рискованные для качества ошибки времени входа:
+закрытые свечи, честный RVOL, подтверждение давления и исключение exhausted
+движений; плюс daemon теперь действительно ищет по всей вселенной.
+Следующие вещи дадут прирост качества при контролируемом риске:
 
-1. **P0 — убрать «бесплатные» потери**: использовать 18 уже посчитанных
-   признаков, ортогонализовать скоринг, включить OI-Δ, исправить BOS/CHoCH,
-   подключить correlation-фильтр (конфиг уже есть!), добавить RVOL/RS в
-   сканер. Это дни работы и нулевой риск для инвариантов.
-2. **P1 — реальная микроструктура и деривативные паттерны** поверх уже
-   существующей WS-инфраструктуры: настоящий CVD/дельты, volume profile
-   POC/VAH/VAL, матрица OI×funding×цена. Это то, что отличает «бот с
-   индикаторами» от «системы, понимающей, кто и где стоит».
+1. **P1 — реальная микроструктура** поверх WS-инфраструктуры: настоящий CVD,
+   дельты, крупные принты, microprice, book slope и поглощение. Это то, что
+   отличит «ранний свечной сканер» от полноценного order-flow анализа.
+2. **P1 — volume profile**: POC/VAH/VAL из реальных 1m/5m свечей для entry и
+   TP, но только с отдельным backtest, потому что уровни меняют механику входа.
 3. **P2 — замкнуть контур качества**: калибровка score→исход, purge/embargo,
-   bootstrap CI, Monte Carlo, и только потом — опциональный ML-мета-слой
-   (OFF по умолчанию), который станет **измеримым**, а не «магией».
+   bootstrap CI, Monte Carlo и статистический тест «правило против случайных
+   входов». Только после этого — опциональный ML-мета-слой (OFF по умолчанию).
+
+Нельзя объявлять эти следующие этапы готовыми без исторической проверки:
+деривативный OI/funding и live-only order flow пока не покрыты полноценным
+историческим бэктестом.
 
 Всё это спроектировано так, чтобы **не конфликтовать** с текущими инвариантами:
 детерминированный гейт остаётся главным, AI-слой — только объяснения,

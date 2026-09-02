@@ -127,6 +127,30 @@ curl localhost:8400/api/v3/outcomes
 
 ## How a signal is produced
 
+### Ранний импульс (до разгона)
+
+Сканер не считает большой `24h %` самостоятельным доказательством. Он
+отделяет фазу движения от его размера:
+
+* **EARLY** — сжатая/узкая база, просыпающийся объём и направленное давление,
+  при этом до границы диапазона ещё есть место;
+* **TRIGGERED** — закрытый бар уже вышел из предыдущего коридора в пределах
+  `EMERGENCE_MAX_TRIGGER_ATR`; это начало подтверждённого хода, а не погоня;
+* **EXHAUSTED** — цена слишком далеко у экстремума или уже прошла слишком
+  много ATR. Такой кандидат остаётся видимым в диагностической heatmap, но
+  исключается из обычного раннего Stage 2 и списка «намечается».
+
+RVOL сравнивается со средним **без текущего бара**, а последняя формирующаяся
+свеча удаляется на границе data-service. Это защищает от repaint: незакрытый
+час не может временно создать ложный всплеск объёма или пробой. Давление
+считается по телу свечи, положению close внутри диапазона и последним закрытиям;
+простой зелёный бар без подтверждения не считается импульсом.
+
+Фоновый `daemon` по умолчанию запускает этот двухэтапный поиск по всей
+ликвидной вселенной (`WATCHER_SCAN_UNIVERSE=true`). Явный `watch
+BTCUSDT,ETHUSDT` остаётся точечным режимом. Фаза импульса — лишь независимый
+фактор качества и ранжирования, а не замена deterministic NO-TRADE gate.
+
 1. Data bundle: price, 24h stats, spread, funding, OI, liquidations, order
    book, BTC/global/news.
 2. Timeframe views: structure, ADX, RSI, MACD, ATR, volume z, CVD/OBV,
@@ -267,7 +291,9 @@ Root `.env` and `v3/.env.example` are both read. Key variables:
 
 `MARKET_DATA_MODE`, `TIMEFRAMES`, `ENTRY_TF`, `ANALYSIS_BARS`,
 `SCAN_MIN_TURNOVER_USD`, `SCAN_MIN_VOLUME_USD`, `SCAN_TOP`, `SCAN_LIMIT`,
-`WATCHLIST_SYMBOLS`, `MAX_DATA_AGE_SECONDS`, `BACKTEST_FUNDING_RATE`,
+`WATCHLIST_SYMBOLS`, `WATCHER_SCAN_UNIVERSE`, `SCAN_EXCLUDE_EXHAUSTED`,
+`EMERGENCE_MAX_TRIGGER_ATR`, `EMERGENCE_MIN_ROOM_PCT`,
+`MAX_DATA_AGE_SECONDS`, `BACKTEST_FUNDING_RATE`,
 `AI_ENABLED`, `OPENAI_API_KEY`,
 `OPENAI_MODEL`, `OPENAI_TIMEOUT_SECONDS`, `V3_API_TOKEN`, `QUALITY_MIN`,
 `CONFIDENCE_MIN`,

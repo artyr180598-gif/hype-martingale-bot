@@ -226,9 +226,33 @@ def test_bundle_builds_parallel_and_tracks_oi():
     assert der.mark_price == pytest.approx(100.5)
     assert "LS ratio" in der.note
     assert der.taker_buy_sell_ratio == pytest.approx(0.62)
+
+    # The second bundle has raw OI history (50M -> 55M) and an explicit
+    # derived percentage. The derivatives layer must use +10%, not 55M as a
+    # percentage; this is a production-facing regression check.
+    der2 = analyze_derivatives(b2, cfg)
+    assert der2.oi_change_24h_pct == pytest.approx(10.0, rel=0.1)
+    assert "OI Δ +10.0%" in der2.note
     for key in ("btc", "eth", "global", "gainers", "losers", "top_turnover", "universe_count", "avg_move_24h_pct"):
         assert key in ov
     assert ov["universe_count"] >= 3
+
+
+def test_closed_bars_drop_forming_candle_at_exact_boundary():
+    """A candle is usable only when its full timeframe has elapsed."""
+    from v3.data import _closed_bars
+
+    df = pd.DataFrame({
+        "ts": [0, 900_000],
+        "open": [100.0, 101.0],
+        "high": [101.0, 102.0],
+        "low": [99.0, 100.0],
+        "close": [100.5, 101.5],
+        "volume": [1000.0, 1100.0],
+    })
+    closed = _closed_bars(df, "15m", now_ms=900_000)
+    assert closed["ts"].tolist() == [0]
+    assert _closed_bars(df, "15m", now_ms=899_999).empty
 
 
 def test_ticker_cache_hits_within_ttl():

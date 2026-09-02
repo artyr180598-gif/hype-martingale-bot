@@ -538,3 +538,33 @@ def test_render_emerging_block_rules():
     hot_text = render_emerging(hot, cfg)
     assert "объём заметно выше обычного" in hot_text
     assert "уже у вершины" not in hot_text
+
+
+def test_relative_volume_baseline_excludes_current_bar():
+    """Всплеск не должен сам разбавлять среднее, с которым сравнивается."""
+    from v3.analysis.emergence import relative_volume
+
+    df = make_df(80, "up", vol_spike=3.0)
+    assert relative_volume(df, 20) > 2.5
+
+
+def test_emergence_exposes_phase_and_pressure():
+    """Сканер различает раннюю базу, подтверждённый старт и истощение."""
+    cfg = SignalConfig()
+    early = emerging_df(150, spike=2.0)
+    e = detect_emergence(early, price_24h_pct=1.0, btc_24h_pct=0.0, cfg=cfg)
+    assert e.phase in ("EARLY", "TRIGGERED", "NEUTRAL")
+    assert -1.0 <= e.breakout_pressure <= 1.0
+    assert e.compression_ratio > 0
+    assert 0.0 <= e.room_pct <= 1.0
+
+
+def test_exhausted_phase_is_not_an_emerging_setup():
+    cfg = SignalConfig()
+    df = make_df(200, "up", vol_spike=1.0)
+    close = float(df["close"].iloc[-1])
+    e = detect_emergence(
+        df, price_24h_pct=15.0, high_24h=close * 1.001, low_24h=close * 0.95, cfg=cfg
+    )
+    assert e.phase == "EXHAUSTED"
+    assert e.room_pct < cfg.EMERGENCE_MIN_ROOM_PCT or e.dpos > 0.95

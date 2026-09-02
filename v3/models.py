@@ -43,6 +43,7 @@ class DataBundle:
     funding_rate: float | None = None
     funding_history: list[float] = field(default_factory=list)
     open_interest_usd: float | None = None
+    # (timestamp_ms, raw OI in USD); use oi_change_24h_pct for the percentage.
     open_interest_history: list[tuple[float, float]] = field(default_factory=list)
     oi_change_24h_pct: float | None = None
     long_short_ratio: float | None = None          # 0..1 (Bybit account ratio)
@@ -119,18 +120,24 @@ class EmergenceSnapshot:
     """
 
     enabled: bool = True
-    rvol: float = 1.0                           # объём последнего бара / среднее окна
+    rvol: float = 1.0                           # объём последнего закрытого бара / среднее окна
+    volume_acceleration: float = 1.0            # RVOL последнего бара / RVOL предыдущего бара
     squeeze: bool = False                       # сжатие волатильности сейчас
     squeeze_release: bool = False               # сжатие было недавно и полосы расширяются
     consolidation: bool = False                 # узкий диапазон при нормальном ATR
+    compression_ratio: float = 1.0              # текущий ATR / типичный ATR (меньше 1 = сжатие)
+    range_width_atr: float = 0.0                # ширина недавнего коридора в ATR
+    breakout_pressure: float = 0.0              # -1..+1: давление продавцов/покупателей в последнем баре
     rs24: float = 0.0                           # 24h движение относительно BTC
     dpos: float = 0.5                           # позиция цены в 24h диапазоне (0..1)
+    room_pct: float = 0.0                       # запас до границы диапазона в предполагаемом направлении
     oi_build_pct: float | None = None           # рост OI за 24h (если есть история)
     funding_neutral: bool = True
     near_breakout: bool = False                 # у вершины диапазона на нарастающем объёме
     near_breakdown: bool = False                # у дна диапазона на растущих продажах
-    ignition: float = 0.0                       # 0..100 — «подогрев»
-    early_direction: str = "FLAT"               # LONG | SHORT | FLAT (направление-подсказка)
+    phase: str = "NEUTRAL"                     # EARLY | TRIGGERED | EXHAUSTED | NEUTRAL
+    ignition: float = 0.0                       # 0..100 — готовность импульса
+    early_direction: str = "FLAT"              # LONG | SHORT | FLAT (направление-подсказка)
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -386,6 +393,8 @@ class ScanCandidate:
     funding_rate: float | None
     open_interest_usd: float | None
     spread_pct: float | None
+    high_24h: float = 0.0
+    low_24h: float = 0.0
     heat: float = 0.0
     liquidity_ok: bool = False
     volume_ok: bool = False
@@ -394,6 +403,9 @@ class ScanCandidate:
     dpos: float = 0.5                       # позиция цены в 24h-диапазоне (0..1)
     rs24: float = 0.0                       # 24h движение относительно BTC
     oi_delta_pct: float | None = None       # изменение OI за 24h (если есть)
+    phase: str = "NEUTRAL"                 # EARLY | TRIGGERED | EXHAUSTED | NEUTRAL
+    readiness: float = 0.0                  # готовность импульса 0..100
+    room_pct: float = 0.0                   # запас до границы диапазона в направлении
     ignition: float = 0.0                   # «подогрев» из emergence (0..100)
     early_direction: str = "FLAT"           # LONG | SHORT | FLAT (подсказка, не сигнал)
     emergence_note: str = ""

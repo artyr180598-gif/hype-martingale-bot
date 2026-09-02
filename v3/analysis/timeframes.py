@@ -70,7 +70,9 @@ def _rvol(fe: pd.DataFrame, window: int = 20) -> float:
         vol = pd.to_numeric(fe["volume"], errors="coerce").dropna()
         if len(vol) < max(5, window // 2):
             return 1.0
-        avg = float(vol.tail(window).mean())
+        # Не включаем текущую свечу в baseline: её объём может быть первым
+        # признаком импульса и не должен разбавлять сам себя.
+        avg = float(vol.iloc[:-1].tail(window).mean())
         return float(vol.iloc[-1] / avg) if avg > 0 else 1.0
     except Exception:  # noqa: BLE001
         return 1.0
