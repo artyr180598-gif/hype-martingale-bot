@@ -52,10 +52,10 @@ def test_beginner_card_has_no_engine_internals():
 def test_beginner_card_blocks_and_words():
     text = render_signal(_signal(), "beginner")
     assert "Оценка сетапа: 85/100 (S — отличный)" in text
-    assert "**Что делать:**" in text
+    assert "**Что делать** (бот сам сделки не открывает — это совет):" in text
     low = text.lower()
     assert "купить" in low and "стоп-лосс" in low
-    assert "цели:" in low and "(+1.8%)" in text
+    assert "цели:" in low and "(+1.8%, закрыть 50%)" in text
     assert "плечо" in low and "риск" in low and "% депозита" in text
     assert "**Почему:**" in text
     assert "оценка — качество сетапа, а не вероятность прибыли" in text.lower()
@@ -80,8 +80,22 @@ def test_quality_label_legend():
 
 
 def test_help_text_has_tier_legend_and_no_guarantee():
-    assert "S 82–100" in HELP_TEXT and "ниже 50 — не входим" in HELP_TEXT
+    assert "S 82–100" in HELP_TEXT and "ниже 55 — жёсткий минимум" in HELP_TEXT
     assert "качество сетапа, а не вероятность прибыли" in HELP_TEXT.lower()
+    # уверенность бота объясняется рядом с оценкой сетапа — их нельзя путать
+    assert "уверенность бота" in HELP_TEXT.lower()
+    assert "не является вероятностью прибыли" in HELP_TEXT.lower()
+
+
+def test_tier_legend_matches_config_thresholds():
+    """Текстовая шкала не должна расходиться с реальными порогами конфига."""
+    cfg = SignalConfig()
+    legend = rv.QUALITY_LEGEND
+    assert f"S {cfg.S_TIER_MIN:.0f}–100" in legend
+    assert f"A {cfg.A_TIER_MIN:.0f}–{cfg.S_TIER_MIN - 1:.0f}" in legend
+    assert f"B {cfg.B_TIER_MIN:.0f}–{cfg.A_TIER_MIN - 1:.0f}" in legend
+    assert f"C {cfg.C_TIER_MIN:.0f}–{cfg.B_TIER_MIN - 1:.0f}" in legend
+    assert f"ниже {cfg.QUALITY_MIN:.0f} — жёсткий минимум" in legend
 
 
 def test_build_version_is_visible_in_help_menu_and_settings():
@@ -94,7 +108,6 @@ def test_build_version_is_visible_in_help_menu_and_settings():
     settings_text = rv.render_settings({"mode": "beginner", "deposit_usd": 1000, "risk_per_trade_pct": 1})
     for text, where in ((HELP_TEXT, "HELP"), (MENU_TEXT, "MENU"), (settings_text, "SETTINGS")):
         assert f"v{APP_VERSION_DEFAULT}" in text, f"в {where} не видна версия сборки"
-        assert "3.2.0" in text, f"в {where} не видна версия сборки"
     # в настройках честно помечен ранний отбор
     assert "намечающегося движения" in settings_text.lower()
     assert "включён" in settings_text.lower()
@@ -194,3 +207,77 @@ def test_no_data_screen_has_retry_hint():
     assert "тикер недоступен" in text
     assert "bybit" in text
     assert "🔄 ПОПРОБОВАТЬ СНОВА" in text
+
+
+def test_beginner_card_describes_the_whole_entry_plan():
+    """Совет должен быть исполнимым без догадок: направление, цены, стоп, цели,
+    размер, таймфрейм, потенциал к риску, порядок действий и «бот не торгует сам».
+    """
+    text = render_signal(_signal(), "beginner")
+
+    # направление и инструмент
+    assert "🟢 LONG — BTCUSDT" in text
+    assert "Купить (ставка на рост) BTCUSDT" in text
+    # где смотреть и по какой цене входить
+    assert "график 15 минут (свечи 15m)" in text
+    assert "в диапазоне 64800–65200" in text
+    # стоп: цена + что это значит
+    assert "Стоп-лосс: 63600" in text and "идея отменена" in text
+    # цели: цена, процент и какая часть позиции закрывается
+    assert "1) 66200 (+1.8%, закрыть 50%)" in text
+    assert "2) 67500 (+3.8%, закрыть 30%)" in text
+    assert "3) 68900 (+6.0%, закрыть 20%)" in text
+    # потенциал к риску словами
+    assert "⚖️ Потенциал к риску: 1:2.50" in text
+    assert "на каждый 1$ риска первая цель даёт 2.50$ прибыли" in text
+    # порядок действий
+    assert "**По шагам:**" in text
+    assert "не догоняйте" in text
+    assert "перенесите стоп в безубыток" in text
+    # бот — советник, а не торговец
+    assert "бот сам сделки не открывает" in text
+    assert "Бот ничего не покупает и не продаёт" in text
+
+
+def test_beginner_card_marks_short_side_in_plain_words():
+    text = render_signal(
+        _signal(
+            direction="SHORT", reasons=["trend down"], stop_loss=66400,
+            targets=[63800, 62500, 61100], regime="TRENDING_DOWN",
+        ),
+        "beginner",
+    )
+    assert "🔻 SHORT — BTCUSDT" in text
+    assert "Продать в шорт (ставка на падение)" in text
+    # у шорта стоп сверху, а цели считаются вниз
+    assert "если цена выйдет выше" in text
+    assert "(+1.8%, закрыть 50%)" in text
+    assert "Если цена уже ушла ниже — не догоняйте" in text
+
+
+def test_project_has_no_order_execution_anywhere():
+    """Инвариант «бот только советует»: в коде нет ни отправки ордеров, ни
+    подписи приватных запросов. Тест ловит попытку добавить торговлю.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    this_file = pathlib.Path(__file__).resolve()  # не ловим собственный список шаблонов
+    forbidden = (
+        r"\bcreate_order\b", r"\bplace_order\b", r"\bopen_position\b",
+        r"\bexecute_trade\b", r"private/order", r"order/new", r"\bset_leverage\b",
+        r"\bhmac\b", r"\bsign_request\b",
+    )
+    pattern = re.compile("|".join(forbidden))
+    hits: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        parts = set(path.parts)
+        if ".venv" in parts or "site-packages" in parts or "__pycache__" in parts:
+            continue
+        if path == this_file:
+            continue
+        for no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if pattern.search(line):
+                hits.append(f"{path.relative_to(root)}:{no}: {line.strip()[:80]}")
+    assert hits == [], "нашёл код, способный торговать:\n" + "\n".join(hits[:10])

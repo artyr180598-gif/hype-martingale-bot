@@ -23,10 +23,11 @@ import uuid
 from typing import Any
 
 from v3.ai import build_reasoner
+from v3.analysis.confidence import attach_confidence
 from v3.analysis.context import build_context
 from v3.analysis.derivatives import analyze_derivatives, oi_change_pct
 from v3.analysis.emergence import detect_emergence
-from v3.analysis.levels import build_levels
+from v3.analysis.levels import build_levels, chase_reason
 from v3.analysis.orderflow import analyze_orderflow
 from v3.analysis.regime import detect_regime
 from v3.analysis.risk import build_risk_brief, risk_score
@@ -134,12 +135,22 @@ class FuturesSignalEngine:
                 continue
             if df is not None and len(df) >= min(40, self.cfg.MIN_BARS):
                 tf_map[tf] = df
-                # stale candle detection: the newest bar must start within the
-                # timeframe + max allowed age, otherwise the chart is stale.
+                # Проверка «отстающего графика». Сервис данных отдаёт только
+                # ЗАКРЫТЫЕ свечи (см. data._closed_bars), поэтому свежие данные
+                # — это «последняя закрытая свеча закрылась не раньше одного
+                # таймфрейма назад». Две прошлые версии правила были неверны:
+                #  * сравнение ВРЕМЕНИ ОТКРЫТИЯ с tf + MAX_DATA_AGE_SECONDS
+                #    объявляло устаревшими любые данные почти всё время
+                #    (закрытая часовая свеча по построению старше часа);
+                #  * выравнивание по now // tf_ms ломается на биржах, где сутки
+                #    начинаются не в 00:00 UTC (OKX — 00:00 UTC+8).
+                # Найдено прогоном на реальных свечах биржи (v3/replay.py).
                 last_open = int(df["ts"].iloc[-1])
                 tf_ms = self.TF_MS_MAP.get(tf, 3_600_000)
-                age = now_ms - last_open
-                if age > tf_ms + self.cfg.MAX_DATA_AGE_SECONDS * 1000 and not any("stale klines" in d for d in bundle.degraded):
+                since_close_ms = now_ms - (last_open + tf_ms)
+                if since_close_ms > tf_ms + self.cfg.MAX_DATA_AGE_SECONDS * 1000 and not any(
+                    "stale klines" in d for d in bundle.degraded
+                ):
                     bundle.degraded.append(f"stale klines ({tf})")
                 # непрерывность свечей: пропуски/нулевые объёмы честно деградируют confidence
                 gaps, zero_vol = candle_series_problems(df, tf_ms)
@@ -149,11 +160,13 @@ class FuturesSignalEngine:
                     bundle.degraded.append(f"нулевой объём свечей {tf} ({zero_vol})")
 
         # возраст данных — по биржевому timestamp последней свечи входного ТФ,
-        # если тикер его не дал (тикерный возраст = возраст кэша, это fallback)
+        # если тикер его не дал (тикерный возраст = возраст кэша, это fallback).
+        # Свеча закрыта в момент (open + длительность) — от него и считаем.
         entry_df = tf_map.get(self.cfg.ENTRY_TF)
         if bundle.data_age_seconds is None and entry_df is not None and len(entry_df):
             last_open = int(entry_df["ts"].iloc[-1])
-            bundle.data_age_seconds = max(0.0, (now_ms - last_open) / 1000.0)
+            entry_tf_ms = self.TF_MS_MAP.get(self.cfg.ENTRY_TF, 3_600_000)
+            bundle.data_age_seconds = max(0.0, (now_ms - last_open - entry_tf_ms) / 1000.0)
 
         btc_df = None
         try:
@@ -265,6 +278,16 @@ class FuturesSignalEngine:
                 condition = candidate.condition
                 stop_hint = candidate.stop_hint
                 reasons.extend(candidate.reasons)
+
+        # «Не догоняй рынок»: если цена уже ушла от VWAP в сторону сделки
+        # дальше ENTRY_MAX_EXTENSION_ATR, основная часть движения пройдена и
+        # вход с высокой вероятностью ловит откат против нас (на реальных
+        # свечах OKX так было выбито 4 из 5 стопов — docs/AUDIT.md, раунд 8).
+        if direction in ("LONG", "SHORT"):
+            chase = chase_reason(direction, bundle.price, entry_view.atr, entry_view, self.cfg)
+            if chase:
+                direction = "WAIT"
+                reasons.append(chase)
 
         levels = build_levels(direction, bundle.price, entry_view.atr, entry_view, self.cfg, stop_override=stop_hint) if direction in ("LONG", "SHORT") else None
 
@@ -403,6 +426,10 @@ class FuturesSignalEngine:
         # timestamp — пользователь видит предупреждение, а не «успешный» анализ
         if bundle.price <= 0 or any("no real market data" in v for v in no_trade):
             signal.features["no_data"] = True
+        # «Уверенность бота» считается здесь же, в чистом пути: разбор уходит в
+        # features вместе с сигналом, поэтому Telegram, API и SQLite показывают
+        # одну и ту же цифру, а бэктест видит ровно тот же расчёт, что и live.
+        attach_confidence(signal, self.cfg)
         active_reasoner = ai_reasoner or self.reasoner
         if active_reasoner is not None:
             try:

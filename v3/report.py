@@ -14,9 +14,17 @@ from __future__ import annotations
 
 import time
 
+from v3.analysis.confidence import assess_confidence
 from v3.config import SignalConfig
 from v3.models import TradingSignal
-from v3.tg.render import plain_reasons, quality_label
+from v3.tg.render import (
+    confidence_block,
+    confidence_headline,
+    data_completeness_line,
+    plain_reasons,
+    quality_label,
+    regime_words,
+)
 
 EMOJI = {"LONG": "🟢 LONG", "SHORT": "🔻 SHORT", "WAIT": "⏸ WAIT", "NO_TRADE": "⛔ NO TRADE"}
 
@@ -73,8 +81,13 @@ def _emergence_lines(signal: TradingSignal) -> list[str]:
         f"⚡ **Похоже, движение только начинается** (подогрев {ignition:.0f} из 100)",
         f"• Возможное направление: {d} — это подсказка, а не команда.",
     ]
+    if direction in ("LONG", "SHORT") and direction != signal.direction:
+        lines.append(
+            "• ⚠️ Ранний отбор смотрит в другую сторону: сетап идёт против раннего "
+            "импульса — это дополнительный риск, вход только с уменьшенным размером."
+        )
     for n in notes:
-        lines.append(f"• {n}")
+        lines.append(f"• {_cap(n)}")
     lines.append(
         "• Что это значит: бот заметил ранние признаки (объём, сжатие, позиции), "
         "но вход — только после подтверждения движком; гарантии движения нет."
@@ -92,20 +105,30 @@ def render_beginner(signal: TradingSignal) -> str:
     """Карточка понятным языком: что купить, оценка сделки, почему, что делать."""
     if signal.direction in ("WAIT", "NO_TRADE"):
         return render_no_trade(signal)
+    cfg = SignalConfig()
     rb = signal.risk_brief
+    report = assess_confidence(signal, cfg)
     lines = [
         f"{EMOJI.get(signal.direction, '⚠️ SIGNAL')} — {signal.symbol}",
         "",
         _stamp(signal),
         "",
-        f"⭐ Оценка сетапа: {quality_label(signal.quality, signal.tier)}",
-        f"Уверенность в данных: {signal.confidence:.1f}/1",
-        f"📈 Рынок: {signal.regime} | горизонт: {signal.horizon}",
+    ]
+    # ── отдельный блок уверенности: цифра + разбор по анализам ──
+    lines += confidence_block(report, cfg=cfg)
+    lines += [
+        "",
+        f"⭐ Оценка сетапа: {quality_label(signal.quality, signal.tier, cfg)}",
+        data_completeness_line(signal),
+        f"📈 Рынок: {regime_words(signal.regime)} | горизонт: {signal.horizon}",
+        f"⏱ Где смотреть: график {_tf_words(signal.timeframe)} (свечи {signal.timeframe})",
+        f"⚖️ Потенциал к риску: 1:{signal.rr:.2f} — на каждый 1$ риска первая цель "
+        f"даёт {signal.rr:.2f}$ прибыли",
     ]
     lines += _emergence_lines(signal)
     lines += [
         "",
-        "**Что делать:**",
+        "**Что делать** (бот сам сделки не открывает — это совет):",
     ]
     buy_or_short = "Купить (ставка на рост)" if signal.direction == "LONG" else "Продать в шорт (ставка на падение)"
     entry_low, entry_high = signal.entry_zone
@@ -117,17 +140,19 @@ def render_beginner(signal: TradingSignal) -> str:
         f"• Стоп-лосс: {signal.stop_loss:.8g} (примерно −{stop_pct:.1f}% от входа) — "
         f"если цена {stop_side}, выходим, идея отменена"
     )
-    targets = _targets_human(signal, entry_mid)
+    targets = _targets_human(signal, entry_mid, cfg)
     if targets:
         lines.append(f"• Цели: {targets}")
     risk_pct, deposit = _risk_pct(signal)
-    lev = f"плечо до {signal.leverage}x" if signal.leverage else ""
-    risk_part = f"риск ≈ {risk_pct:.1f}% депозита (${rb.risk_usd:.1f})" if risk_pct is not None else ""
+    lev = f"Плечо до {signal.leverage}x" if signal.leverage else ""
+    risk_part = f"риск ≈ {risk_pct:.1f}% депозита (${rb.risk_usd:,.2f})" if risk_pct is not None else ""
     if rb and rb.liquidation_price:
         risk_part += (", " if risk_part else "") + f"ликвидация (изолированная): {rb.liquidation_price:.8g}"
     tail = " · ".join(p for p in (lev, risk_part) if p)
     if tail:
         lines.append(f"• {tail}")
+
+    lines += _plan_lines(signal, cfg)
 
     why = plain_reasons(signal)
     if why:
@@ -144,7 +169,10 @@ def render_beginner(signal: TradingSignal) -> str:
 
     lines += [
         "",
+        "🤖 Бот ничего не покупает и не продаёт: он ищет, анализирует и советует. "
+        "Решение и сделку делаете вы сами.",
         "❗ Оценка — качество сетапа, а не вероятность прибыли.",
+        "❗ Уверенность бота — согласованность анализов, тоже не вероятность прибыли.",
         _DISCLAIMER,
         "❓ Непонятные термины? Жми «📚 ПОМОЩЬ».",
     ]
@@ -152,17 +180,59 @@ def render_beginner(signal: TradingSignal) -> str:
     return "\n".join(lines)
 
 
-def _targets_human(signal: TradingSignal, entry_mid: float) -> str:
-    """Форматирует цели словами с процентом от входа."""
+def _cap(text: str) -> str:
+    """Первая буква заглавная: заметки-буллеты читаются как предложения."""
+    text = (text or "").strip()
+    return text[:1].upper() + text[1:] if text else text
+
+
+_TF_WORDS = {
+    "1m": "1 минута", "3m": "3 минуты", "5m": "5 минут", "15m": "15 минут",
+    "30m": "30 минут", "1h": "1 час", "2h": "2 часа", "4h": "4 часа", "1d": "1 день",
+}
+
+
+def _tf_words(timeframe: str) -> str:
+    """Таймфрейм человеческим языком: «15 минут», а не «15m»."""
+    return _TF_WORDS.get(str(timeframe or "").lower(), str(timeframe or "?"))
+
+
+def _plan_lines(signal: TradingSignal, cfg: SignalConfig) -> list[str]:
+    """Порядок действий словами — ровно тот, что моделирует бэктестер.
+
+    Частичные выходы (``TP_CLOSE_PCT``), перенос стопа в безубыток после первой
+    цели и трейлинг за ценой — это не пожелание, а то, как сделка считается в
+    ``v3/simulation.py`` (``TRANCHE_WEIGHTS``, ``trail_after_t1``).
+    """
+    pcts = " → ".join(f"{p * 100:.0f}%" for p in cfg.TP_CLOSE_PCT)
+    away = "выше" if signal.direction == "LONG" else "ниже"
+    return [
+        "",
+        "**По шагам:**",
+        f"1. Дождитесь цены из диапазона входа. Если цена уже ушла {away} — "
+        "не догоняйте, ждите следующий сетап.",
+        "2. Сразу поставьте стоп-лосс: он отменяет идею. Входа без стопа не существует.",
+        f"3. На целях фиксируйте часть позиции: {pcts}.",
+        "4. После первой цели перенесите стоп в безубыток (на цену входа) и "
+        "подтягивайте его за ценой — так убыток уже не вырастет.",
+    ]
+
+
+def _targets_human(
+    signal: TradingSignal, entry_mid: float, cfg: SignalConfig | None = None
+) -> str:
+    """Цели словами: цена, процент от входа и какую часть позиции закрыть."""
     if not signal.targets or not entry_mid:
         return ""
+    close_pcts = list((cfg or SignalConfig()).TP_CLOSE_PCT)
     out = []
     for i, t in enumerate(signal.targets[:3], 1):
         if signal.direction == "LONG":
             pct = (t / entry_mid - 1.0) * 100.0
         else:
             pct = (1.0 - t / entry_mid) * 100.0
-        out.append(f"{t:.8g} ({pct:+.1f}%)")
+        part = f", закрыть {close_pcts[i - 1] * 100:.0f}%" if i <= len(close_pcts) else ""
+        out.append(f"{i}) {t:.8g} ({pct:+.1f}%{part})")
     return " → ".join(out)
 
 
@@ -181,12 +251,18 @@ def _risk_pct(signal: TradingSignal) -> tuple[float | None, float | None]:
 def render_pro(signal: TradingSignal) -> str:
     if signal.direction in ("WAIT", "NO_TRADE"):
         return render_no_trade(signal, pro=True)
+    cfg = SignalConfig()
+    confidence = assess_confidence(signal, cfg)
     lines = [
         f"{EMOJI.get(signal.direction, '⚠️ SIGNAL')} SIGNAL [PRO]",
         "",
         f"🪙 {signal.symbol} | {signal.market}",
         _stamp(signal),
-        f"Price {signal.price:.8g} | confidence {signal.confidence:.2f} | Signal Quality {signal.quality:.1f}/100",
+        confidence_headline(confidence).replace("**", ""),
+        "  " + " | ".join(
+            f"{p.key} {p.score:.0f}%×{p.weight:.2f}" for p in confidence.parts
+        ),
+        f"Price {signal.price:.8g} | data completeness {signal.confidence:.2f} | Signal Quality {signal.quality:.1f}/100",
         f"Regime {signal.regime} | risk {signal.risk_score}/10 | R:R 1:{signal.rr:.2f}",
     ]
     if signal.scenario:
@@ -283,18 +359,30 @@ def render_pro(signal: TradingSignal) -> str:
     ])
     lines.extend([
         "",
-        "❗ Статистический сигнал, не гарантия прибыли. Signal Quality ≠ вероятность прибыли.",
+        "❗ Статистический сигнал, не гарантия прибыли. Signal Quality ≠ вероятность прибыли; "
+        "Bot confidence ≠ вероятность прибыли (это согласованность анализов).",
+        "🤖 Read-only: бот не отправляет ордеров — только сигнал (direction/entry/stop/targets).",
     ])
     lines.extend(_stale_line(signal))
     return "\n".join(lines)
 
 
 def render_no_trade(signal: TradingSignal, pro: bool = False) -> str:
+    cfg = SignalConfig()
+    confidence = assess_confidence(signal, cfg)
     lines = [f"{EMOJI.get(signal.direction, '⛔ NO TRADE')} — ВХОД ЗАПРЕЩЁН", "", f"🪙 {signal.symbol}", _stamp(signal)]
     if pro:
+        lines.append(confidence_headline(confidence).replace("**", ""))
+        lines.append(
+            "  " + " | ".join(f"{p.key} {p.score:.0f}%×{p.weight:.2f}" for p in confidence.parts)
+        )
         lines.append(f"Regime {signal.regime} | Signal Quality {signal.quality:.1f}/100 | risk {signal.risk_score}/10")
     else:
-        lines.append(f"Оценка сетапа: {quality_label(signal.quality, signal.tier)}")
+        # Уверенность показываем и в отказе: новичок видит, что бот не «сломался»,
+        # а осознанно не входит — и насколько слабой оказалась картина рынка.
+        lines.append(f"{confidence_headline(confidence)} → {confidence.verdict}")
+        lines.append(f"Оценка сетапа: {quality_label(signal.quality, signal.tier, cfg)}")
+        lines.append(data_completeness_line(signal))
     if signal.no_trade_reasons:
         lines.extend(["", "**Почему нет входа:**"])
         for r in signal.no_trade_reasons[:8]:

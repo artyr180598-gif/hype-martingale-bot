@@ -6,8 +6,10 @@ and *explainers* used by the interactive platform UI.
 Beginner-facing rules (жёстко):
   * никаких внутренних переменных движка (heat/adx/vol_z/trend_score/...) —
     только слова и понятные числа;
-  * «Оценка сетапа» — качество сетапа, а не вероятность прибыли. Никаких
-    формулировок вида «шанс 72%»;
+  * три разные метрики называются по-разному и объясняются рядом с цифрой:
+    «Оценка сетапа» (качество сетапа), «Уверенность бота» (согласованность
+    анализов, %) и «Полнота данных» (сколько источников ответило). Ни одна из
+    них не выдаётся за вероятность прибыли;
   * у каждого вывода — реальный источник данных и timestamp.
 """
 
@@ -16,8 +18,13 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from v3.analysis.confidence import ConfidenceReport, assess_confidence
 from v3.config import SignalConfig, build_line
 from v3.models import TradingSignal
+
+# Сколько сетапов на странице списка. Совпадает с ``v3.tg.keyboards.PAGE_SIZE``
+# (проверяется тестом): пагинация и рендер обязаны считать страницы одинаково.
+LIST_PAGE_SIZE = 8
 
 QUALITY_LEGEND = (
     "Шкала оценки сетапов:\n"
@@ -25,9 +32,28 @@ QUALITY_LEGEND = (
     "  A 72–81 — хороший\n"
     "  B 62–71 — средний, нужна дисциплина\n"
     "  C 50–61 — слабый, обычно не входим\n"
-    "  ниже 50 — не входим\n"
+    "  ниже 55 — жёсткий минимум: вход запрещён (NO TRADE)\n"
     "Оценка — это качество сетапа, а не вероятность прибыли."
 )
+
+# Режим рынка → человеческие слова (новичку «TRENDING_UP» ничего не говорит).
+REGIME_WORDS = {
+    "TRENDING_UP": "восходящий тренд",
+    "TRENDING_DOWN": "нисходящий тренд",
+    "RANGING": "боковик (флэт)",
+    "HIGH_VOLATILITY": "высокая волатильность",
+    "LOW_VOLATILITY": "низкая волатильность",
+    "BREAKOUT": "пробой вверх",
+    "BREAKDOWN": "пробой вниз",
+    "ACCUMULATION": "накопление",
+    "DISTRIBUTION": "распределение",
+    "UNCERTAIN": "неопределённый",
+}
+
+
+def regime_words(regime: str) -> str:
+    """«TRENDING_UP» → «восходящий тренд». Неизвестный режим показываем как есть."""
+    return REGIME_WORDS.get(str(regime or "").upper(), str(regime or "не определён"))
 
 # ── glossary ────────────────────────────────────────────────────
 GLOSSARY: dict[str, str] = {
@@ -49,6 +75,24 @@ GLOSSARY: dict[str, str] = {
     "score": "Оценка сетапа (0..100) — насколько факторы рынка совпали: тренд, структура, "
              "объёмы, стакан, деривативы. Это НЕ вероятность прибыли: сетап 90/100 тоже "
              "может закрыться по стопу. " + QUALITY_LEGEND.replace("\n", " · "),
+    "bot_confidence": "Уверенность бота (0–100%) — сводная цифра: насколько НЕЗАВИСИМЫЕ "
+                      "анализы бота согласны между собой. Считается из шести блоков: "
+                      "качество сетапа (34%), свежесть и полнота данных (16%), "
+                      "согласованность таймфреймов (16%), объём/стакан/позиции (14%), "
+                      "риск-профиль (10%), ранняя готовность импульса (10%). В карточке "
+                      "сигнала всегда видно, из чего сложилась цифра и что её снижает. "
+                      "Это НЕ вероятность прибыли: 85% уверенности не означают 85% шансов "
+                      "на прибыль — сделка всё равно может закрыться по стопу.",
+    "data_completeness": "Полнота данных (%) — сколько реальных источников биржи ответило "
+                         "и насколько свежими были свечи. Полнота 100% = тикер, свечи всех "
+                         "таймфреймов, стакан, фандинг, OI и ликвидации получены без "
+                         "задержек. Низкая полнота режет уверенность бота: анализ на "
+                         "неполных данных хуже, и бот это показывает честно.",
+    "auto_alert": "Авто-сигнал — уведомление БЕЗ вашего запроса. Бот сам сканирует рынок "
+                  "каждые несколько минут и пишет вам только тогда, когда сетап проходит "
+                  "все пороги качества (оценка сетапа, уверенность бота, полнота данных, "
+                  "риск, потенциал к риску). Всё, что не дотянуло, остаётся в разделах "
+                  "«⭐ ТОП / 🔥 LONG / 🔻 SHORT» — бот молчит, а не спамит.",
     "tp": "TP (тейк-профит) — цели фиксации прибыли. SL (стоп-лосс) — цена, при достижении "
           "которой выходим: идея отменена. Стоп НЕ двигать дальше от цены.",
     "regime": "Режим рынка — глобальная обстановка (тренд/диапазон/высокая волатильность). "
@@ -82,8 +126,10 @@ GLOSSARY: dict[str, str] = {
              "(поддержка/VWAP) и волатильность, а не на одну точку.",
     "invalidation": "Инвалидация — условие, при котором идея становится недействительной "
                     "(обычно закрытие свечи за стопом). Это главный риск-контроль.",
-    "confidence": "Confidence — полнота данных (0..1), а не вероятность прибыли. "
-                  "Signal Quality (0..100) — качество сетапа. Это разные вещи.",
+    "confidence": "Три разные метрики — не путайте: «Оценка сетапа» (0..100) — качество "
+                  "сетапа; «Уверенность бота» (0–100%) — согласованность независимых "
+                  "анализов; «Полнота данных» (%) — сколько реальных источников ответило. "
+                  "Ни одна из них не является вероятностью прибыли.",
     "list": "Глоссарий — объяснение терминов простым языком. Выберите термин выше.",
 }
 
@@ -124,6 +170,78 @@ def quality_label(quality: float, tier: str = "", cfg: SignalConfig | None = Non
     else:
         label = "ниже порога — не входим"
     return f"{quality:.0f}/100 ({label})"
+
+
+# ── уверенность бота ────────────────────────────────────────────
+def confidence_bar(percent: float, cells: int = 10) -> str:
+    """«████████░░» — процент уверенности, который видно одним взглядом."""
+    filled = int(round(max(0.0, min(100.0, float(percent))) / 100.0 * cells))
+    return "█" * filled + "░" * (cells - filled)
+
+
+def confidence_headline(report: ConfidenceReport) -> str:
+    """«🎯 УВЕРЕННОСТЬ БОТА: 78% — высокая»."""
+    return f"🎯 **УВЕРЕННОСТЬ БОТА: {report.percent:.0f}% — {report.label}**"
+
+
+def confidence_block(report: ConfidenceReport | None = None, signal: Any = None, cfg: SignalConfig | None = None) -> list[str]:
+    """Отдельный блок «Уверенность бота» с разбором по анализам.
+
+    Возвращает строки (пустой список, если считать не из чего), чтобы карточка
+    могла вставить блок целиком. Разбор обязателен: цифра без объяснения
+    воспринимается как «шанс прибыли», а это неправда.
+    """
+    cfg = cfg or SignalConfig()
+    if report is None:
+        if signal is None:
+            return []
+        report = assess_confidence(signal, cfg)
+    lines = [
+        confidence_headline(report),
+        f"{confidence_bar(report.percent)} {report.percent:.0f} из 100",
+        "",
+        "🔍 **Из чего сложилась уверенность** (вес каждого анализа):",
+    ]
+    for part in report.parts:
+        weight = f"{part.weight * 100:.0f}%"
+        note = f" — {part.note}" if part.note else ""
+        lines.append(f"• {part.title}: **{part.score:.0f}%** (вес {weight}){note}")
+    lines += [
+        "",
+        f"💡 Как читать: {report.verdict}.",
+        f"⚠️ Чего цифра не обещает: {report.percent:.0f}% — это НЕ вероятность прибыли. "
+        "Сетап с высокой уверенностью тоже может закрыться по стопу.",
+    ]
+    if report.warnings:
+        lines.append("📉 Что снижает уверенность:")
+        lines += [f"• {w}" for w in report.warnings]
+    return lines
+
+
+def confidence_line(report: ConfidenceReport | None = None, signal: Any = None, cfg: SignalConfig | None = None) -> str:
+    """Одна строка для списков: «уверенность бота 78% (высокая)»."""
+    cfg = cfg or SignalConfig()
+    if report is None:
+        if signal is None:
+            return ""
+        report = assess_confidence(signal, cfg)
+    weak = report.weakest[0].title if report.weakest else ""
+    tail = f" · слабое место: {weak}" if weak else ""
+    return f"Уверенность бота: {report.percent:.0f}% ({report.label}){tail}"
+
+
+def data_completeness_line(signal: TradingSignal) -> str:
+    """«📦 Полнота данных: 90%» — честно, сколько источников ответило."""
+    pct = max(0.0, min(100.0, float(signal.confidence or 0.0) * 100.0))
+    if signal.stale:
+        state = "данные устарели — сигнал неактуален"
+    elif pct >= 95.0:
+        state = "все источники ответили"
+    elif pct >= 70.0:
+        state = "часть источников неполная"
+    else:
+        state = "многих данных нет — анализ слабее"
+    return f"📦 Полнота данных: {pct:.0f}% — {state}"
 
 
 def source_stamp(source: str = "", ts_ms: int = 0, data_age_seconds: float | None = None) -> str:
@@ -170,10 +288,18 @@ def plain_reasons(signal: TradingSignal) -> list[str]:
     if em and signal.direction in ("LONG", "SHORT"):
         ignition = float(em.get("ignition", 0.0) or 0.0)
         if ignition >= SignalConfig().EMERGENCE_IGNITION_MIN:
-            hint = {"LONG": "вверх", "SHORT": "вниз"}.get(str(em.get("early_direction")), "")
-            lead = f"движение только намечается ({'возможно ' + hint if hint else 'направление пока неясно'})"
+            early = str(em.get("early_direction"))
+            hint = {"LONG": "вверх", "SHORT": "вниз"}.get(early, "")
             notes = [n for n in em.get("notes", []) if n][:2]
-            out.append(lead + (": " + "; ".join(notes) if notes else ""))
+            if early in ("LONG", "SHORT") and early != signal.direction:
+                # Противоречие не прячем: ранний импульс против сделки — это
+                # риск, а не «подтверждение».
+                out.append(
+                    "осторожно: ранний отбор смотрит в другую сторону — сетап идёт против раннего импульса"
+                )
+            else:
+                lead = f"движение только намечается ({'возможно ' + hint if hint else 'направление пока неясно'})"
+                out.append(lead + (": " + "; ".join(notes) if notes else ""))
 
     # кто и где стоит (positioning) — простыми словами
     pos = der.get("positioning")
@@ -240,15 +366,22 @@ def render_setup_row(item: dict[str, Any], place: int, cfg: SignalConfig | None 
     lines = [
         f"{place}. {emoji} **{sig.symbol}** — {sig.direction}{marker}",
         f"   Оценка сетапа: {quality_label(sig.quality, sig.tier, cfg)}",
+        f"   {confidence_line(signal=sig, cfg=cfg)}",
         f"   • вход {sig.entry_zone[0]:.6g}–{sig.entry_zone[1]:.6g} · стоп {sig.stop_loss:.6g}",
     ]
     if ignite >= cfg.EMERGENCE_IGNITION_MIN and phase != "EXHAUSTED":
-        hint = {"LONG": "вверх", "SHORT": "вниз"}.get(str(em.get("early_direction")), "")
+        early = str(em.get("early_direction"))
+        hint = {"LONG": "вверх", "SHORT": "вниз"}.get(early, "")
         phase_text = {
             "EARLY": "база просыпается",
             "TRIGGERED": "первый импульс подтверждён",
         }.get(phase, "движение только намечается")
-        lines.append(f"   ⚡ {phase_text}" + (f" (вероятно, {hint})" if hint else ""))
+        if early in ("LONG", "SHORT") and early != sig.direction:
+            # Ранний отбор смотрит в другую сторону — честно предупреждаем,
+            # а не показываем «вероятно вверх» рядом со сделкой на падение.
+            lines.append(f"   ⚡ {phase_text}, но ранний отбор смотрит в другую сторону — сетап против импульса")
+        else:
+            lines.append(f"   ⚡ {phase_text}" + (f" (вероятно, {hint})" if hint else ""))
     targets = _targets_pct_line(sig)
     if targets:
         lines.append(f"   • {targets}")
@@ -256,9 +389,10 @@ def render_setup_row(item: dict[str, Any], place: int, cfg: SignalConfig | None 
     leverage = sig.leverage or (rb.leverage if rb else 1)
     risk_pct = rb.max_deposit_pct if rb and rb.max_deposit_pct else 0.0
     lines.append(f"   • плечо до {leverage}x · риск ~{risk_pct:.1f}% депозита")
-    why = plain_reasons(sig)
+    why = plain_reasons(sig)[:3]
     if why:
-        lines.append(f"   Почему: {' · '.join(why)}")
+        lines.append("   Почему:")
+        lines += [f"   • {r}" for r in why]
     if sig.condition:
         lines.append(f"   ⚠️ Условный сетап: {sig.condition}")
     return "\n".join(lines)
@@ -266,9 +400,14 @@ def render_setup_row(item: dict[str, Any], place: int, cfg: SignalConfig | None 
 
 # ── «⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ» (ранний отбор) ───────────────────────
 EMERGING_TITLE = "⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ (ранний отбор)"
+EMERGING_INTRO = (
+    "Монеты, где движение только зарождается: объём проснулся, волатильность "
+    "сжалась и начинает расширяться, цена у границы диапазона."
+)
 EMERGING_DISCLAIMER = (
-    "Это признак ранжирования и объяснения, а НЕ команда входа: "
-    "направление подтверждает движок; гарантии движения нет."
+    "⚠️ Это наблюдение, а НЕ команда входа: направление всегда подтверждает "
+    "основной анализ, а гарантии движения нет. «Подогрев» — сила ранних "
+    "признаков (0–100), не вероятность прибыли."
 )
 # Анти-chase заметки emergence объясняют, почему движение УЖЕ состоялось.
 # В блок «намечается» они не идут: там только ранние признаки.
@@ -305,25 +444,36 @@ def render_emerging(
     if not items:
         return ""
     cfg = cfg or SignalConfig()
-    lines = [EMERGING_TITLE]
+    lines = [EMERGING_TITLE, EMERGING_INTRO, ""]
     for item in items[:limit]:
         cand = item.get("candidate") or {}
         sig = item.get("signal")
         symbol = str(cand.get("symbol") or getattr(sig, "symbol", "") or "?")
         notes = _emergence_notes(item)
-        hint = " · ".join(notes[:2]) if notes else "признаков хватает, но коротко их не описать"
+        ignition = float(cand.get("ignition", 0.0) or 0.0)
         phase = str(cand.get("phase", "EARLY"))
         phase_text = {
             "EARLY": "база просыпается",
             "TRIGGERED": "первый импульс подтверждён",
             "NEUTRAL": "наблюдение",
         }.get(phase, "ранняя фаза")
-        line = f"• {symbol} — ранний признак: {hint} · фаза: {phase_text}"
+        hint = " · ".join(notes[:2]) if notes else "признаков хватает, но коротко их не описать"
+        lines.append(f"• **{symbol}** — подогрев {ignition:.0f}/100 · фаза: {phase_text}")
+        lines.append(f"  Признаки: {hint}")
+        if sig is not None:
+            # Глубокий анализ уже есть — показываем обе метрики отдельными
+            # строками: «подогрев» (ранние признаки) и «уверенность бота»
+            # (согласованность полного анализа). Это разные вещи.
+            lines.append(
+                f"  Оценка сетапа: {quality_label(float(sig.quality or 0.0), str(sig.tier or ''), cfg)}"
+                f" · {confidence_line(signal=sig, cfg=cfg)}"
+            )
         if pro:
-            ignition = float(cand.get("ignition", 0.0) or 0.0)
-            line += f" [phase {phase}, ignition {ignition:.0f}/100, подсказка {cand.get('early_direction', 'FLAT')}]"
-        lines.append(line)
-    lines.append(EMERGING_DISCLAIMER)
+            lines.append(
+                f"  [phase {phase}, ignition {ignition:.0f}/100, "
+                f"hint {cand.get('early_direction', 'FLAT')}]"
+            )
+    lines += ["", EMERGING_DISCLAIMER]
     return "\n".join(lines)
 
 
@@ -350,17 +500,19 @@ def render_setup_list(
             "❗ Это аналитика, не гарантия результата.",
         ]
         return "\n".join(lines)
-    start = page * 8
-    chunk = items[start : start + 8]
+    start = page * LIST_PAGE_SIZE
+    chunk = items[start : start + LIST_PAGE_SIZE]
     lines = [title]
     if stats_line:
         lines.append(stats_line)
-    lines += ["", f"Страница {page + 1}/{pages}. Отсортировано по качеству:", ""]
+    lines += ["", f"Страница {page + 1}/{pages}. Отсортировано по качеству сетапа:", ""]
     for i, item in enumerate(chunk, start + 1):
         lines.append(render_setup_row(item, i, cfg))
         lines.append("")
     lines.extend([
-        "❗ Оценка — качество сетапа, а не вероятность прибыли. Это аналитика, не гарантия результата.",
+        "❗ «Оценка сетапа» — качество сетапа, «Уверенность бота» — согласованность "
+        "анализов. Ни то, ни другое не является вероятностью прибыли.",
+        "❗ Это аналитика, не гарантия результата.",
     ])
     return "\n".join(lines)
 
@@ -499,15 +651,135 @@ def render_no_data(reasons: list[str], diagnostics: list[dict[str, Any]] | None 
     return "\n".join(lines)
 
 
+# ── авто-сигналы ────────────────────────────────────────────────
+def utc_time(ts_ms: int) -> str:
+    """«14:22:07 UTC» — единый формат времени во всех разделах UI."""
+    return time.strftime("%H:%M:%S UTC", time.gmtime(ts_ms / 1000.0)) if ts_ms else "—"
+
+
+def _ago(ts_ms: int) -> str:
+    if not ts_ms:
+        return ""
+    seconds = max(0, int(time.time() - ts_ms / 1000.0))
+    if seconds < 60:
+        return f" ({seconds}с назад)"
+    if seconds < 3600:
+        return f" ({seconds // 60} мин назад)"
+    return f" ({seconds // 3600} ч назад)"
+
+
+def alert_thresholds_lines(cfg: SignalConfig | None = None) -> list[str]:
+    """Пороги авто-сигнала человеческим языком — один источник правды для UI."""
+    cfg = cfg or SignalConfig()
+    lines = [
+        f"• Оценка сетапа ≥ {cfg.ALERT_MIN_QUALITY:.0f}/100",
+        f"• Уверенность бота ≥ {cfg.ALERT_MIN_BOT_CONFIDENCE:.0f}%",
+        f"• Полнота данных ≥ {cfg.ALERT_MIN_DATA_CONFIDENCE * 100:.0f}%",
+        f"• Риск ≤ {cfg.ALERT_MAX_RISK_SCORE}/10 · потенциал к риску ≥ 1:{cfg.ALERT_MIN_RR:.1f}",
+    ]
+    if cfg.ALERT_REQUIRE_FRESH:
+        lines.append(f"• Данные свежие (не старше {cfg.MAX_DATA_AGE_SECONDS:.0f}с)")
+    lines.append(
+        f"• Не чаще 1 сигнала по монете в {cfg.COOLDOWN_SECONDS // 60} мин · "
+        f"максимум {cfg.ALERT_MAX_PER_CYCLE} за цикл"
+    )
+    return lines
+
+
+def render_alerts_page(
+    cfg: SignalConfig | None = None,
+    *,
+    enabled: bool = True,
+    interval_seconds: int = 0,
+    last_cycle_ms: int = 0,
+    sent_total: int = 0,
+    found_total: int = 0,
+    last_alert_ms: int = 0,
+    last_alert_symbol: str = "",
+    active_signals: int = 0,
+    scope: str = "",
+    transport_enabled: bool = True,
+    last_suppressed: str = "",
+) -> str:
+    """Раздел «🔔 АВТО-СИГНАЛЫ»: что делает бот, пороги, текущее состояние."""
+    cfg = cfg or SignalConfig()
+    interval = interval_seconds or cfg.WATCHER_INTERVAL_SECONDS
+    minutes = max(1, round(interval / 60.0))
+    status = (
+        "✅ **включены** — бот пишет сам, как только находит сильный сетап"
+        if enabled
+        else "⏸ **выключены** — бот молчит, но анализ по вашему запросу работает"
+    )
+    lines = [
+        "🔔 **АВТО-СИГНАЛЫ** (без вашего запроса)",
+        "",
+        f"Статус: {status}",
+        "",
+        "**Что делает бот:**",
+        f"• Каждые ~{minutes} мин сам сканирует рынок USDT-perp",
+        "• Проверяет лучших кандидатов полным анализом: тренды 5m–1d, структура, "
+        "объёмы, стакан, открытые позиции, фандинг, ликвидации, риск",
+        "• Пишет вам только если сетап прошёл ВСЕ пороги ниже; остальное остаётся "
+        "в разделах «⭐ ТОП / 🔥 LONG / 🔻 SHORT» — бот молчит, а не спамит",
+        "",
+        "**Пороги авто-сигнала:**",
+        *alert_thresholds_lines(cfg),
+        "",
+        "**Состояние:**",
+        f"• Последний цикл скана: {utc_time(last_cycle_ms)}{_ago(last_cycle_ms)}",
+        f"• Найдено достойных сетапов: {found_total} · отправлено вам: {sent_total}"
+        + (f" · последний: {last_alert_symbol} в {utc_time(last_alert_ms)}" if last_alert_symbol else ""),
+        f"• Активных сигналов под наблюдением: {active_signals}",
+    ]
+    if last_suppressed:
+        lines.append(f"• Последний отказ: {last_suppressed}")
+    if scope:
+        lines.append(f"• Область поиска: {scope}")
+    if not transport_enabled:
+        lines.append(
+            "• ⚠️ Доставка не настроена: задайте TELEGRAM_BOT_TOKEN и "
+            "TELEGRAM_ADMIN_CHAT_ID (или ALERT_CHAT_IDS) в переменных окружения"
+        )
+    lines += [
+        "",
+        "❗ Авто-сигнал — аналитика, не гарантия результата и не приказ входить. "
+        "Решение и риск всегда на вас.",
+    ]
+    return "\n".join(lines)
+
+
+def render_alerts_found(texts: list[str], cfg: SignalConfig | None = None, checked: int = 0) -> str:
+    """Ответ на «🔎 Проверить сейчас»: что нашлось за этот проход."""
+    cfg = cfg or SignalConfig()
+    head = "🔎 **ПРОВЕРКА РЫНКА ПО ЗАПРОСУ**"
+    if not texts:
+        return "\n".join([
+            head,
+            "",
+            f"Проверено сетапов: {checked}" if checked else "Цикл проверки завершён.",
+            "😶 Сильного сетапа нет: ни один кандидат не прошёл пороги авто-сигнала.",
+            "",
+            "Пороги, которые нужно пройти:",
+            *alert_thresholds_lines(cfg),
+            "",
+            "Это нормально: система предпочитает пропустить сделку, чем войти в слабый сетап.",
+            "❗ Аналитика, не гарантия результата.",
+        ])
+    return "\n\n".join([head, *texts])
+
+
 def render_settings(settings: dict[str, Any], cfg: SignalConfig | None = None) -> str:
     cfg = cfg or SignalConfig()
     early = "включён" if cfg.SCAN_EMERGENCE_ENABLED else "выключен"
+    minutes = max(1, round((cfg.WATCHER_INTERVAL_SECONDS) / 60.0))
     return (
         "⚙️ **НАСТРОЙКИ АНАЛИЗА**\n\n"
         f"🧠 Режим отчёта: **{'PRO' if settings.get('mode') == 'pro' else 'BEGINNER'}**\n"
         f"💰 Депозит: **${settings.get('deposit_usd', 0):,.0f}** — используется для расчёта позиции\n"
         f"⚠️ Риск на сделку: **{settings.get('risk_per_trade_pct', 1):g}%**\n"
-        f"⚡ Ранний отбор «намечающегося движения»: **{early}**\n\n"
+        f"⚡ Ранний отбор «намечающегося движения»: **{early}**\n"
+        f"🔔 Авто-сигналы: каждые ~{minutes} мин, порог уверенности "
+        f"**{cfg.ALERT_MIN_BOT_CONFIDENCE:.0f}%** (раздел «🔔 АВТО-СИГНАЛЫ»)\n\n"
         f"{version_line(cfg)}\n"
         "Настройки сохраняются локально для вашего Telegram-аккаунта.\n"
         "❗ Депозит и риск — это параметры расчёта, а не приказ торговать."
