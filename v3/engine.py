@@ -23,6 +23,7 @@ import uuid
 from typing import Any
 
 from v3.ai import build_reasoner
+from v3.analysis.confidence import attach_confidence
 from v3.analysis.context import build_context
 from v3.analysis.derivatives import analyze_derivatives, oi_change_pct
 from v3.analysis.emergence import detect_emergence
@@ -403,6 +404,10 @@ class FuturesSignalEngine:
         # timestamp — пользователь видит предупреждение, а не «успешный» анализ
         if bundle.price <= 0 or any("no real market data" in v for v in no_trade):
             signal.features["no_data"] = True
+        # «Уверенность бота» считается здесь же, в чистом пути: разбор уходит в
+        # features вместе с сигналом, поэтому Telegram, API и SQLite показывают
+        # одну и ту же цифру, а бэктест видит ровно тот же расчёт, что и live.
+        attach_confidence(signal, self.cfg)
         active_reasoner = ai_reasoner or self.reasoner
         if active_reasoner is not None:
             try:

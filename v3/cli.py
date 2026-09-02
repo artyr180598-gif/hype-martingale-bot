@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from src.core.logging import get_logger, setup_logging
+from v3.alerts import render_alert
 from v3.backtest import run_backtest as run_v3_backtest
 from v3.config import APP_RELEASE_DEFAULT, APP_VERSION_DEFAULT, SignalConfig, build_line
 from v3.data import FuturesDataService
@@ -180,7 +181,19 @@ def _print_startup_report(
     else:
         print("Telegram: выключен — задайте TELEGRAM_BOT_TOKEN (алиас TELEGRAM_TOKEN) в .env")
     scan_scope = "вся ликвидная вселенная (early impulse)" if getattr(watcher, "universe_scan", False) else f"watchlist: {len(watcher.watchlist)} символов"
-    print(f"Watcher: запущен, интервал {_cfg.SCAN_INTERVAL_SECONDS}с, поиск: {scan_scope}")
+    interval = _cfg.WATCHER_INTERVAL_SECONDS
+    print(f"Watcher: запущен, интервал {interval}с (~{max(1, round(interval / 60))} мин), поиск: {scan_scope}")
+    alerts_on = getattr(watcher, "alerts_enabled", _cfg.ALERTS_ENABLED)
+    chats = _cfg.alert_chat_ids or ["не задан (TELEGRAM_ADMIN_CHAT_ID)"]
+    print(
+        "Авто-сигналы: "
+        + ("включены" if alerts_on else "на паузе")
+        + f" · пороги: качество ≥ {_cfg.ALERT_MIN_QUALITY:.0f}/100, "
+        f"уверенность ≥ {_cfg.ALERT_MIN_BOT_CONFIDENCE:.0f}%, "
+        f"полнота данных ≥ {_cfg.ALERT_MIN_DATA_CONFIDENCE * 100:.0f}%, "
+        f"риск ≤ {_cfg.ALERT_MAX_RISK_SCORE}/10, R:R ≥ 1:{_cfg.ALERT_MIN_RR:.1f}"
+    )
+    print(f"Доставка авто-сигналов: {', '.join(chats)}")
     if host is not None:
         print(f"API: http://{host}:{port} (Uvicorn running)")
     print("-" * 64)
@@ -259,13 +272,18 @@ async def run_daemon(host: str = "0.0.0.0", port: int = 8400) -> int:
         mode = f"error: {exc}"
         logger.error("Не удалось определить источник данных: %s", exc)
 
-    async def notify(items: list[dict[str, Any]]) -> None:
+    async def notify(items: list[Any]) -> None:
         for item in items:
-            text = _event_alert(item)
+            text = render_alert(item, _cfg)
             if text:
                 await transport.notify_text(text)
 
-    await watcher.start(notify=notify, interval=_cfg.SCAN_INTERVAL_SECONDS)
+    # UI должен видеть состояние watcher'а (раздел «🔔 АВТО-СИГНАЛЫ») и уметь
+    # запустить внеплановую проверку по кнопке «🔎 Проверить сейчас».
+    core.watcher = watcher
+    core.on_alerts = notify
+
+    await watcher.start(notify=notify, interval=_cfg.WATCHER_INTERVAL_SECONDS)
     _print_startup_report(data, mode, transport, watcher, host, port)
 
     tasks: list[asyncio.Task[Any]] = [
@@ -316,13 +334,16 @@ async def run_bot() -> int:
         mode = f"error: {exc}"
         logger.error("Не удалось определить источник данных: %s", exc)
 
-    async def notify(items: list[dict[str, Any]]) -> None:
+    async def notify(items: list[Any]) -> None:
         for item in items:
-            text = _event_alert(item)
+            text = render_alert(item, _cfg)
             if text:
                 await transport.notify_text(text)
 
-    await watcher.start(notify=notify, interval=_cfg.SCAN_INTERVAL_SECONDS)
+    core.watcher = watcher
+    core.on_alerts = notify
+
+    await watcher.start(notify=notify, interval=_cfg.WATCHER_INTERVAL_SECONDS)
     _print_startup_report(data, mode, transport, watcher, None, 0)
     polling = asyncio.create_task(safe_telegram(transport), name="v3.telegram")
     try:
@@ -369,26 +390,8 @@ async def run_pulse() -> int:
     return 0
 
 
-def _event_alert(item: dict[str, Any]) -> str:
-    """Compact Telegram alert for a signal or outcome event."""
-    if item.get("symbol") and item.get("direction") in ("LONG", "SHORT"):
-        return (
-            f"🟢 {item['symbol']} {item['direction']} "
-            f"q={item.get('quality', 0):.1f} tier={item.get('tier', '')}\n"
-            f"Entry {item.get('entry_zone', (0, 0))[0]:.8g}–{item.get('entry_zone', (0, 0))[1]:.8g}\n"
-            f"SL {item.get('stop_loss', 0):.8g} | R:R 1:{item.get('rr', 0):.2f}\n"
-            "❗ Аналитика, не гарантия результата."
-        )
-    if item.get("event"):
-        return (
-            f"📊 {item.get('symbol', '')} {item.get('event')} "
-            f"{item.get('outcome', '')} r={item.get('r_multiple', 0):+.2f}\n"
-            "❗ Аналитика, не гарантия результата."
-        )
-    return ""
-
-
 async def run_watch(symbols: list[str] | None = None, interval: int | None = None) -> int:
+    from v3.alerts import render_alert as _render_alert
     from v3.watcher import V3Watcher
 
     data, engine = _engine()
@@ -396,8 +399,21 @@ async def run_watch(symbols: list[str] | None = None, interval: int | None = Non
     lifecycle = SignalLifecycle(store, _cfg.COOLDOWN_SECONDS, _cfg.MAX_ACTIVE_SIGNALS)
     watcher = V3Watcher(data, engine, store, lifecycle, _cfg, symbols=symbols)
     await data.probe()
-    print(f"v3 watcher запущен: {', '.join(watcher.watchlist)} (interval {interval or _cfg.SCAN_INTERVAL_SECONDS}с)")
-    await watcher.start()
+    every = interval or _cfg.WATCHER_INTERVAL_SECONDS
+    print(
+        f"v3 watcher запущен: {', '.join(watcher.watchlist)} (interval {every}с, "
+        f"авто-сигналы: {'включены' if watcher.alerts_enabled else 'на паузе'})"
+    )
+
+    async def _console_notify(items: list[Any]) -> None:
+        """Без Telegram-транспорта авто-сигналы всё равно видно — в консоли."""
+        for item in items:
+            text = _render_alert(item, _cfg)
+            if text:
+                print("\n" + "=" * 64)
+                print(text)
+
+    await watcher.start(notify=_console_notify, interval=every)
     try:
         while True:
             await asyncio.sleep(3600)

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.core.logging import get_logger
+from v3.alerts import render_alert, render_signal_alert
 from v3.config import SignalConfig, build_line
 from v3.data import FuturesDataService
 from v3.engine import FuturesSignalEngine
@@ -34,34 +35,129 @@ from v3.tg.settings import UserSettingsService
 LOGGER_NAME = "v3.telegram"
 logger = get_logger(LOGGER_NAME)
 
+_CONFIDENCE_PART_LABELS = {
+    "quality": "качество сетапа",
+    "data": "свежесть и полнота данных",
+    "trend": "согласованность таймфреймов",
+    "confirm": "объём/стакан/позиции",
+    "risk": "риск-профиль",
+    "impulse": "ранняя готовность импульса",
+}
+
+
+def _confidence_weights_line() -> str:
+    """«качество сетапа 34% · свежесть данных 16% · …» — из реального конфига.
+
+    Строка HELP обязана совпадать с весами, которыми бот считает уверенность
+    прямо сейчас (веса настраиваются через ``BOT_CONFIDENCE_WEIGHTS``). Если
+    конфиг не собрался (битый env на этапе импорта) — берём дефолт, а не
+    падаем: HELP не должен ломать импорт модуля.
+    """
+    from v3.config import DEFAULT_BOT_CONFIDENCE_WEIGHTS
+
+    try:
+        weights = SignalConfig().bot_confidence_weights
+    except Exception:  # noqa: BLE001
+        weights = dict(DEFAULT_BOT_CONFIDENCE_WEIGHTS)
+    return " · ".join(
+        f"{_CONFIDENCE_PART_LABELS.get(key, key)} {value * 100:.0f}%"
+        for key, value in weights.items()
+    )
+
+
 HELP_TEXT = f"""🤖 **HYPE — futures signal intelligence (только реальные данные)**
 
 Платформа анализирует ТОЛЬКО реальные данные бирж (Bybit → Binance → MEXC):
 цены, свечи, стакан, фандинг, OI, ликвидации, L/S ratio, новости. Никаких
 демо-данных и «приблизительных» значений: чего нет — показано как «н/д».
 
-Как читать оценку сетапа:
+**Три метрики — три разные вещи (их часто путают)**
+
+🎯 **Уверенность бота (0–100%)** — насколько независимые анализы бота согласны
+между собой. Складывается из шести блоков (вес каждого показан в карточке):
+  {_confidence_weights_line()}.
+Веса настраиваются через `BOT_CONFIDENCE_WEIGHTS` — строка выше всегда
+соответствует текущей конфигурации бота.
+
+⭐ **Оценка сетапа (0–100)** — это качество сетапа, а не вероятность прибыли:
   S 82–100 — отличный
   A 72–81 — хороший
   B 62–71 — средний, нужна дисциплина
   C 50–61 — слабый, обычно не входим
-  ниже 50 — не входим
-⚠️ Оценка — это КАЧЕСТВО сетапа, а не вероятность прибыли.
+  ниже 55 — жёсткий минимум: вход запрещён (NO TRADE)
 
-Кнопки — быстрее всего. Также работают команды:
+📦 **Полнота данных (%)** — сколько реальных источников ответило и насколько
+свежими были свечи. Низкая полнота честно режет уверенность.
+
+⚠️ Ни одна из метрик НЕ является вероятностью прибыли. Сетап 90/100 и
+уверенность 85% тоже могут закрыться по стопу.
+
+**Разделы**
+
+🔎 **СКАНИРОВАТЬ РЫНОК** — весь рынок USDT-perp: отбор → глубокий анализ
+⚡ **НАМЕЧАЕТСЯ ДВИЖЕНИЕ** — монеты до разгона (объём, сжатие, позиция в диапазоне)
+🔥/🔻 **ЛУЧШИЕ LONG / SHORT** — списки сетапов по направлению
+⭐ **ТОП ВОЗМОЖНОСТИ** — только сильные сетапы (строгий порог)
+🔍 **АНАЛИЗ МОНЕТЫ** — полный разбор конкретного тикера
+🔔 **АВТО-СИГНАЛЫ** — бот сам следит за рынком и пишет без вашего запроса
+📊 **МОЙ РЫНОК** — BTC/ETH, доминация, настроение рынка
+⚙️ **НАСТРОЙКИ** — депозит, риск на сделку, режим отчёта
+📚 **ПОМОЩЬ** — глоссарий простыми словами
+
+**Команды** (работают наравне с кнопками)
 
 `/signal BTCUSDT` — анализ + LONG/SHORT/NO TRADE
 `/signal BTCUSDT pro` — полный факторный разбор
 `/scan` — скан вселенной USDT-perp
+`/alerts` — статус авто-сигналов и пороги
+`/market` — обзор рынка
 `/walkforward BTCUSDT [15m]` — walk-forward проверка на истории
 `/status` — сохранённые сигналы/последний скан
 
-Как ловим начало движения: `EARLY` — база просыпается, `TRIGGERED` — закрытая
-свеча подтвердила первый выход, `EXHAUSTED` — движение уже далеко и его не
-догоняем. В daemon поиск идёт по всей ликвидной вселенной; явный `watch` —
-только по указанным монетам.
+**Как ловим начало движения:** `EARLY` — база просыпается, `TRIGGERED` —
+закрытая свеча подтвердила первый выход, `EXHAUSTED` — движение уже далеко и
+его не догоняем. В daemon поиск идёт по всей ликвидной вселенной; явный
+`watch` — только по указанным монетам.
+
+**Честный NO TRADE.** Если сетап слабый, бот прямо пишет, что входа нет и
+почему. Это не поломка — это риск-менеджмент.
 
 Бот **не торгует**. Это аналитический сигнал, не гарантия результата.
+
+{build_line()}
+Если строка сборки не совпадает с репозиторием — запущен старый процесс:
+сделайте `git pull` и перезапустите бота."""
+
+WELCOME_TEXT = f"""👋 **Добро пожаловать в HYPE — Crypto Market Intelligence**
+
+Я — аналитический бот по USDT-перпетуалам. Работаю только на реальных данных
+бирж (Bybit → Binance → MEXC): цены, свечи 5m–1d, стакан, фандинг, открытые
+позиции, ликвидации. Никаких демо-данных: чего нет — показываю как «н/д».
+
+**Чем я полезен**
+
+🔎 Нахожу лучшие сетапы по всему рынку, а не по списку из 10 монет
+⚡ Замечаю монеты ДО разгона: объём проснулся, волатильность сжалась
+🧮 Считаю вход, стоп, цели и размер позиции под ваш депозит и риск
+🚫 Честно говорю NO TRADE, когда чистого сетапа нет
+🔔 Сам слежу за рынком и присылаю сигнал без вашего запроса — но только если
+   сетап действительно сильный
+
+**Как читать мои цифры (коротко)**
+
+🎯 Уверенность бота — насколько согласны между собой мои независимые анализы
+⭐ Оценка сетапа — качество комбинации факторов
+📦 Полнота данных — сколько источников ответило
+⚠️ Ни одна цифра не является вероятностью прибыли.
+
+**С чего начать**
+
+1️⃣ Нажмите «🔎 СКАНИРОВАТЬ РЫНОК» — я покажу, что сейчас сильное
+2️⃣ Или отправьте тикер сообщением, например `SOLUSDT`
+3️⃣ В «⚙️ НАСТРОЙКИ» укажите депозит и риск — расчёт позиции станет точным
+4️⃣ В «🔔 АВТО-СИГНАЛЫ» включите уведомления, чтобы не следить вручную
+
+❗ Я не торгую и не гарантирую результат. Шорт и плечо — повышенный риск.
 
 {build_line()}
 Если строка сборки не совпадает с репозиторием — запущен старый процесс:
@@ -72,16 +168,25 @@ MENU_TEXT = f"""🧠 **HYPE — CRYPTO MARKET INTELLIGENCE**
 Аналитическая платформа USDT-perp: сканер рынка, multi-timeframe, деривативы,
 риск-менеджмент и честный NO TRADE.
 
-• 🔎 **СКАНИРОВАТЬ РЫНОК** — быстрый скан → глубокий анализ лучших
-• 🔥/🔻 — лучшие **LONG** / **SHORT** сетапы
-• ⭐ **ТОП ВОЗМОЖНОСТИ** — лучшие сетапы независимо от направления
-• 🔍 **АНАЛИЗ МОНЕТЫ** — полный разбор выбранной монеты
-• 📊 **МОЙ РЫНОК** — BTC/ETH/глобальный контекст
-• ⚙️ **НАСТРОЙКИ** — режим отчёта, депозит, риск
-• 📚 **ПОМОЩЬ** — простые объяснения терминов
+**Разделы**
+
+🔎 **СКАНИРОВАТЬ РЫНОК** — быстрый скан → глубокий анализ лучших
+🔥/🔻 — лучшие **LONG** / **SHORT** сетапы
+⭐ **ТОП ВОЗМОЖНОСТИ** — лучшие сетапы независимо от направления
+🔍 **АНАЛИЗ МОНЕТЫ** — полный разбор выбранной монеты
+🔔 **АВТО-СИГНАЛЫ** — бот сам следит за рынком и пишет без запроса
+📊 **МОЙ РЫНОК** — BTC/ETH/глобальный контекст
+⚙️ **НАСТРОЙКИ** — режим отчёта, депозит, риск
+📚 **ПОМОЩЬ** — простые объяснения терминов
+
+**Как читать отчёты**
+
+🎯 Уверенность бота (%) — согласованность независимых анализов
+⭐ Оценка сетапа (0–100) — качество комбинации факторов
+📦 Полнота данных (%) — сколько источников ответило
+⚠️ Это не вероятность прибыли. Дата данных и свежесть есть в каждом отчёте.
 
 ❗ Система не торгует и не гарантирует результат.
-Дата данных и статус свежести показываются в каждом отчёте.
 
 {build_line()}
 Если строка сборки не совпадает с репозиторием — запущен старый процесс:
@@ -121,6 +226,11 @@ class V3Core:
         self.user_settings = user_settings or UserSettingsService(store, self.cfg)
         # set by V3TelegramTransport for diagnostics (pulse / /status)
         self.transport: V3TelegramTransport | None = None
+        # set by the daemon/bot entrypoints: фоновый сканер и канал доставки
+        # авто-сигналов. Без них раздел «🔔 АВТО-СИГНАЛЫ» честно пишет, что
+        # фоновый процесс не подключён, а «Проверить сейчас» делает разовый скан.
+        self.watcher: Any = None
+        self.on_alerts: Any = None
         self._scanner: Any = None
         self._signals: dict[str, Any] = {}
         self._awaiting_deposit: set[int] = set()
@@ -145,26 +255,204 @@ class V3Core:
         return rv.ACCESS_DENIED
 
     # ── texts (pure) ─────────────────────────────────────────────
+    def welcome_text(self, user_id: int | None = None) -> str:
+        """Приветствие при /start: что за бот, что умеет, как читать цифры."""
+        text = WELCOME_TEXT
+        if user_id is not None:
+            settings = self.user_settings.get(user_id).to_dict()
+            deposit = float(settings.get("deposit_usd", 0) or 0)
+            risk = float(settings.get("risk_per_trade_pct", 0) or 0)
+            mode = "PRO" if settings.get("mode") == "pro" else "BEGINNER"
+            text += (
+                "\n\n👤 **Ваш профиль**\n"
+                f"• Режим отчёта: {mode}\n"
+                f"• Депозит: ${deposit:,.0f} · риск на сделку: {risk:g}%\n"
+                "Изменить — в «⚙️ НАСТРОЙКИ»."
+            )
+        return text
+
     def menu_text(self) -> str:
         return MENU_TEXT
 
-    def status_text(self) -> str:
-        rows = self.store.recent_signals(limit=20)
-        lines = [f"🧾 Сохранено v3-сигналов: {len(rows)}", ""]
-        for r in rows[:10]:
-            lines.append(
-                f"  {r['symbol']} {r['direction']:<8} q={r['quality']:.1f} "
-                f"tier={r['tier']} {r['status']}"
+    # ── авто-сигналы ─────────────────────────────────────────────
+    def _watcher_state(self) -> dict[str, Any]:
+        """Состояние фонового сканера для раздела «🔔 АВТО-СИГНАЛЫ»."""
+        watcher = self.watcher
+        cfg = self.cfg
+
+        def _int(key: str) -> int:
+            try:
+                return int(self.store.get_state(key, "0") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        if watcher is None:
+            scope = "определяется при запуске daemon (вся ликвидная вселенная)"
+            interval = cfg.WATCHER_INTERVAL_SECONDS
+            enabled = bool(cfg.ALERTS_ENABLED)
+        else:
+            scope = (
+                "вся ликвидная вселенная USDT-perp"
+                if getattr(watcher, "universe_scan", False)
+                else f"список монет: {', '.join(getattr(watcher, 'watchlist', []) or [])}"
             )
-        last = self.store.get_state("last_scan_ms", "0")
-        lines.extend(["", f"Последний скан: {last}", f"Режим: {self.data.mode} (только реальные данные)"])
-        lines.append(f"Активных сигналов: {len(self.lifecycle.active())}")
+            interval = int(getattr(watcher, "interval_seconds", cfg.WATCHER_INTERVAL_SECONDS) or cfg.WATCHER_INTERVAL_SECONDS)
+            enabled = bool(getattr(watcher, "alerts_enabled", cfg.ALERTS_ENABLED))
+        return {
+            "enabled": enabled,
+            "interval": interval,
+            "scope": scope,
+            "last_cycle_ms": _int("v3_last_cycle_ms"),
+            "sent_total": _int("v3_alerts_sent"),
+            "found_total": _int("v3_alerts_found"),
+            "last_alert_ms": _int("v3_last_alert_ms"),
+            "last_alert_symbol": self.store.get_state("v3_last_alert_symbol", ""),
+            "last_suppressed": self.store.get_state("v3_last_suppressed", ""),
+            "active_signals": len(self.lifecycle.active()),
+        }
+
+    def alerts_text(self) -> str:
+        state = self._watcher_state()
+        return rv.render_alerts_page(
+            self.cfg,
+            enabled=state["enabled"],
+            interval_seconds=state["interval"],
+            last_cycle_ms=state["last_cycle_ms"],
+            sent_total=state["sent_total"],
+            found_total=state["found_total"],
+            last_alert_ms=state["last_alert_ms"],
+            last_alert_symbol=state["last_alert_symbol"],
+            active_signals=state["active_signals"],
+            scope=state["scope"],
+            transport_enabled=bool(self.transport is not None and self.transport.enabled),
+            last_suppressed=state["last_suppressed"],
+        )
+
+    def alerts_toggle_text(self, force: bool | None = None) -> str:
+        """Пауза/включение авто-сигналов. Без watcher — только подсказка.
+
+        ``force`` — явное состояние («/alerts on» не должно переключаться на
+        паузу при повторной отправке команды).
+        """
+        watcher = self.watcher
+        if watcher is None or not hasattr(watcher, "toggle_alerts"):
+            return (
+                "🔔 **АВТО-СИГНАЛЫ**\n\n"
+                "⚠️ Фоновый сканер не подключён к этому интерфейсу.\n"
+                "Авто-сигналы работают в daemon-процессе: `python -m v3 daemon` "
+                "(или `make run`). Пороги и статус — ниже.\n\n"
+                + rv.render_alerts_page(self.cfg, enabled=self.cfg.ALERTS_ENABLED)
+            )
+        enabled = (
+            watcher.set_alerts_enabled(bool(force))
+            if force is not None
+            else watcher.toggle_alerts()
+        )
+        head = (
+            "▶️ **Авто-сигналы включены** — бот снова пишет сам, как только найдёт сильный сетап."
+            if enabled
+            else "⏸ **Авто-сигналы на паузе** — бот молчит. Анализ по вашему запросу работает как обычно."
+        )
+        return head + "\n\n" + self.alerts_text()
+
+    async def alerts_now_text(self) -> str:
+        """«🔎 Проверить сейчас»: один внеплановый цикл поиска сильного сетапа."""
+        watcher = self.watcher
+        if watcher is not None and hasattr(watcher, "run_cycle"):
+            try:
+                await watcher.run_cycle(notify=self.on_alerts)
+            except Exception as exc:  # noqa: BLE001
+                return f"⚠️ Проверка не удалась: {exc}\n\nПопробуйте ещё раз через минуту."
+            texts = []
+            for item in getattr(watcher, "last_alerts", []) or []:
+                text = render_alert(item, self.cfg)
+                if text:
+                    texts.append(text)
+            return rv.render_alerts_found(texts, self.cfg, checked=int(getattr(watcher, "last_checked", 0) or 0))
+        # без фонового сканера делаем честный разовый скан вселенной
+        from v3.alerts import evaluate_alert
+
+        try:
+            tickers = await self.data.tickers()
+        except Exception as exc:  # noqa: BLE001
+            return rv.render_no_data(
+                [f"тикеры недоступны: {exc}"],
+                getattr(self.data, "source_diagnostics", lambda: [])(),
+            )
+        if not tickers:
+            return rv.render_no_data(
+                ["биржа вернула пустой список тикеров"],
+                getattr(self.data, "source_diagnostics", lambda: [])(),
+            )
+        from v3.scanner import Scanner
+
+        scanner = Scanner(self.engine, self.cfg)
+        result = await scanner.run(tickers, limit=self.cfg.SCAN_LIMIT, top=self.cfg.SCAN_TOP)
+        self._scanner = scanner
+        texts: list[str] = []
+        for item in result.analyzed:
+            sig, _ = sanitize_for_publish(item["signal"], self.cfg)
+            self._signals[sig.symbol] = sig
+            self.store.save_signal(sig)
+            decision = evaluate_alert(sig, self.cfg)
+            if decision.ok:
+                texts.append(render_signal_alert(sig, self.cfg))
+        return rv.render_alerts_found(texts[: self.cfg.ALERT_MAX_PER_CYCLE], self.cfg, checked=len(result.analyzed))
+
+    def status_text(self) -> str:
+        """«🧾 ИСТОРИЯ СИГНАЛОВ»: те же цифры, что в карточках, человеческим языком."""
+        rows = self.store.recent_signals(limit=20)
+        status_words = {
+            "GENERATED": "сформирован",
+            "CONFIRMED": "подтверждён",
+            "ACTIVE": "активен",
+            "TP1_HIT": "цель 1 достигнута",
+            "TP2_HIT": "цель 2 достигнута",
+            "TP3_HIT": "цель 3 достигнута",
+            "CLOSED": "закрыт по целям",
+            "STOPPED": "стоп сработал",
+            "INVALIDATED": "отменён рынком",
+            "EXPIRED": "устарел",
+            "NO_TRADE": "нет входа",
+        }
+        lines = ["🧾 **ИСТОРИЯ СИГНАЛОВ**", ""]
+        if not rows:
+            lines.append("Пока пусто: бот ещё не сохранил ни одного анализа.")
+        for r in rows[:10]:
+            emoji = {"LONG": "🟢", "SHORT": "🔻"}.get(str(r.get("direction")), "⛔")
+            direction = str(r.get("direction", "?"))
+            payload = r.get("payload") or {}
+            confidence = (payload.get("features") or {}).get("bot_confidence") or {}
+            conf_txt = (
+                f" · уверенность {float(confidence['percent']):.0f}%"
+                if confidence.get("percent") is not None
+                else ""
+            )
+            tier = str(r.get("tier") or "")
+            tier_txt = f" ({tier})" if tier and tier != "NONE" else ""
+            state = status_words.get(str(r.get("status")), str(r.get("status")))
+            lines.append(
+                f"• {r.get('symbol', '?')} {emoji} {direction} · "
+                f"оценка {float(r.get('quality') or 0):.0f}/100{tier_txt}{conf_txt} · {state}"
+            )
+        try:
+            last_ms = int(self.store.get_state("last_scan_ms", "0") or 0)
+        except ValueError:
+            last_ms = 0
+        lines += [
+            "",
+            f"Сохранено сигналов: {len(rows)} · активных под наблюдением: {len(self.lifecycle.active())}",
+            f"Последний скан: {rv.utc_time(last_ms)}",
+            f"Режим данных: {self.data.mode} (только реальные данные)",
+            f"🔔 Авто-сигналов отправлено: {self.store.get_state('v3_alerts_sent', '0')}"
+            + (f" · последний: {self.store.get_state('v3_last_alert_symbol', '')}"
+               if self.store.get_state("v3_last_alert_symbol", "") else ""),
+        ]
         if self.transport is not None:
             lines.append(f"Telegram: {'включён' if self.transport.enabled else 'выключен'}")
             if self.transport.last_error:
                 lines.append(f"Ошибка поллинга: {self.transport.last_error}")
-        lines.append("")
-        lines.append("❗ Аналитика, не гарантия результата.")
+        lines += ["", "❗ Аналитика, не гарантия результата."]
         return "\n".join(lines)
 
     def pulse_text(self, transport: Any = None, watcher: Any = None, mode: str | None = None) -> str:
@@ -188,6 +476,11 @@ class V3Core:
             f"  Allow-list (user ids): {allowlist or '— НЕ НАСТРОЕНА (доступ закрыт)'}",
             f"  Активных сигналов: {len(self.lifecycle.active())}",
             f"  Последний цикл watcher: {last_cycle}",
+            f"  Интервал watcher: {getattr(watcher, 'interval_seconds', self.cfg.WATCHER_INTERVAL_SECONDS)}с",
+            f"  Авто-сигналы: {'включены' if getattr(watcher, 'alerts_enabled', self.cfg.ALERTS_ENABLED) else 'на паузе'}"
+            f" (пороги: качество ≥ {self.cfg.ALERT_MIN_QUALITY:.0f}/100, уверенность ≥ {self.cfg.ALERT_MIN_BOT_CONFIDENCE:.0f}%)",
+            f"  Отправлено авто-сигналов: {self.store.get_state('v3_alerts_sent', '0')}",
+            f"  Последний авто-сигнал: {self.store.get_state('v3_last_alert_symbol', '—')}",
             f"  Последняя ошибка watcher: {last_error}",
             f"  Watchlist: {watchlist}",
             f"  Сохранено сигналов: {len(self.store.recent_signals(limit=10_000))}",
@@ -217,12 +510,20 @@ class V3Core:
         if user_id in self._awaiting_deposit:
             return await self._deposit_input(user_id, text)
         lower = text.lower()
-        if lower in ("/start", "start", "menu", "меню", "главная"):
+        if lower in ("/start", "start", "привет", "hello", "hi"):
+            return self.welcome_text(user_id)
+        if lower in ("menu", "меню", "главная"):
             return self.menu_text()
         if lower in ("/help", "help", "помощь"):
             return HELP_TEXT
         if lower in ("/status", "status", "статус"):
             return self.status_text()
+        if lower in ("/alerts", "alerts", "авто-сигналы", "авто сигналы", "уведомления"):
+            return self.alerts_text()
+        if lower in ("/alerts on", "alerts on", "включи авто-сигналы"):
+            return self.alerts_toggle_text(force=True)
+        if lower in ("/alerts off", "alerts off", "выключи авто-сигналы"):
+            return self.alerts_toggle_text(force=False)
         if lower in ("/scan", "scan", "скан") or lower.startswith("/scan ") or lower.startswith("scan "):
             mode = "pro" if " pro " in f" {lower} " else "beginner"
             return await self.scan_text(mode)
@@ -332,8 +633,26 @@ class V3Core:
                 emoji = "🟢" if s.direction == "LONG" else "🔻"
                 lines.append(
                     f"{i}. {emoji} {s.symbol} {s.direction} — {rv.quality_label(s.quality, s.tier, self.cfg)}"
+                    f" · {rv.confidence_line(signal=s, cfg=self.cfg)}"
                 )
             lines.append("Подробнее: 🔥/🔻/⭐ кнопки ниже.")
+        # Сколько найденного дотянуло бы до порога авто-сигнала: пользователь
+        # видит, почему бот молчит в чате, даже когда сетапы в списке есть.
+        from v3.alerts import evaluate_alert
+
+        worthy = [item["signal"] for item in setups if evaluate_alert(item["signal"], self.cfg).ok]
+        if worthy:
+            names = ", ".join(s.symbol for s in worthy[:3])
+            lines.append(
+                f"🔔 До порога авто-сигнала дотянули: {len(worthy)} ({names}) — "
+                "такие бот присылает сам"
+            )
+        else:
+            lines.append(
+                f"🔔 До порога авто-сигнала не дотянул никто "
+                f"(нужны качество ≥ {self.cfg.ALERT_MIN_QUALITY:.0f}/100 и уверенность "
+                f"≥ {self.cfg.ALERT_MIN_BOT_CONFIDENCE:.0f}%) — бот молчит, а не спамит"
+            )
         lines += [
             "",
             f"🔥 LONG: {len(longs)} | 🔻 SHORT: {len(shorts)} | ⭐ ТОП (строгий): {len(top)}",
@@ -482,10 +801,25 @@ class V3Core:
         if not self.authorize(user_id):
             return BotReply(self.access_denied_text, edit=False)
         data = (data or "").strip()
+        if data == "welcome":
+            return BotReply(self.welcome_text(user_id), kb.main_menu(), edit=False)
         if data == "menu":
             return BotReply(self.menu_text(), kb.main_menu(), edit=False)
         if data == "help":
             return BotReply(HELP_TEXT, kb.glossary_menu(), edit=False)
+        # ── авто-сигналы: независимый раздел → новое сообщение,
+        #    переключение/проверка → правим это же сообщение
+        if data == "alerts":
+            state = self._watcher_state()
+            return BotReply(self.alerts_text(), kb.alerts_menu(state["enabled"]), edit=False)
+        if data == "alerts:toggle":
+            text = self.alerts_toggle_text()
+            enabled = self._watcher_state()["enabled"]
+            return BotReply(text, kb.alerts_menu(enabled), edit=True)
+        if data == "alerts:now":
+            text = await self.alerts_now_text()
+            enabled = self._watcher_state()["enabled"]
+            return BotReply(text, kb.alerts_menu(enabled), edit=False)
         if data == "scan":
             text = await self.scan_text("beginner")
             k = kb.scan_results(
@@ -673,7 +1007,10 @@ class V3TelegramTransport:
         async def _start(message: Message) -> None:  # pragma: no cover
             if not await _guard(message):
                 return
-            await message.answer(self.core.menu_text(), reply_markup=kb.main_menu(), disable_web_page_preview=True)
+            uid = getattr(message.from_user, "id", None) if message.from_user else None
+            await message.answer(
+                self.core.welcome_text(uid), reply_markup=kb.main_menu(), disable_web_page_preview=True
+            )
 
         @self._dp.message()
         async def _on_message(message: Message) -> None:  # pragma: no cover
@@ -695,14 +1032,24 @@ class V3TelegramTransport:
             await self._bot.session.close()
 
     async def notify_text(self, text: str) -> None:
-        """Send an event to the configured admin chat (no-op if not running)."""
+        """Send an auto-signal/event to every configured chat (no-op if off).
+
+        Адресаты: ``ALERT_CHAT_IDS`` (через запятую), иначе
+        ``TELEGRAM_ADMIN_CHAT_ID``. Один сбой доставки не должен обрывать
+        отправку остальным адресатам — ошибка пишется в ``last_error``.
+        """
         if not self.enabled or self._bot is None:
             return
-        chat_id = self.cfg.TELEGRAM_ADMIN_CHAT_ID
-        if not chat_id:
+        chat_ids = self.cfg.alert_chat_ids
+        if not chat_ids:
             return
-        for chunk in _split(text, 4000):
-            await self._bot.send_message(chat_id, chunk, disable_web_page_preview=True)
+        for chat_id in chat_ids:
+            try:
+                for chunk in _split(text, 4000):
+                    await self._bot.send_message(chat_id, chunk, disable_web_page_preview=True)
+            except Exception as exc:  # noqa: BLE001
+                self.last_error = f"notify to {chat_id}: {type(exc).__name__}: {exc}"
+                logger.error("Telegram notify: %s", self.last_error)
 
 
 def _medium_from(tf: str) -> str:

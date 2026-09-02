@@ -80,8 +80,22 @@ def test_quality_label_legend():
 
 
 def test_help_text_has_tier_legend_and_no_guarantee():
-    assert "S 82–100" in HELP_TEXT and "ниже 50 — не входим" in HELP_TEXT
+    assert "S 82–100" in HELP_TEXT and "ниже 55 — жёсткий минимум" in HELP_TEXT
     assert "качество сетапа, а не вероятность прибыли" in HELP_TEXT.lower()
+    # уверенность бота объясняется рядом с оценкой сетапа — их нельзя путать
+    assert "уверенность бота" in HELP_TEXT.lower()
+    assert "не является вероятностью прибыли" in HELP_TEXT.lower()
+
+
+def test_tier_legend_matches_config_thresholds():
+    """Текстовая шкала не должна расходиться с реальными порогами конфига."""
+    cfg = SignalConfig()
+    legend = rv.QUALITY_LEGEND
+    assert f"S {cfg.S_TIER_MIN:.0f}–100" in legend
+    assert f"A {cfg.A_TIER_MIN:.0f}–{cfg.S_TIER_MIN - 1:.0f}" in legend
+    assert f"B {cfg.B_TIER_MIN:.0f}–{cfg.A_TIER_MIN - 1:.0f}" in legend
+    assert f"C {cfg.C_TIER_MIN:.0f}–{cfg.B_TIER_MIN - 1:.0f}" in legend
+    assert f"ниже {cfg.QUALITY_MIN:.0f} — жёсткий минимум" in legend
 
 
 def test_build_version_is_visible_in_help_menu_and_settings():
@@ -94,7 +108,6 @@ def test_build_version_is_visible_in_help_menu_and_settings():
     settings_text = rv.render_settings({"mode": "beginner", "deposit_usd": 1000, "risk_per_trade_pct": 1})
     for text, where in ((HELP_TEXT, "HELP"), (MENU_TEXT, "MENU"), (settings_text, "SETTINGS")):
         assert f"v{APP_VERSION_DEFAULT}" in text, f"в {where} не видна версия сборки"
-        assert "3.2.0" in text, f"в {where} не видна версия сборки"
     # в настройках честно помечен ранний отбор
     assert "намечающегося движения" in settings_text.lower()
     assert "включён" in settings_text.lower()

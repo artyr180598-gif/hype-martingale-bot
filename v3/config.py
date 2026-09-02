@@ -23,8 +23,20 @@ def _data_dir_default() -> Path:
 # оставалась 3.1.0 — пользователь не видел, что код обновился. Версия и
 # подпись раунда теперь печатаются в HELP / меню / настройках / баннере
 # старта: по строке сборки видно, какой процесс реально запущен.
-APP_VERSION_DEFAULT = "3.2.0"
-APP_RELEASE_DEFAULT = "Раунд 5: закрытые свечи и подтверждение раннего импульса"
+APP_VERSION_DEFAULT = "3.3.0"
+APP_RELEASE_DEFAULT = "Раунд 6: уверенность бота отдельным блоком + авто-сигналы"
+
+# Веса «уверенности бота» (v3/analysis/confidence.py). Ключ = анализ,
+# значение = вклад в итоговый процент. Сумма нормируется, поэтому веса можно
+# менять через env без риска получить 130%.
+DEFAULT_BOT_CONFIDENCE_WEIGHTS: dict[str, float] = {
+    "quality": 0.34,     # оценка сетапа движка
+    "data": 0.16,        # свежесть и полнота реальных данных
+    "trend": 0.16,       # согласованность таймфреймов
+    "confirm": 0.14,     # объём + стакан + OI/фандинг
+    "risk": 0.10,        # риск-профиль и потенциал к риску
+    "impulse": 0.10,     # ранняя готовность импульса
+}
 
 
 def build_line(version: str | None = None, release: str | None = None) -> str:
@@ -173,6 +185,32 @@ class SignalConfig(BaseSettings):
     COOLDOWN_SECONDS: int = 3600                # one alert per symbol/hour
     MAX_ACTIVE_SIGNALS: int = 12
 
+    # ── «Уверенность бота» (сводный %, v3/analysis/confidence.py) ──
+    # Третья, отдельно названная метрика: насколько независимые анализы бота
+    # согласны между собой. НЕ вероятность прибыли (это написано в каждом
+    # блоке, где цифра показывается).
+    BOT_CONFIDENCE_WEIGHTS: str = ",".join(
+        f"{k}:{v:g}" for k, v in DEFAULT_BOT_CONFIDENCE_WEIGHTS.items()
+    )
+    BOT_CONFIDENCE_HIGH_MIN: float = 75.0       # «высокая»
+    BOT_CONFIDENCE_MEDIUM_MIN: float = 55.0     # «умеренная»
+    BOT_CONFIDENCE_LOW_MIN: float = 35.0        # ниже — «очень низкая»
+
+    # ── Авто-сигналы (push без запроса пользователя) ────────────
+    # Watcher сканирует рынок сам и молчит, пока не найдёт сетап, который
+    # проходит ВСЕ пороги ниже. Остальные наблюдения сохраняются в SQLite и
+    # видны в разделах «⭐ ТОП / 🔥 LONG / 🔻 SHORT».
+    ALERTS_ENABLED: bool = True
+    ALERT_MIN_QUALITY: float = 78.0             # оценка сетапа (A и выше)
+    ALERT_MIN_BOT_CONFIDENCE: float = 70.0      # сводная уверенность бота, %
+    ALERT_MIN_DATA_CONFIDENCE: float = 0.60     # полнота реальных данных 0..1
+    ALERT_MAX_RISK_SCORE: int = 6               # риск-скор не выше
+    ALERT_MIN_RR: float = 1.8                   # потенциал к риску (по умолчанию = MIN_RISK_REWARD)
+    ALERT_REQUIRE_FRESH: bool = True            # не слать сетап по устаревшим данным
+    ALERT_MAX_PER_CYCLE: int = 3                # не более N уведомлений за цикл
+    ALERT_CHAT_IDS: str = ""                    # куда слать (по умолчанию admin chat)
+    WATCHER_INTERVAL_SECONDS: int = 180         # как часто бот сам сканирует рынок
+
     # ── Storage ─────────────────────────────────────────────────
     DATA_DIR: Path = Field(default_factory=_data_dir_default)
     DB_PATH: Path | None = None
@@ -282,6 +320,46 @@ class SignalConfig(BaseSettings):
         tfs = self.timeframes
         return f"{tfs[0]}-{tfs[-1]}" if tfs else "15m-4h"
 
+    @property
+    def bot_confidence_weights(self) -> dict[str, float]:
+        """Веса «уверенности бота»: env-строка → нормированный словарь.
+
+        Нормировка обязательна: сумма весов всегда 1.0, иначе процент
+        уверенности перестал бы быть процентом. Неизвестные ключи
+        игнорируются, пропущенные — берутся из дефолта.
+        """
+        out: dict[str, float] = {}
+        for chunk in str(self.BOT_CONFIDENCE_WEIGHTS or "").split(","):
+            key, sep, value = chunk.partition(":")
+            key = key.strip().lower()
+            if not sep or key not in DEFAULT_BOT_CONFIDENCE_WEIGHTS:
+                continue
+            try:
+                parsed = float(value)
+            except ValueError:
+                continue
+            if parsed >= 0:
+                # явный 0 разрешён: компонент можно выключить, не правя код
+                out[key] = parsed
+        for key, default in DEFAULT_BOT_CONFIDENCE_WEIGHTS.items():
+            out.setdefault(key, default)
+        total = sum(out.values())
+        if total <= 0:
+            # все веса обнулены — возвращаем дефолт, иначе процентов не будет
+            return dict(DEFAULT_BOT_CONFIDENCE_WEIGHTS)
+        return {key: value / total for key, value in out.items()}
+
+    @property
+    def alert_chat_ids(self) -> list[str]:
+        """Куда слать авто-сигналы: ALERT_CHAT_IDS, иначе admin chat."""
+        raw = self.ALERT_CHAT_IDS or self.TELEGRAM_ADMIN_CHAT_ID
+        out: list[str] = []
+        for part in str(raw or "").split(","):
+            part = part.strip()
+            if part and part not in out:
+                out.append(part)
+        return out
+
 
 def validate_config(cfg: SignalConfig | None = None) -> list[str]:
     """Startup validation. Returns error messages (empty == OK).
@@ -330,6 +408,38 @@ def validate_config(cfg: SignalConfig | None = None) -> list[str]:
         errors.append("MAX_RISK_SCORE_TO_ENTER must be <= 10")
     if cfg.SCAN_TOP < 1:
         errors.append("SCAN_TOP must be >= 1")
+    # «уверенность бота»: шкала обязана быть возрастающей и в пределах 0..100
+    if not (0 < cfg.BOT_CONFIDENCE_LOW_MIN < cfg.BOT_CONFIDENCE_MEDIUM_MIN < cfg.BOT_CONFIDENCE_HIGH_MIN <= 100):
+        errors.append(
+            "BOT_CONFIDENCE_LOW_MIN < BOT_CONFIDENCE_MEDIUM_MIN < BOT_CONFIDENCE_HIGH_MIN <= 100 — "
+            "шкала уверенности бота должна возрастать"
+        )
+    weights = cfg.bot_confidence_weights
+    if abs(sum(weights.values()) - 1.0) > 1e-6:
+        errors.append("BOT_CONFIDENCE_WEIGHTS must normalise to 1.0")
+    if not set(DEFAULT_BOT_CONFIDENCE_WEIGHTS).issubset(weights):
+        errors.append("BOT_CONFIDENCE_WEIGHTS is missing required components")
+    # авто-сигналы: пороги должны быть достижимы и не слабее основного гейта
+    if not (0 < cfg.ALERT_MIN_BOT_CONFIDENCE <= 100):
+        errors.append("ALERT_MIN_BOT_CONFIDENCE must be in (0, 100]")
+    if not (0 < cfg.ALERT_MIN_DATA_CONFIDENCE <= 1):
+        errors.append("ALERT_MIN_DATA_CONFIDENCE must be in (0, 1]")
+    if cfg.ALERT_MIN_QUALITY < cfg.QUALITY_MIN:
+        errors.append(
+            f"ALERT_MIN_QUALITY={cfg.ALERT_MIN_QUALITY} < QUALITY_MIN={cfg.QUALITY_MIN}: "
+            "порог авто-сигнала не может быть мягче общего гейта входа"
+        )
+    if cfg.ALERT_MIN_RR < cfg.MIN_RISK_REWARD:
+        errors.append(
+            f"ALERT_MIN_RR={cfg.ALERT_MIN_RR} < MIN_RISK_REWARD={cfg.MIN_RISK_REWARD}: "
+            "порог авто-сигнала не может быть мягче общего гейта R:R"
+        )
+    if not (0 <= cfg.ALERT_MAX_RISK_SCORE <= 10):
+        errors.append("ALERT_MAX_RISK_SCORE must be in 0..10")
+    if cfg.ALERT_MAX_PER_CYCLE < 1:
+        errors.append("ALERT_MAX_PER_CYCLE must be >= 1")
+    if cfg.WATCHER_INTERVAL_SECONDS < 30:
+        errors.append("WATCHER_INTERVAL_SECONDS must be >= 30 (иначе биржа начнёт отдавать 429)")
     if cfg.TELEGRAM_ALLOWED_USER_IDS:
         for part in cfg.TELEGRAM_ALLOWED_USER_IDS.split(","):
             part = part.strip()

@@ -19,6 +19,9 @@ Callback payloads are flat ASCII strings:
   set:deposit:<amount>      -> deposit preset
   set:risk:<pct>            -> risk-per-trade preset
   dep_custom                -> ask the user for a custom deposit
+  alerts                    -> auto-signal section (status + thresholds)
+  alerts:toggle             -> pause / resume auto-signals
+  alerts:now                -> run one check cycle right now
   back:<page>               -> go back (page = menu | top | longs | shorts)
 """
 
@@ -28,7 +31,10 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-PAGE_SIZE = 8
+from v3.tg.render import LIST_PAGE_SIZE
+
+# Единая константа: рендер списков (v3.tg.render) и пагинация обязаны совпадать.
+PAGE_SIZE = LIST_PAGE_SIZE
 
 
 def _btn(text: str, cb: str) -> InlineKeyboardButton:
@@ -40,8 +46,19 @@ def main_menu() -> InlineKeyboardMarkup:
         [_btn("🔎 СКАНИРОВАТЬ РЫНОК", "scan")],
         [_btn("🔥 ЛУЧШИЕ LONG", "list:longs:0"), _btn("🔻 ЛУЧШИЕ SHORT", "list:shorts:0")],
         [_btn("⭐ ТОП ВОЗМОЖНОСТИ", "list:top:0"), _btn("🔍 АНАЛИЗ МОНЕТЫ", "pick:0")],
+        [_btn("🔔 АВТО-СИГНАЛЫ", "alerts")],
         [_btn("📊 МОЙ РЫНОК", "market"), _btn("⚙️ НАСТРОЙКИ", "settings")],
         [_btn("📚 ПОМОЩЬ", "help")],
+    ])
+
+
+def alerts_menu(enabled: bool = True) -> InlineKeyboardMarkup:
+    """Раздел авто-сигналов: пауза/вкл, немедленная проверка, навигация."""
+    toggle = _btn("⏸ Поставить на паузу", "alerts:toggle") if enabled else _btn("▶️ Включить", "alerts:toggle")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [toggle, _btn("🔎 Проверить сейчас", "alerts:now")],
+        [_btn("🔎 Скан рынка", "scan"), _btn("⭐ ТОП ВОЗМОЖНОСТИ", "list:top:0")],
+        [_btn("🏠 Главная", "menu")],
     ])
 
 
@@ -134,10 +151,14 @@ def risk_presets() -> InlineKeyboardMarkup:
 
 
 def glossary_menu() -> InlineKeyboardMarkup:
+    # Первые кнопки — то, что новичок видит в каждой карточке сигнала.
     terms = [
+        ("🎯 Уверенность бота", "bot_confidence"), ("⭐ Оценка сетапа", "score"),
+        ("📦 Полнота данных", "data_completeness"), ("🔔 Авто-сигнал", "auto_alert"),
+        ("⚡ Намечается движение", "emergence"), ("🧭 Реджим", "regime"),
         ("RSI", "rsi"), ("ATR", "atr"), ("ADX", "adx"), ("BOS/CHoCH", "bos"),
         ("Фандинг", "funding"), ("Open Interest", "oi"), ("R:R", "rr"),
-        ("Реджим", "regime"), ("VWAP", "vwap"), ("Ликвидность", "liquidity"),
+        ("VWAP", "vwap"), ("Ликвидность", "liquidity"), ("Стоп и цели", "tp"),
     ]
     rows: list[list[InlineKeyboardButton]] = []
     for i in range(0, len(terms), 2):

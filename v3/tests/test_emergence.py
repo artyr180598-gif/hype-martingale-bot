@@ -477,7 +477,10 @@ def test_scan_text_shows_emerging_block_with_disclaimer(tmp_path):
 
     assert "НАМЕЧАЕТСЯ ДВИЖЕНИЕ" in text
     assert EMERGING_DISCLAIMER in text
-    assert "AAAUSDT" in text and "ранний признак" in text
+    assert "AAAUSDT" in text and "подогрев" in text.lower()
+    # подогрев (ранние признаки) и уверенность бота (полный анализ) —
+    # отдельные строки, чтобы их нельзя было перепутать
+    assert "Оценка сетапа:" in text and "Уверенность бота:" in text
     # заметки — человеческие, из emergence, а не сырые поля движка
     assert "объём заметно выше обычного" in text or "узком коридоре" in text
     low = text.lower()
@@ -523,7 +526,7 @@ def test_render_emerging_block_rules():
     ]
     text = render_emerging(items, cfg)
     assert text.startswith("⚡ НАМЕЧАЕТСЯ ДВИЖЕНИЕ")
-    assert text.count("— ранний признак:") == 5  # не больше 5 монет
+    assert text.count("подогрев ") == 5  # не больше 5 монет
     assert "S0USDT" in text and "S7USDT" not in text
     assert EMERGING_DISCLAIMER in text
     assert "ignition" not in text.lower()

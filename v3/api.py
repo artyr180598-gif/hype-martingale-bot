@@ -5,7 +5,8 @@ Endpoints:
   * GET /api/v3/signal/{symbol}     -- one signal snapshot;
   * POST /api/v3/scan               -- scan universe and persist snapshots;
   * GET  /api/v3/backtest/{symbol}  -- historical walk-forward test;
-  * GET  /api/v3/history/{symbol}   -- recent persisted signals.
+  * GET  /api/v3/history/{symbol}   -- recent persisted signals;
+  * GET  /api/v3/alerts             -- auto-signal state + thresholds.
 
 The API is read-only and does not execute orders (execution engine is separate).
 """
@@ -101,6 +102,19 @@ async def health() -> dict[str, Any]:
     }
 
 
+def _payload(sig: TradingSignal) -> dict[str, Any]:
+    """Сигнал для API: штатный payload + «уверенность бота» отдельным полем.
+
+    Разбор лежит и в ``features.bot_confidence`` (его пишет движок), но
+    отдельное поле удобнее клиентам: не нужно знать структуру features.
+    """
+    from v3.analysis.confidence import assess_confidence
+
+    data = sig.to_dict()
+    data["bot_confidence"] = assess_confidence(sig, runtime.cfg).to_dict()
+    return data
+
+
 @app.get("/api/v3/signal/{symbol}")
 async def signal(symbol: str, refresh: bool = True, _: None = Depends(require_api_token)) -> dict[str, Any]:
     from v3.publisher import sanitize_for_publish
@@ -110,7 +124,7 @@ async def signal(symbol: str, refresh: bool = True, _: None = Depends(require_ap
     if violations:
         metrics.record_error("publish.blocked", f"{symbol}: {violations}")
     runtime.store.save_signal(sig)
-    return sig.to_dict()
+    return _payload(sig)
 
 
 @app.get("/api/v3/market")
@@ -135,7 +149,7 @@ async def top(
         runtime.store.save_signal(item["signal"])
     qmin = runtime.cfg.SCAN_SHOW_QUALITY_MIN
     items = [
-        item["signal"].to_dict()
+        _payload(item["signal"])
         for item in scanner.best_setups(direction or None, quality_min=qmin)
     ][:limit]
     return {
@@ -197,7 +211,7 @@ async def scan(
     runtime.store.set_state("last_scan_ms", now)
     runtime.store.set_state("v3_last_scan_ms", now)
     metrics.record_scan()
-    best = [item["signal"].to_dict() for item in scanner.best_setups()]
+    best = [_payload(item["signal"]) for item in scanner.best_setups()]
     return {
         **scanner.to_dict(),
         "mode": runtime.mode,
@@ -250,6 +264,38 @@ async def status() -> dict[str, Any]:
         "recent": [r for r in runtime.store.recent_signals(limit=10)],
         "health": snap.to_dict(),
         "errors": metrics.recent_errors(limit=10),
+    }
+
+
+@app.get("/api/v3/alerts")
+async def alerts(_: None = Depends(require_api_token)) -> dict[str, Any]:
+    """Состояние и пороги авто-сигналов (то же, что показывает «🔔 АВТО-СИГНАЛЫ»)."""
+    cfg = runtime.cfg
+    store = runtime.store
+
+    def _state(key: str, default: str = "0") -> str:
+        return store.get_state(key, default) or default
+
+    return {
+        "enabled": _state("v3_alerts_enabled", "1" if cfg.ALERTS_ENABLED else "0") in ("1", "true", "True"),
+        "interval_seconds": cfg.WATCHER_INTERVAL_SECONDS,
+        "thresholds": {
+            "min_quality": cfg.ALERT_MIN_QUALITY,
+            "min_bot_confidence": cfg.ALERT_MIN_BOT_CONFIDENCE,
+            "min_data_confidence": cfg.ALERT_MIN_DATA_CONFIDENCE,
+            "max_risk_score": cfg.ALERT_MAX_RISK_SCORE,
+            "min_rr": cfg.ALERT_MIN_RR,
+            "require_fresh": cfg.ALERT_REQUIRE_FRESH,
+            "cooldown_seconds": cfg.COOLDOWN_SECONDS,
+            "max_per_cycle": cfg.ALERT_MAX_PER_CYCLE,
+        },
+        "last_cycle_ms": int(_state("v3_last_cycle_ms")),
+        "sent_total": int(_state("v3_alerts_sent")),
+        "last_alert_ms": int(_state("v3_last_alert_ms")),
+        "last_alert_symbol": _state("v3_last_alert_symbol", ""),
+        "last_suppressed": _state("v3_last_suppressed", ""),
+        "active_signals": len(runtime.lifecycle.active()),
+        "ts_ms": now_ms(),
     }
 
 

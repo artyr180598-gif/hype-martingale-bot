@@ -171,18 +171,54 @@ BTCUSDT,ETHUSDT` остаётся точечным режимом. Фаза им
 
 | Factor | Max points |
 |---|---|
-| Trend alignment | 15 |
-| Market structure | 15 |
-| Momentum | 15 |
+| Trend alignment | 13 |
+| Market structure | 13 |
+| Momentum | 12 |
 | Volume | 12 |
 | Volatility | 10 |
 | Order flow | 10 |
 | Derivatives | 10 |
 | Liquidity | 6 |
-| BTC context | 7 |
+| Market context (BTC/ETH) | 6 |
+| Impulse readiness (emergence) | 8 |
+
+Сумма весов = 100. Таблица сверяется с ``v3/analysis/scoring.py`` — при
+изменении весов правьте оба места.
 
 Risk penalties: wide spread, overheated funding, timeframe conflicts,
-uncertain/high-vol regime, poor R:R, отсутствие биржевого timestamp, etc.
+uncertain/high-vol regime, poor R:R, exhausted impulse, absence of an
+exchange timestamp, etc.
+
+### «Уверенность бота» — третья метрика
+
+`v3/analysis/confidence.py` собирает отдельный, явно названный процент:
+насколько независимые анализы согласны между собой. Он считается из уже
+готового сигнала (без новых запросов), поэтому live, бэктест, API и SQLite
+видят одну цифру; разбор пишется в `features.bot_confidence`.
+
+| Компонент | Вес по умолчанию | Источник |
+|---|---|---|
+| quality | 34% | оценка сетапа |
+| data | 16% | полнота/свежесть реальных данных (stale режет вдвое) |
+| trend | 16% | доля таймфреймов в сторону сделки + конфликты |
+| confirm | 14% | Volume / Order Flow / Derivatives из score breakdown |
+| risk | 10% | risk score + потенциал к риску |
+| impulse | 10% | ранний отбор (фаза и совпадение направления) |
+
+Это НЕ вероятность прибыли — оговорка печатается рядом с каждой цифрой.
+Веса: `BOT_CONFIDENCE_WEIGHTS` (нормируются автоматически).
+
+### Авто-сигналы
+
+`v3/alerts.py` — порог «будить пользователя или нет»: качество
+`ALERT_MIN_QUALITY`, уверенность бота `ALERT_MIN_BOT_CONFIDENCE`, полнота
+данных `ALERT_MIN_DATA_CONFIDENCE`, риск `ALERT_MAX_RISK_SCORE`, потенциал к
+риску `ALERT_MIN_RR`, свежесть, фаза импульса (не `EXHAUSTED`), наличие стопа
+и ≥2 целей. `V3Watcher` сохраняет ВСЕ наблюдения, а в чат отправляет только
+прошедшие порог (не больше `ALERT_MAX_PER_CYCLE` за цикл, cooldown
+`COOLDOWN_SECONDS` на символ). Пауза/включение и «Проверить сейчас» — в
+разделе «🔔 АВТО-СИГНАЛЫ» (callback `alerts`, `alerts:toggle`, `alerts:now`),
+состояние — в `GET /api/v3/alerts`.
 
 ## NO TRADE is a feature
 
@@ -271,13 +307,15 @@ Interactive UI (inline keyboards, pagination, edit-in-place):
 * 🔎 СКАНИРОВАТЬ РЫНОК / 🧠 АНАЛИЗ РЫНКА — Stage1+Stage2 scan
 * 🔥 ЛУЧШИЕ LONG / 🔻 ЛУЧШИЕ SHORT / ⭐ ТОП ВОЗМОЖНОСТИ — filtered setups
 * 🔍 АНАЛИЗ МОНЕТЫ — coin picker + full card (`🔄 ОБНОВИТЬ`, `📈 PRO`)
+* 🔔 АВТО-СИГНАЛЫ — статус фонового поиска, пороги, пауза, «Проверить сейчас»
 * 📊 МОЙ РЫНОК — market overview (BTC/ETH/global/F&G/movers)
 * ⚙️ НАСТРОЙКИ — per-user mode/deposit/risk (SQLite)
 * 📚 ПОМОЩЬ — glossary (RSI, ATR, ADX, BOS/CHoCH, funding, OI, R:R, ...)
 
 Commands still work: `/help`, `/status`, `/signal BTCUSDT`,
-`/signal BTCUSDT pro`, `/scan`, `/scan pro`, `/market`,
-`/walkforward BTCUSDT [15m]`. Rendering lives in `v3/report.py`,
+`/signal BTCUSDT pro`, `/scan`, `/scan pro`, `/market`, `/alerts`,
+`/walkforward BTCUSDT [15m]`. `/start` показывает приветствие: что умеет бот,
+как читать его три метрики и с чего начать. Rendering lives in `v3/report.py`,
 `v3/tg/render.py`; keyboards in `v3/tg/keyboards.py`; per-user settings in
 `v3/tg/settings.py`.
 
@@ -299,7 +337,11 @@ Root `.env` and `v3/.env.example` are both read. Key variables:
 `CONFIDENCE_MIN`,
 `MIN_RISK_REWARD`, `MAX_RISK_SCORE_TO_ENTER`, `ATR_SL_MULTIPLIER`,
 `ATR_TP_MULTIPLIER`, `RISK_PER_TRADE_PCT`, `MAX_POSITION_PCT`,
-`MAX_LEVERAGE`, `COOLDOWN_SECONDS`, `S/A/B/C_TIER_MIN`.
+`MAX_LEVERAGE`, `COOLDOWN_SECONDS`, `S/A/B/C_TIER_MIN`,
+`WATCHER_INTERVAL_SECONDS`, `ALERTS_ENABLED`, `ALERT_MIN_QUALITY`,
+`ALERT_MIN_BOT_CONFIDENCE`, `ALERT_MIN_DATA_CONFIDENCE`,
+`ALERT_MAX_RISK_SCORE`, `ALERT_MIN_RR`, `ALERT_MAX_PER_CYCLE`,
+`ALERT_CHAT_IDS`, `BOT_CONFIDENCE_WEIGHTS`, `BOT_CONFIDENCE_HIGH_MIN`.
 
 ## Security & principle
 

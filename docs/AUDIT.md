@@ -54,7 +54,8 @@
   потому, что `src/data/collector.py` построен на нём (реальный общий слой
   конфигурации; дублирование документируем, не ломаем Railway env).
 * `WATCH_INTERVAL_SECONDS` в `Settings` не используется v3 (watcher использует
-  `SCAN_INTERVAL_SECONDS`) — документировано как legacy.
+  `WATCHER_INTERVAL_SECONDS`, `SCAN_INTERVAL_SECONDS` остался у API-сканов) —
+  документировано как legacy.
 * `v3/validator.py` — не удаляем: **подключаем** как инвариант публикации.
 
 ## План модернизации
