@@ -207,3 +207,115 @@ def test_walk_points_go_forward_and_stay_inside_snapshot(snapshot: dict):
     # последняя точка — закрытие последней ЗАКРЫТОЙ свечи входного ТФ
     assert points[-1] == LAST_CLOSED_15M_OPEN + TF_15M_MS
     assert int(snapshot["klines"]["15m"][-1][0]) + TF_15M_MS > snapshot["captured_at_ms"]
+
+
+# ════════════════════════════════════════════════════════════════
+#  ДЛИННАЯ РЕАЛЬНАЯ СЕРИЯ + БЭКТЕСТ НА НЕЙ
+# ════════════════════════════════════════════════════════════════
+SERIES_FIXTURE = Path(__file__).parent / "fixtures" / "okx_btcusdt_15m_300.json"
+SERIES_ROWS = 300
+SERIES_OLDEST_TS = 1788083100000   # 2026-08-30 09:45 UTC
+SERIES_NEWEST_TS = 1788352200000   # 2026-09-02 12:30 UTC (свеча ещё формировалась)
+
+
+@pytest.fixture(scope="module")
+def series_raw() -> dict:
+    return json.loads(SERIES_FIXTURE.read_text(encoding="utf-8"))
+
+
+def test_series_fixture_is_a_real_okx_series(series_raw: dict):
+    """Фикстура — дословный ответ OKX, а не синтетика."""
+    assert series_raw["kind"] == "okx_candles_v1"
+    assert series_raw["inst_id"] == "BTC-USDT-SWAP"
+    assert "okx.com/api/v5/market/candles" in series_raw["source"]
+    rows = series_raw["rows"]
+    assert len(rows) == SERIES_ROWS
+    assert {len(r) for r in rows} == {9}
+    ts = [int(r[0]) for r in rows]
+    assert ts == sorted(ts, reverse=True), "OKX отдаёт свечи от новых к старым"
+    assert ts[0] == SERIES_NEWEST_TS and ts[-1] == SERIES_OLDEST_TS
+    # равномерная сетка 15m без пропусков — иначе пересборка 1h/4h врёт
+    assert {ts[i - 1] - ts[i] for i in range(1, len(ts))} == {TF_15M_MS}
+    # ровно одна недоформированная свеча (самая свежая)
+    assert [str(r[8]) for r in rows].count("0") == 1
+    assert str(rows[0][8]) == "0"
+    # OHLC непротиворечив на каждой свече
+    for r in rows:
+        o, h, low, c = (float(r[i]) for i in (1, 2, 3, 4))
+        assert low <= min(o, c) and max(o, c) <= h, r
+        assert float(r[6]) > 0
+
+
+def test_load_candles_series_drops_the_forming_bar():
+    from v3.replay import load_candles_series
+
+    series = load_candles_series(SERIES_FIXTURE)
+    assert series["symbol"] == "BTCUSDT"
+    assert series["tf"] == "15m"
+    assert series["rows"] == SERIES_ROWS
+    assert series["forming_dropped"] == 1
+    df = series["df"]
+    assert len(df) == SERIES_ROWS - 1 == series["closed"]
+    assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
+    assert int(df["ts"].iloc[0]) == SERIES_OLDEST_TS
+    # недоформированная свеча в историю не попала
+    assert int(df["ts"].iloc[-1]) == SERIES_NEWEST_TS - TF_15M_MS
+    assert df["ts"].is_monotonic_increasing
+    assert df[["open", "high", "low", "close", "volume"]].notna().all().all()
+
+
+def test_load_candles_series_rejects_other_formats(tmp_path: Path, series_raw: dict):
+    from v3.replay import load_candles_series
+
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text(json.dumps({**series_raw, "kind": "okx_capture_v1"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="okx_candles_v1"):
+        load_candles_series(wrong)
+
+
+def test_bot_confidence_reads_the_attached_report():
+    """В отчёте — сводный процент бота, а не полнота данных (0..1)."""
+    from v3.replay import _bot_confidence
+
+    class Trade:
+        signal = {"features": {"bot_confidence": {"percent": 57.5}}}
+
+    assert _bot_confidence(Trade()) == 57.5
+
+    class Empty:
+        signal = {}
+
+    assert _bot_confidence(Empty()) == 0.0
+
+
+def test_backtest_runs_on_real_series_and_finds_setups(capsys):
+    """Реальные данные: бэктестер исполняется И движок находит сетапы.
+
+    До этого вся «реальная» проверка показывала только NO_TRADE — не было
+    доказательства, что бот вообще способен найти вход на живом рынке.
+    """
+    from v3.replay import run_replay_backtest
+
+    code = run_replay_backtest(str(SERIES_FIXTURE), warmup=120)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "БЭКТЕСТ НА РЕАЛЬНЫХ СВЕЧАХ · BTCUSDT" in out
+    assert "закрытых использовано: 299" in out
+    assert "точек решения: 100" in out          # 299 баров - warmup 120 - 3
+    assert "win_rate" in out and "profit_factor" in out
+    # ключевое утверждение: на РЕАЛЬНЫХ свечах движок выдаёт исполняемые сетапы
+    assert "исполняемых сетапов: 5" in out
+    assert "Сделок нет" not in out
+    # живые пороги печатаются честно, включая нуль по авто-сигналам
+    assert "авто-сигнал" in out and "0 из 5" in out
+    assert "не гарантирует будущих результатов" in out
+
+
+def test_cli_exposes_the_backtest_flag():
+    from v3.cli import build_parser
+
+    args = build_parser().parse_args(["replay", str(SERIES_FIXTURE), "--backtest", "--warmup", "150"])
+    assert args.command == "replay"
+    assert args.backtest is True
+    assert args.warmup == 150
+    assert build_parser().parse_args(["replay", "x.json"]).backtest is False

@@ -18,7 +18,9 @@
   (пример: ``v3/tests/fixtures/okx_btcusdt_swap_capture.json``);
 * ``kind: "snapshot_v1"`` — нормализованный снапшот; его пишет
   ``python -m v3 record BTCUSDT --out data/replay/btcusdt.json`` через
-  прод-сервис ``FuturesDataService`` (нужен доступ к бирже).
+  прод-сервис ``FuturesDataService`` (нужен доступ к бирже);
+* ``kind: "okx_candles_v1"`` — длинная серия свечей одного таймфрейма для
+  бэктеста (``--backtest``); тикера и стакана в ней нет и не нужно.
 
 Про время
 ---------
@@ -29,7 +31,13 @@
 Команды
 -------
     python -m v3 replay <файл> [--mode pro] [--walk 10] [--step 3] [--json]
+    python -m v3 replay <файл> --backtest [--warmup 120] [--json]
     python -m v3 record BTCUSDT [--out data/replay/btcusdt.json]
+
+Третья строка — прогон той же серии реальных свечей через прод-бэктестер
+(``v3/backtest.py``): метрики (win rate, profit factor, просадка) считаются на
+реальных барах, а не на синтетике. Пример файла: фикстура
+``v3/tests/fixtures/okx_btcusdt_15m_300.json`` (300 свечей 15m BTC-USDT-SWAP).
 """
 
 from __future__ import annotations
@@ -608,6 +616,202 @@ def run_replay(
     print(res.card)
     print("\n" + "=" * 68)
     print("Источник данных: снятый снапшот биржи (офлайн, без сети и без синтетики)")
+    return 0
+
+
+# ════════════════════════════════════════════════════════════════
+#  БЭКТЕСТ НА РЕАЛЬНЫХ СВЕЧАХ (без сети)
+# ════════════════════════════════════════════════════════════════
+def load_candles_series(path: str | Path) -> dict[str, Any]:
+    """Серия РЕАЛЬНЫХ свечей одного таймфрейма → история для ``run_backtest``.
+
+    Формат ``okx_candles_v1`` — дословные строки биржи (фикстура
+    ``v3/tests/fixtures/okx_btcusdt_15m_300.json``). Свеча с ``confirm == "0"``
+    ещё не закрыта, поэтому отбрасывается: бэктестер не должен видеть
+    незаконченный бар, иначе это заглядывание в будущее.
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if raw.get("kind") != "okx_candles_v1":
+        got = raw.get("kind") or "не указан"
+        raise ValueError(f"нужен формат okx_candles_v1 (серия свечей), в файле {got!r}")
+    rows = raw.get("rows") or []
+    closed_rows = [r for r in rows if len(r) > 8 and str(r[8]) == "1"]
+    parsed = parse_okx_candles(closed_rows)
+    df = pd.DataFrame(parsed, columns=["ts", "open", "high", "low", "close", "volume"])
+    return {
+        "symbol": _okx_symbol(raw),
+        "tf": str(raw.get("bar") or "15m"),
+        "df": df,
+        "rows": len(rows),
+        "closed": len(parsed),
+        "forming_dropped": len(rows) - len(closed_rows),
+        "source": raw.get("source") or "okx",
+    }
+
+
+def _bot_confidence(trade: Any) -> float:
+    """Уверенность бота (%) из разбора, приложенного к сигналу.
+
+    ``signal.confidence`` — это ДРУГАЯ величина (полнота реальных данных 0..1),
+    поэтому в отчёте показываем именно сводный процент из ``features``.
+    """
+    try:
+        report = (trade.signal or {}).get("features", {}).get("bot_confidence") or {}
+        return float(report.get("percent") or 0.0)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def _print_live_gates(trades: list[Any], cfg: SignalConfig) -> None:
+    """Сравнить сетапы бэктеста с порогами, по которым их судил бы прод.
+
+    Бэктестер собирает бандл сам и в нём честно нет финансирования, стакана и
+    глобального контекста → ``data_confidence`` там всегда ≈0.30 (артефакт
+    синтетического бандла, а не рынка). Сравниваем поэтому только те пороги,
+    которые зависят от рынка: качество, R:R, риск и число целей.
+    """
+    def _num(sig: dict[str, Any], key: str) -> float:
+        try:
+            return float(sig.get(key) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    pass_publish = 0
+    pass_alert = 0
+    for trade in trades:
+        sig = trade.signal or {}
+        score, rr = _num(sig, "score"), _num(sig, "rr")
+        risk = _num(sig, "risk_score")
+        targets = len(sig.get("targets") or [])
+        bot_conf = _bot_confidence(trade)
+        if (
+            score >= cfg.QUALITY_MIN
+            and rr >= cfg.MIN_RISK_REWARD
+            and risk <= cfg.MAX_RISK_SCORE_TO_ENTER
+            and targets >= 2
+        ):
+            pass_publish += 1
+        if (
+            score >= cfg.ALERT_MIN_QUALITY
+            and bot_conf >= cfg.ALERT_MIN_BOT_CONFIDENCE
+            and rr >= cfg.ALERT_MIN_RR
+            and risk <= cfg.ALERT_MAX_RISK_SCORE
+        ):
+            pass_alert += 1
+
+    total = len(trades)
+    print("\nПроверка сетапов живыми порогами (рыночные критерии):")
+    print(
+        f"  публикация (качество ≥{cfg.QUALITY_MIN:.0f}, R:R ≥{cfg.MIN_RISK_REWARD:.1f}, "
+        f"риск ≤{cfg.MAX_RISK_SCORE_TO_ENTER}, целей ≥2): {pass_publish} из {total}"
+    )
+    print(
+        f"  авто-сигнал (качество ≥{cfg.ALERT_MIN_QUALITY:.0f}, уверенность ≥{cfg.ALERT_MIN_BOT_CONFIDENCE:.0f}%, "
+        f"R:R ≥{cfg.ALERT_MIN_RR:.1f}, риск ≤{cfg.ALERT_MAX_RISK_SCORE}): {pass_alert} из {total}"
+    )
+    print(
+        "  ℹ️ Полнота данных в бэктесте всегда ≈30% (нет funding/стакана/глобального контекста) — "
+        f"порог публикации {cfg.CONFIDENCE_MIN:.2f} к ней не применяется."
+    )
+
+
+def run_replay_backtest(
+    path: str,
+    warmup: int = 120,
+    as_json: bool = False,
+    cfg: SignalConfig | None = None,
+) -> int:
+    """``python -m v3 replay <файл> --backtest`` — бэктест на реальных свечах.
+
+    Это тот же ``v3.backtest.run_backtest``, что и в команде ``backtest``
+    (та же симуляция: комиссия, слиппедж, стоп проверяется пессимистично,
+    частичные выходы), но вместо запросов к бирже история берётся из
+    дословно снятого файла. Сети нет — результат воспроизводим.
+    """
+    from v3.backtest import TF_MS, _resample, run_backtest
+
+    cfg = cfg or SignalConfig()
+    try:
+        series = load_candles_series(path)
+    except Exception as exc:  # noqa: BLE001 — CLI должен объяснить, а не упасть трейсом
+        print(f"❌ Не удалось прочитать серию свечей {path}: {exc}")
+        return 2
+
+    symbol, tf, df = series["symbol"], series["tf"], series["df"]
+    if df.empty:
+        print(f"❌ В {path} нет закрытых свечей — бэктест невозможен")
+        return 2
+    medium_tf = {"1m": "15m", "5m": "15m", "15m": "1h", "30m": "2h", "1h": "4h", "4h": "1d"}.get(tf, "1h")
+    macro_tf = {"1m": "4h", "5m": "4h", "15m": "4h", "30m": "4h", "1h": "1d", "4h": "1d"}.get(tf, "4h")
+
+    # Движку нужен сервис данных по контракту, но run_backtest его не дёргает:
+    # бандлы он собирает сам из истории. Источник — тот же SnapshotSource.
+    snapshot = {
+        "kind": "snapshot_v1",
+        "symbol": symbol,
+        "source": series["source"],
+        "captured_at_ms": int(df["ts"].iloc[-1]) + TF_MS.get(tf, 900_000),
+        "klines": {tf: df[["ts", "open", "high", "low", "close", "volume"]].values.tolist()},
+    }
+    data = FuturesDataService(source=SnapshotSource(snapshot), cfg=cfg)
+    engine = FuturesSignalEngine(data, cfg)
+
+    # Честно показываем, сколько старших ТФ реально доступно: бэктестер
+    # пересобирает их из этой же истории и отбрасывает ТФ короче 40 баров.
+    def _bars_of(target: str) -> int:
+        frame = _resample(df, target)
+        return 0 if frame is None else int(len(frame))
+
+    med_bars = _bars_of(medium_tf)
+    macro_bars = _bars_of(macro_tf)
+    avail = [f"{tf}: {len(df)}"]
+    avail.append(f"{medium_tf}: {med_bars}" + ("" if med_bars >= 40 else " (мало, <40)"))
+    avail.append(f"{macro_tf}: {macro_bars}" + ("" if macro_bars >= 40 else " (мало, <40)"))
+
+    res = run_backtest(
+        engine,
+        symbol,
+        df,
+        entry_tf=tf,
+        medium_tf=medium_tf,
+        macro_tf=macro_tf,
+        warmup=warmup,
+        cfg=cfg,
+    )
+
+    if as_json:
+        print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    print("=" * 68)
+    print(f"БЭКТЕСТ НА РЕАЛЬНЫХ СВЕЧАХ · {symbol} · источник {series['source']}")
+    print(f"Файл: {path}")
+    print(f"Свечей в файле: {series['rows']} → закрытых использовано: {series['closed']}"
+          f" (недоформированных отброшено: {series['forming_dropped']})")
+    print(f"Период: {_utc(int(df['ts'].iloc[0]))} → {_utc(int(df['ts'].iloc[-1]))}")
+    print(f"Таймфреймы движка: {' · '.join(avail)}")
+    print("=" * 68)
+    if res.metrics.get("error"):
+        print(f"❌ {res.metrics['error']} — нужно больше истории (минимум {warmup + 30} свечей)")
+        return 1
+    print(f"Баров: {res.bars} · точек решения: {res.signals} · исполняемых сетапов: {len(res.trades)}")
+    print("Метрики:")
+    for key, value in res.metrics.items():
+        print(f"  {key}: {value}")
+    if res.trades:
+        print("\nСделки:")
+        for t in res.trades:
+            print(
+                f"  {_utc(t.entry_ts)} {t.direction:<5} вход {t.entry_price:.1f} → выход {t.exit_price:.1f}"
+                f" · {t.exit_reason} · {t.r_multiple:+.2f}R ({t.pnl_pct:+.2f}%) · кач. {t.score:.0f}"
+                f" · увер. {_bot_confidence(t):.1f}% · данные {t.confidence * 100:.0f}% · баров {t.bars_held}"
+            )
+        _print_live_gates(res.trades, cfg)
+    else:
+        print("\nСделок нет: ни одна точка не прошла фильтры качества/подтверждения.")
+    print("\n" + "─" * 68)
+    print("Тест на прошлых данных не гарантирует будущих результатов.")
+    print("Источник данных: дословно снятые свечи биржи (офлайн, без сети и без синтетики).")
     return 0
 
 

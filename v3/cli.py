@@ -546,6 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", default="", help="record: куда сохранить снапшот (default: data/replay/<SYMBOL>.json)")
     parser.add_argument("--walk", type=int, default=0, help="replay: сколько точек прохода по истории снять")
     parser.add_argument("--step", type=int, default=1, help="replay: шаг прохода в свечах входного ТФ")
+    parser.add_argument("--backtest", action="store_true", help="replay: прогнать реальные свечи через бэктестер")
     parser.add_argument("--json", action="store_true", help="replay: напечатать результат JSON-ом")
     return parser
 
@@ -614,6 +615,10 @@ def main(argv: list[str] | None = None) -> int:
         if not args.symbol:
             print("Укажите файл снапшота: python -m v3 replay v3/tests/fixtures/okx_btcusdt_swap_capture.json")
             return 2
+        if args.backtest:
+            from v3.replay import run_replay_backtest
+
+            return run_replay_backtest(args.symbol, args.warmup, args.json, _cfg)
         from v3.replay import run_replay
 
         return run_replay(args.symbol, args.mode, args.walk, args.step, args.json, _cfg)

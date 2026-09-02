@@ -219,6 +219,9 @@ python -m v3 daemon                        # API + watcher + Telegram
 # прогон движка на РЕАЛЬНЫХ данных без сети (снапшот, снятый с биржи)
 python -m v3 replay v3/tests/fixtures/okx_btcusdt_swap_capture.json
 python -m v3 record BTCUSDT --out data/replay/btcusdt.json
+
+# бэктест на РЕАЛЬНЫХ свечах (300 баров 15m BTC-USDT-SWAP с OKX, без сети)
+python -m v3 replay v3/tests/fixtures/okx_btcusdt_15m_300.json --backtest
 ```
 
 ## REST API (порт 8400)
@@ -286,7 +289,7 @@ make check   # ruff + pytest
 make test    # pytest
 ```
 
-**155 тестов**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
+**161 тест**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
 gate, lifecycle, backtest-метрики (+ разбивка regime/direction), калибровка,
 Telegram core/авторизация/callback'и/настройки, TTL-кэш, 429 retry,
 структурный entry zone, publisher/stale validation, config validation,
@@ -299,7 +302,10 @@ fail-closed без тикера/свечей/timestamp, WS-ликвидации 
 снапшот OKX BTC-USDT-SWAP — 5 таймфреймов × 60 свечей, тикер, фандинг,
 открытый интерес, стакан; движок проходит живой путь `analyze()` без сети,
 проверка свежести свечей не даёт ложных «данные устарели», отстающий график
-по-прежнему виден, неснятые источники показываются как «н/д»).
+по-прежнему виден, неснятые источники показываются как «н/д»; плюс серия из
+300 реальных свечей 15m → бэктест `v3/backtest.py` исполняется офлайн,
+недоформированная свеча отбрасывается, движок находит сетапы на живом рынке
+и их результат сравнивается с живыми порогами публикации/авто-сигнала).
 
 ## Только реальные данные (политика платформы)
 

@@ -85,7 +85,7 @@ src/core (logging/time/errors), src/config, src/analysis/waves
 | `v3/store.py` | SQLite signals/outcomes + cooldown lifecycle. |
 | `v3/watcher.py` | background lifecycle observer (`v3 watch`). |
 | `v3/backtest.py` | walk-forward with fees, slippage, no look-ahead. |
-| `v3/replay.py` | offline run of the LIVE path on a captured exchange snapshot (`v3 replay` / `v3 record`). |
+| `v3/replay.py` | offline run of the LIVE path on a captured exchange snapshot (`v3 replay` / `v3 replay --backtest` / `v3 record`). |
 | `v3/report.py` | beginner / pro Telegram rendering. |
 | `v3/api.py` | FastAPI endpoints. |
 | `v3/cli.py` | `signal`, `scan`, `backtest`, `walkforward`, `watch`, `bot`, `status`, `serve`, `replay`, `record`. |
@@ -328,6 +328,40 @@ python -m v3 record BTCUSDT --out data/replay/btcusdt.json
 того нет и в отчёте: источник отдаёт честную ошибку, и бот показывает «н/д»
 вместо выдуманных цифр — таблица «ЧТО В СНАПШОТЕ РЕАЛЬНОЕ» печатается в начале
 прогона.
+
+### Бэктест на реальных свечах (`--backtest`)
+
+Реплей отвечает на вопрос «что бы бот сказал в один момент». `--backtest`
+отвечает на вопрос «нашёл бы он вообще сетап и чем бы это кончилось»: длинная
+серия реальных свечей прогоняется через прод-бэктестер `v3/backtest.py`
+(та же комиссия 0.055%, слиппедж 0.02%, пессимистичная проверка стопа,
+частичные выходы) — но вместо запросов к бирже история берётся из дословно
+снятого файла формата `okx_candles_v1`.
+
+```bash
+python -m v3 replay v3/tests/fixtures/okx_btcusdt_15m_300.json --backtest
+python -m v3 replay <серия.json> --backtest --warmup 150 --json
+```
+
+В репозитории лежит фикстура `okx_btcusdt_15m_300.json`: 300 свечей 15m
+BTC-USDT-SWAP с OKX (2026-08-30 09:45 → 2026-09-02 12:30 UTC), последняя свеча
+недоформирована (`confirm="0"`) и отбрасывается — заглядывания в будущее нет.
+
+Результат прогона (299 закрытых баров, 100 точек решения) — **отрицательный,
+и это важнее красивых цифр**: движок нашёл 5 исполняемых сетапов (все SHORT,
+в нисходящем тренде), из них 1 прибыльный; win rate 20%, profit factor 0.345,
+матожидание −0.655R, суммарно −3.276R, максимальная просадка 4.36R. Лучший
+сетап — качество 61 и уверенность 57.8%, то есть до порога авто-сигнала
+(качество ≥78, уверенность ≥70%) ни один не дотянул: живой бот промолчал бы,
+что совпадает с прогоном одного момента выше.
+
+Ограничение, которое бэктест печатает сам: funding, стакана и глобального
+контекста в серии нет, поэтому полнота данных там всегда ≈30% (артефакт
+синтетического бандла, а не рынка) — порог публикации `CONFIDENCE_MIN=0.45` к
+ней не применяется, сравниваются только рыночные критерии (качество, R:R,
+риск, число целей). Таймфреймы движка пересобираются из этой же истории: на
+300 свечах 15m получается 1h: 76 баров, а 4h: 20 баров — макро-ТФ короче 40
+баров бэктестер отбрасывает, и это видно в шапке отчёта.
 
 ## Observability (`v3/observability.py`)
 
