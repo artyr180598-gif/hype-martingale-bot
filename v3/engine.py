@@ -24,7 +24,7 @@ from typing import Any
 
 from v3.ai import build_reasoner
 from v3.analysis.context import build_context
-from v3.analysis.derivatives import analyze_derivatives
+from v3.analysis.derivatives import analyze_derivatives, oi_change_pct
 from v3.analysis.emergence import detect_emergence
 from v3.analysis.levels import build_levels
 from v3.analysis.orderflow import analyze_orderflow
@@ -64,6 +64,39 @@ def _weighted_vote(views: list[TimeframeView]) -> tuple[str, float]:
     if score <= -TREND_DIRECTION_TRUST:
         return "down", score
     return "flat", score
+
+
+def _emergence_snapshot(bundle: DataBundle, tf_map: dict[str, Any], cfg: SignalConfig):
+    """Build the early-impulse feature from a closed intermediate timeframe.
+
+    The explicit DataFrame selection is intentional: ``DataFrame.__bool__`` is
+    undefined, so ``a or b`` here would intermittently crash real analyses.
+    """
+    if not cfg.SCAN_EMERGENCE_ENABLED or bundle.price <= 0:
+        return None
+    tf = cfg.INTERMEDIATE_TF if cfg.INTERMEDIATE_TF in tf_map else cfg.ENTRY_TF
+    df = tf_map.get(tf)
+    if df is None or len(df) < 30:
+        return None
+    tf_ms = {
+        "1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+        "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "1d": 86_400_000,
+    }.get(tf, 3_600_000)
+    bars_24h = max(12, int(86_400_000 / tf_ms))
+    tail = df.tail(bars_24h)
+    # ``open_interest_history`` stores raw OI, not percentages. Keep the
+    # conversion in one helper so emergence and derivatives use the same value.
+    oi_delta = oi_change_pct(bundle)
+    return detect_emergence(
+        df,
+        price_24h_pct=bundle.price_24h_pct,
+        high_24h=float(tail["high"].max()) if len(tail) else None,
+        low_24h=float(tail["low"].min()) if len(tail) else None,
+        btc_24h_pct=bundle.btc_price_24h_pct,
+        oi_delta_pct=oi_delta,
+        funding_rate=bundle.funding_rate,
+        cfg=cfg,
+    )
 
 
 class FuturesSignalEngine:
@@ -133,7 +166,6 @@ class FuturesSignalEngine:
         signal = self.evaluate_bundle(bundle, tf_map, btc_tf=btc_df)
         signal.source = getattr(self.data, "mode", "") or ""
         signal.duration_sec = time.time() - started
-        self._attach_emergence(signal, bundle, tf_map)
         self._cache[key] = (time.time(), signal)
         metrics.mark_mode(getattr(self.data, "mode", "unknown"), True)
         metrics.record_analysis(symbol, signal.duration_sec)
@@ -191,6 +223,10 @@ class FuturesSignalEngine:
         derivatives = analyze_derivatives(bundle, self.cfg)
         entry_view = views[0]
         orderflow = analyze_orderflow(bundle.orderbook, entry_view, self.cfg)
+        # Ранний импульс считается в том же pure-пути, что и live, и backtest.
+        # Поэтому его можно использовать как независимый фактор качества, не
+        # создавая расхождения между исторической проверкой и продакшеном.
+        emergence = _emergence_snapshot(bundle, tf_map, self.cfg)
 
         direction_vote, vote_strength = _weighted_vote(views)
         direction = "WAIT"
@@ -238,6 +274,7 @@ class FuturesSignalEngine:
         score = score_signal(
             bundle, views, derivatives, orderflow, context, regime, levels, rsk,
             direction if direction in ("LONG", "SHORT") else "WAIT", self.cfg,
+            emergence=emergence,
         )
 
         if direction in ("LONG", "SHORT") and levels is not None:
@@ -348,7 +385,10 @@ class FuturesSignalEngine:
             risks=dedupe(risks[:8]),
             invalidation=levels.invalidation if levels is not None else "",
             no_trade_reasons=no_trade[:8],
-            features=features_dict(views, derivatives, orderflow, context, regime, bundle.news_items, scenario=scenario),
+            features=features_dict(
+                views, derivatives, orderflow, context, regime, bundle.news_items,
+                scenario=scenario, emergence=emergence,
+            ),
             score_breakdown=score,
             risk_brief=risk_brief,
             scenario=scenario,
@@ -372,42 +412,19 @@ class FuturesSignalEngine:
         return signal
 
     def _attach_emergence(self, signal: TradingSignal, bundle: DataBundle, tf_map: dict[str, Any]) -> None:
-        """«Намечается движение» — признак объяснения/ранжирования, НЕ гейт.
+        """Compatibility helper: attach the same pure early-impulse snapshot.
 
-        В бэктесте (``evaluate_bundle``) не считается: у нас нет живого OI/24h
-        контекста на исторических барах, а подставлять фикции нельзя.
+        ``evaluate_bundle`` already attaches it. Keeping this method idempotent
+        protects integrations that called it directly in older deployments.
         """
-        if not self.cfg.SCAN_EMERGENCE_ENABLED or bundle.price <= 0:
+        if "emergence" in signal.features:
             return
         try:
-            edf = tf_map.get(self.cfg.INTERMEDIATE_TF) or tf_map.get(self.cfg.ENTRY_TF)
-            if edf is None or len(edf) < 30:
+            emergence = _emergence_snapshot(bundle, tf_map, self.cfg)
+            if emergence is None or not emergence.enabled:
                 return
-            # 24h-диапазон оцениваем по последним ~24 барам целевого ТФ
-            tf_ms = self.TF_MS_MAP.get(self.cfg.INTERMEDIATE_TF, 3_600_000) if self.cfg.INTERMEDIATE_TF in tf_map else self.TF_MS_MAP.get(self.cfg.ENTRY_TF, 3_600_000)
-            bars_24h = max(12, int(86_400_000 / tf_ms))
-            tail = edf.tail(bars_24h)
-            oi_delta = None
-            if bundle.open_interest_history:
-                oi_delta = float(bundle.open_interest_history[-1][1])
-            elif bundle.oi_change_24h_pct is not None:
-                oi_delta = float(bundle.oi_change_24h_pct)
-            e = detect_emergence(
-                edf,
-                price_24h_pct=bundle.price_24h_pct,
-                high_24h=float(tail["high"].max()) if len(tail) else None,
-                low_24h=float(tail["low"].min()) if len(tail) else None,
-                btc_24h_pct=bundle.btc_price_24h_pct,
-                oi_delta_pct=oi_delta,
-                funding_rate=bundle.funding_rate,
-                cfg=self.cfg,
-            )
-            if not e.enabled:
-                return
-            signal.features["emergence"] = e.to_dict()
-            notes = [n for n in e.notes if n]
-            if notes:
-                signal.reasons = dedupe(signal.reasons + notes)[:10]
+            signal.features["emergence"] = emergence.to_dict()
+            signal.reasons = dedupe(signal.reasons + [n for n in emergence.notes if n])[:10]
         except Exception as exc:  # noqa: BLE001
             signal.risks.append(f"emergence degraded: {exc}")
 
@@ -588,6 +605,7 @@ def features_dict(
     regime: RegimeSnapshot,
     news: list[dict[str, Any]] | None = None,
     scenario: str = "",
+    emergence: Any | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "timeframes": [v.to_dict() for v in views],
@@ -598,6 +616,8 @@ def features_dict(
     }
     if scenario:
         out["scenario"] = scenario
+    if emergence is not None and getattr(emergence, "enabled", False):
+        out["emergence"] = emergence.to_dict()
     if news:
         out["news"] = news
     return out

@@ -56,9 +56,14 @@ class RuleBasedReasoner:
                     f"Ликвидность: {of.get('liquidity_grade')}, "
                     f"перекос стакана {float(of.get('imbalance', 0)):+.2f}."
                 )
-            if em and float(em.get("ignition", 0.0) or 0.0) >= 50.0:
+            if (
+                em
+                and float(em.get("ignition", 0.0) or 0.0) >= 50.0
+                and em.get("phase", "EARLY") != "EXHAUSTED"
+            ):
+                phase_text = "первые признаки" if em.get("phase") == "EARLY" else "первый импульс подтверждён"
                 reasons.append(
-                    f"Намечается движение (подогрев {float(em.get('ignition', 0.0)):.0f}/100): "
+                    f"{phase_text.capitalize()} (готовность {float(em.get('ignition', 0.0)):.0f}/100): "
                     + "; ".join([n for n in em.get("notes", []) if n][:2])
                 )
             pos = der.get("positioning")

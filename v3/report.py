@@ -203,9 +203,10 @@ def render_pro(signal: TradingSignal) -> str:
     e = (signal.features or {}).get("emergence") or {}
     if e:
         lines.append(
-            f"⚡ Emergence {e.get('ignition', 0):.0f}/100 | RVOL {e.get('rvol', 1):.2f} | "
-            f"squeeze_release {e.get('squeeze_release')} | consol {e.get('consolidation')} | "
-            f"dpos {e.get('dpos', 0.5):.2f} | hint {e.get('early_direction')}"
+            f"⚡ Emergence {e.get('ignition', 0):.0f}/100 | phase {e.get('phase', 'NEUTRAL')} | "
+            f"RVOL {e.get('rvol', 1):.2f} | pressure {e.get('breakout_pressure', 0):+.2f} | "
+            f"compression {e.get('compression_ratio', 1):.2f} | room {e.get('room_pct', 0):.0%} | "
+            f"hint {e.get('early_direction')}"
         )
     lines.extend([
         "",

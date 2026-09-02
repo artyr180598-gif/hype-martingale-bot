@@ -35,6 +35,10 @@ from v3.models import DataBundle
 logger = get_logger("v3.data")
 
 VALID_TFS = {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"}
+TF_MS = {
+    "1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+    "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "1d": 86_400_000,
+}
 
 _T = TypeVar("_T")
 
@@ -58,6 +62,22 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     out = out.dropna(subset=["ts", "open", "high", "low", "close", "volume"])
     out = out.drop_duplicates("ts", keep="last").sort_values("ts").reset_index(drop=True)
     return out
+
+
+def _closed_bars(df: pd.DataFrame, timeframe: str, now_ms: int | None = None) -> pd.DataFrame:
+    """Remove the still-forming exchange candle from a live REST response.
+
+    Bybit/Binance/MEXC normally include the current candle. Its volume and
+    close are not final, so using it makes RVOL, squeeze and breakout tests
+    repaint during the bar. Backtest code already passes closed slices; this
+    helper is only applied at the data-service boundary.
+    """
+    if df.empty or timeframe not in TF_MS:
+        return df
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    close_at = df["ts"].astype("int64") + TF_MS[timeframe]
+    closed = df[close_at <= now]
+    return closed.reset_index(drop=True)
 
 
 class FuturesDataService:
@@ -183,7 +203,7 @@ class FuturesDataService:
 
         async def _fetch() -> pd.DataFrame:
             df = await self.source.get_klines(symbol.upper(), timeframe, limit)
-            return _clean_ohlcv(df)
+            return _closed_bars(_clean_ohlcv(df), timeframe)
 
         return await self._cached(key, self.cfg.KLINES_CACHE_TTL_SECONDS, _fetch)
 
@@ -193,7 +213,7 @@ class FuturesDataService:
 
         async def _fetch() -> pd.DataFrame:
             df = await self.source.get_history(symbol.upper(), timeframe, bars)
-            return _clean_ohlcv(df)
+            return _closed_bars(_clean_ohlcv(df), timeframe)
 
         return await self._cached(key, self.cfg.KLINES_CACHE_TTL_SECONDS, _fetch)
 

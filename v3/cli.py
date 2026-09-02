@@ -179,7 +179,8 @@ def _print_startup_report(
         print(f"Telegram: включён (admin chat: {admin}, {auth})")
     else:
         print("Telegram: выключен — задайте TELEGRAM_BOT_TOKEN (алиас TELEGRAM_TOKEN) в .env")
-    print(f"Watcher: запущен, интервал {_cfg.SCAN_INTERVAL_SECONDS}с, watchlist: {len(watcher.watchlist)} символов")
+    scan_scope = "вся ликвидная вселенная (early impulse)" if getattr(watcher, "universe_scan", False) else f"watchlist: {len(watcher.watchlist)} символов"
+    print(f"Watcher: запущен, интервал {_cfg.SCAN_INTERVAL_SECONDS}с, поиск: {scan_scope}")
     if host is not None:
         print(f"API: http://{host}:{port} (Uvicorn running)")
     print("-" * 64)

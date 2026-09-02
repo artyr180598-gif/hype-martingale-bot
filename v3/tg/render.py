@@ -72,6 +72,10 @@ GLOSSARY: dict[str, str] = {
                    "фандинга и цены: входят ли новые деньги (OI растёт), не перегреты ли "
                    "лонги/шорты, нет ли капитуляции. Например: OI растёт + цена падает + "
                    "высокий фандинг = перегрев лонгов, риск резкой коррекции.",
+    "impulse_phase": "Фаза импульса: EARLY — база только просыпается; TRIGGERED — закрытая "
+                     "свеча уже подтвердила выход, но движение ещё не убежало; EXHAUSTED — "
+                     "движение слишком далеко, такой вход отбрасывается. Это фильтр времени, "
+                     "а не прогноз цены.",
     "cvd": "CVD (delta) — оценка агрессивных покупок/продаж по объёму баров. "
            "Используется как подтверждение, не как самостоятельный сигнал.",
     "entry": "Entry zone — зона входа (диапазон цен). HYPE якорит её на структуру "
@@ -96,7 +100,7 @@ def render_glossary(term: str) -> str:
 
 
 def version_line(cfg: SignalConfig | None = None) -> str:
-    """«🛠 Сборка: v3.2.0 · Раунд 4: …» — одна и та же строка во всех интерфейсах.
+    """«🛠 Сборка: v3.2.0 · Раунд 5: …» — одна и та же строка во всех интерфейсах.
 
     Зачем: без неё пользователь не может отличить свежий процесс от старого
     (код обновлён, а запущенный бот — прежний).
@@ -231,15 +235,20 @@ def render_setup_row(item: dict[str, Any], place: int, cfg: SignalConfig | None 
     emoji = "🟢" if sig.direction == "LONG" else "🔻"
     em = (sig.features or {}).get("emergence") or {}
     ignite = float(em.get("ignition", 0.0) or 0.0)
-    marker = " ⚡" if ignite >= cfg.EMERGENCE_IGNITION_MIN else ""
+    phase = str(em.get("phase", "NEUTRAL"))
+    marker = " ⚡" if ignite >= cfg.EMERGENCE_IGNITION_MIN and phase != "EXHAUSTED" else ""
     lines = [
         f"{place}. {emoji} **{sig.symbol}** — {sig.direction}{marker}",
         f"   Оценка сетапа: {quality_label(sig.quality, sig.tier, cfg)}",
         f"   • вход {sig.entry_zone[0]:.6g}–{sig.entry_zone[1]:.6g} · стоп {sig.stop_loss:.6g}",
     ]
-    if ignite >= cfg.EMERGENCE_IGNITION_MIN:
+    if ignite >= cfg.EMERGENCE_IGNITION_MIN and phase != "EXHAUSTED":
         hint = {"LONG": "вверх", "SHORT": "вниз"}.get(str(em.get("early_direction")), "")
-        lines.append("   ⚡ движение только намечается" + (f" (вероятно, {hint})" if hint else ""))
+        phase_text = {
+            "EARLY": "база просыпается",
+            "TRIGGERED": "первый импульс подтверждён",
+        }.get(phase, "движение только намечается")
+        lines.append(f"   ⚡ {phase_text}" + (f" (вероятно, {hint})" if hint else ""))
     targets = _targets_pct_line(sig)
     if targets:
         lines.append(f"   • {targets}")
@@ -263,7 +272,9 @@ EMERGING_DISCLAIMER = (
 )
 # Анти-chase заметки emergence объясняют, почему движение УЖЕ состоялось.
 # В блок «намечается» они не идут: там только ранние признаки.
-_EMERGENCE_NOT_EARLY = ("уже у вершины", "близко к вершине", "уже у дна", "близко к дну")
+_EMERGENCE_NOT_EARLY = (
+    "уже у вершины", "уже у вершины/дна", "близко к вершине", "уже у дна", "близко к дну",
+)
 
 
 def _emergence_notes(item: dict[str, Any]) -> list[str]:
@@ -301,10 +312,16 @@ def render_emerging(
         symbol = str(cand.get("symbol") or getattr(sig, "symbol", "") or "?")
         notes = _emergence_notes(item)
         hint = " · ".join(notes[:2]) if notes else "признаков хватает, но коротко их не описать"
-        line = f"• {symbol} — ранний признак: {hint}"
+        phase = str(cand.get("phase", "EARLY"))
+        phase_text = {
+            "EARLY": "база просыпается",
+            "TRIGGERED": "первый импульс подтверждён",
+            "NEUTRAL": "наблюдение",
+        }.get(phase, "ранняя фаза")
+        line = f"• {symbol} — ранний признак: {hint} · фаза: {phase_text}"
         if pro:
             ignition = float(cand.get("ignition", 0.0) or 0.0)
-            line += f" [ignition {ignition:.0f}/100, подсказка {cand.get('early_direction', 'FLAT')}]"
+            line += f" [phase {phase}, ignition {ignition:.0f}/100, подсказка {cand.get('early_direction', 'FLAT')}]"
         lines.append(line)
     lines.append(EMERGING_DISCLAIMER)
     return "\n".join(lines)

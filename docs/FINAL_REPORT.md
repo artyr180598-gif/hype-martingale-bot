@@ -1,8 +1,10 @@
-# Финальный отчёт — HYPE Crypto Market Intelligence & Trading Analysis Platform (v3.1.0)
+# Финальный отчёт — HYPE Crypto Market Intelligence & Trading Analysis Platform (v3.2.0)
 
 > Аналитическая система «Market Intelligence»: **read-only** по умолчанию,
 > автоторговли нет. Telegram — только интерфейс (UI), не источник данных.
-> Дата отчёта: 2026-08-31. Все результаты воспроизводимы из репозитория.
+> Дата обновления отчёта: 2026-09-02. Все результаты воспроизводимы из репозитория.
+> Детальный changelog раннего импульса и честно оставшийся roadmap находятся в
+> `docs/IMPROVEMENTS_RESEARCH.md`.
 
 ---
 
@@ -14,18 +16,21 @@
 **LONG / SHORT / NO TRADE**, многотаймфреймовый контекст (5m/15m/1H/4H/1D),
 рыночная структура, деривативы Bybit (funding, OI, ликвидации, L/S ratio,
 mark/index), стакан, риск-менеджмент с плечами, бэктест + walk-forward,
-полностью интерактивный Telegram-UI и API. Все 17 пунктов аудита закрыты
-(см. `docs/AUDIT.md`); добавлен 18-й инвариант — **проверка stale-данных в
-publish-валидаторе**. Итог: 46 тестов зелёные, `ruff` чистый.
+полностью интерактивный Telegram-UI и API. После базового аудита добавлен
+ранний контур импульса: поиск `EARLY`/`TRIGGERED` до chase-движения,
+`EXHAUSTED`-фильтр, closed-candle граница, честный RVOL и universe scan в
+daemon. Все 17 пунктов базового аудита закрыты (см. `docs/AUDIT.md`);
+добавлен 18-й инвариант — **проверка stale-данных в publish-валидаторе**.
+Итог текущей проверки: 114 тестов зелёные, `ruff` чистый.
 
 **Ключевые факты для оценки:**
 
 | Метрика | Значение |
 |---|---|
-| Версия | 3.1.0 (`v3/config.py`, `v3/api.py`) |
-| Тесты | 46 passed (30 `test_v3.py` + 16 `test_platform.py`) |
+| Версия | 3.2.0 (`v3/config.py`, `v3/api.py`) |
+| Тесты | 114 passed (`pytest -q`) |
 | Линтер | `ruff check .` — All checks passed |
-| Режимы данных | `demo` (синтетика), `auto` (Bybit→Binance→MEXC→demo), `live` (только биржи) |
+| Режимы данных | `auto` (реальные Bybit→Binance→MEXC-контексты), `live` (только биржи); синтетика не публикуется |
 | Сигнально-качественные уровни | LONG / SHORT / NO TRADE / WAIT |
 | Автоторговля | отсутствует (нет путей исполнения ордеров) |
 | Telegram | закрыт по allow-list, deny-by-default |
@@ -93,7 +98,17 @@ from env · fresh-data TTL → degraded → NO TRADE.
   news/movers/account-ratio (используется для быстрых запросов); список
   глубоких сокращается до размера пула Stage 1 (`candidates[:top]`).
 
-Результат: 20 символов → ~5 секунд в demo, без лишних запросов.
+Результат: до 20 символов → без лишних запросов. В daemon без аргументов
+этот же `Scanner` запускается по всей доступной ликвидной вселенной;
+явный `watch SYMBOLS` остаётся точечным режимом.
+
+**Ранний импульс (дополнение раунда 5):** после Stage 1 для пула кандидатов
+проверяются закрытые свечи среднего таймфрейма. `EARLY` означает формирование
+базы/давления; `TRIGGERED` — подтверждённый закрытием пробой в допустимом
+расстоянии; `EXHAUSTED` — цена уже слишком далеко, поэтому кандидат исключается
+из обычного Stage 2. RVOL сравнивает текущий закрытый бар с базой без него
+самого. Это помогает искать движение до разгона, но emergence остаётся
+признаком ранжирования, а не самостоятельным торговым гейтом.
 
 ---
 
@@ -109,6 +124,9 @@ from env · fresh-data TTL → degraded → NO TRADE.
 | CryptoCompare | новости | 600s кэш |
 
 Дисциплина (`src/data/collector.py`, `v3/data.py`):
+- live REST klines/history нормализуются и отбрасывают текущую формирующуюся
+  свечу по границе `timestamp + timeframe`; аналитика не использует незакрытый
+  close/volume;
 - `_Http.get`: таймаут, **ретрай на 429 с уважением `Retry-After`**,
   экспоненциальный backoff, 404 → `UnknownSymbol`, 5xx → retry;
 - семафор параллелизма (8 соединений), TTL-кэши слоя v3
@@ -173,10 +191,10 @@ from env · fresh-data TTL → degraded → NO TRADE.
 | Funding rate + тренд (rising/falling/overheated_long/short) | `/v5/market/funding/history` | ✅ |
 | История funding (12 значений) | тот же эндпоинт | ✅ |
 | Open Interest (USD) + изменение 24h | тикер + накопленная OI-история | ✅ |
-| Ликвидации (прокси крупных сделок; у Bybit нет публичного REST ликвидаций) | `/v5/market/recent-trade` | ✅ (прокси, задокументировано) |
+| Ликвидации | Bybit public WS (Binance REST fallback, если доступен) | ✅ только реальный фид; при недоступности — `н/д` |
 | **Long/Short account ratio (0..1)** | `/v5/market/account-ratio` (публичный) | ✅ **новое** |
 | Mark price / Index price | поля тикера (`markPrice`, `indexPrice`) | ✅ **новое** — 0 доп. запросов |
-| Taker buy/sell ratio | через L/S ratio | ✅ (синоним) |
+| Taker buy/sell ratio | — | не заявляется: account L/S ratio не является taker-flow |
 
 Использование в контексте: funding-перегрев режет score, перекос L/S>0.65
 (толпа в лонгах) −8, L/S<0.35 (толпа в шортах) +8; ликвидационный имбаланс
