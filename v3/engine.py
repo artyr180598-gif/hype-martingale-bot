@@ -27,7 +27,7 @@ from v3.analysis.confidence import attach_confidence
 from v3.analysis.context import build_context
 from v3.analysis.derivatives import analyze_derivatives, oi_change_pct
 from v3.analysis.emergence import detect_emergence
-from v3.analysis.levels import build_levels
+from v3.analysis.levels import build_levels, chase_reason
 from v3.analysis.orderflow import analyze_orderflow
 from v3.analysis.regime import detect_regime
 from v3.analysis.risk import build_risk_brief, risk_score
@@ -278,6 +278,16 @@ class FuturesSignalEngine:
                 condition = candidate.condition
                 stop_hint = candidate.stop_hint
                 reasons.extend(candidate.reasons)
+
+        # «Не догоняй рынок»: если цена уже ушла от VWAP в сторону сделки
+        # дальше ENTRY_MAX_EXTENSION_ATR, основная часть движения пройдена и
+        # вход с высокой вероятностью ловит откат против нас (на реальных
+        # свечах OKX так было выбито 4 из 5 стопов — docs/AUDIT.md, раунд 8).
+        if direction in ("LONG", "SHORT"):
+            chase = chase_reason(direction, bundle.price, entry_view.atr, entry_view, self.cfg)
+            if chase:
+                direction = "WAIT"
+                reasons.append(chase)
 
         levels = build_levels(direction, bundle.price, entry_view.atr, entry_view, self.cfg, stop_override=stop_hint) if direction in ("LONG", "SHORT") else None
 

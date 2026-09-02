@@ -301,13 +301,16 @@ def test_backtest_runs_on_real_series_and_finds_setups(capsys):
     assert code == 0
     assert "БЭКТЕСТ НА РЕАЛЬНЫХ СВЕЧАХ · BTCUSDT" in out
     assert "закрытых использовано: 299" in out
-    assert "точек решения: 100" in out          # 299 баров - warmup 120 - 3
+    assert "точек решения: 92" in out
     assert "win_rate" in out and "profit_factor" in out
-    # ключевое утверждение: на РЕАЛЬНЫХ свечах движок выдаёт исполняемые сетапы
-    assert "исполняемых сетапов: 5" in out
+    # ключевое утверждение: на РЕАЛЬНЫХ свечах движок выдаёт исполняемые сетапы.
+    # Числа — снимок после правки порогов входа (раунд 9): было 5 сетапов и
+    # −3.276R, стало 2 сетапа и +2.048R (см. test_entry_quality.py).
+    assert "исполняемых сетапов: 2" in out
+    assert "total_r: 2.048" in out
     assert "Сделок нет" not in out
     # живые пороги печатаются честно, включая нуль по авто-сигналам
-    assert "авто-сигнал" in out and "0 из 5" in out
+    assert "авто-сигнал" in out and "0 из 2" in out
     assert "не гарантирует будущих результатов" in out
 
 

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -127,6 +128,58 @@ def evaluate_alert(signal: Any, cfg: SignalConfig | None = None) -> AlertDecisio
         label=report.label,
         reasons=reasons,
         report=report,
+    )
+
+
+# ── пауза после серии стопов ────────────────────────────────────
+def stopout_pause(
+    outcomes: list[dict[str, Any]],
+    cfg: SignalConfig | None = None,
+    now_ms: int | None = None,
+) -> tuple[bool, str]:
+    """Гасить ли авто-сигнал по монете после серии стопов.
+
+    Аналог ``PerformanceFilter``/``PairInformationFilter`` из freqtrade: там
+    монету выводят из торговли после плохих результатов, а не продолжают слать
+    по ней сигналы. У нас то же самое, но мягче — гасится только уведомление,
+    анализ и запись в базу продолжаются.
+
+    ``outcomes`` — строки ``store.outcomes(symbol)`` (от новых к старым).
+    Пауза включается, если последние ``ALERT_STOPOUT_GUARD`` ЗАКРЫТЫХ сделок
+    подряд закрылись по стопу и с последнего стопа не прошло
+    ``ALERT_STOPOUT_PAUSE_HOURS``. Возвращает ``(пауза?, объяснение)``.
+    """
+    cfg = cfg or SignalConfig()
+    limit = int(cfg.ALERT_STOPOUT_GUARD or 0)
+    if limit <= 0:
+        return False, ""
+
+    closed = [
+        o for o in (outcomes or [])
+        if str(o.get("outcome") or "").upper() not in ("", "OPEN")
+    ]
+    if len(closed) < limit:
+        return False, ""
+    recent = closed[:limit]
+    stopped = all(
+        str(o.get("outcome") or "").upper() == "LOSS"
+        or "stop" in str(o.get("exit_reason") or "").lower()
+        for o in recent
+    )
+    if not stopped:
+        return False, ""
+
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    last_exit = max(int(o.get("exit_at") or 0) for o in recent)
+    pause_ms = float(cfg.ALERT_STOPOUT_PAUSE_HOURS) * 3_600_000
+    age_ms = now - last_exit
+    if last_exit and age_ms > pause_ms:
+        return False, ""
+
+    left_h = max(0.0, (pause_ms - max(0, age_ms)) / 3_600_000)
+    return True, (
+        f"монета на паузе: {limit} стопа подряд, последний "
+        f"{max(0, age_ms) / 3_600_000:.1f} ч назад — не будим ещё {left_h:.1f} ч"
     )
 
 

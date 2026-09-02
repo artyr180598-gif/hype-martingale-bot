@@ -19,7 +19,7 @@ import asyncio
 import time
 from typing import Any, Awaitable, Callable
 
-from v3.alerts import AlertItem, evaluate_alert
+from v3.alerts import AlertItem, evaluate_alert, stopout_pause
 from v3.config import SignalConfig
 from v3.data import FuturesDataService
 from v3.engine import FuturesSignalEngine
@@ -143,7 +143,13 @@ class V3Watcher:
                 # отправляем только «действительно хороший» сетап.
                 decision = evaluate_alert(sig, self.cfg)
                 if decision.ok:
-                    alert_items.append(AlertItem(kind="signal", signal=sig, decision=decision))
+                    # Пауза после серии стопов по этой монете: сетап остаётся
+                    # в базе и в разделах списков, но в чат не летит.
+                    paused, why = stopout_pause(self.store.outcomes(sig.symbol), self.cfg)
+                    if paused:
+                        suppressed.append(f"{sig.symbol}: {why}")
+                    else:
+                        alert_items.append(AlertItem(kind="signal", signal=sig, decision=decision))
                 else:
                     suppressed.append(f"{sig.symbol}: {decision.reasons[0] if decision.reasons else 'порог не пройден'}")
             else:

@@ -157,13 +157,23 @@ class SignalConfig(BaseSettings):
     LIQ_ACCELERATION_WINDOW_SEC: int = 300      # «рост ликвидаций за последние N секунд»
 
     # ── Entry / SL / TP ─────────────────────────────────────────
-    ATR_SL_MULTIPLIER: float = 1.8
+    # 2.2×ATR: стоп должен переживать обычный шум. Бэктест на реальных свечах
+    # OKX (300 баров 15m) показал 4 из 5 сделок, выбитых стопом за 2-12 баров —
+    # классический признак слишком узкого стопа (см. docs/AUDIT.md, раунд 8/9).
+    ATR_SL_MULTIPLIER: float = 2.2
     ATR_MIN_SL_MULTIPLIER: float = 0.8
     ATR_MAX_SL_MULTIPLIER: float = 3.5
+    # Буфер ЗА очевидным уровнем: стоп ровно на support/resistance выбивают
+    # «сбором ликвидности» (stop hunting), поэтому уносим его дальше уровня.
+    ATR_STOP_BUFFER: float = 0.25
     ATR_TP_MULTIPLIER: float = 3.6
     MIN_RISK_REWARD: float = 1.8
     MIN_RISK_REWARD_REVERSAL: float = 1.5   # разворотные сценарии (CHoCH/sweep) — мягче, но гейт не отключён
     MAX_ENTRY_DISTANCE_ATR: float = 1.0
+    # «Не догоняй рынок»: если цена уже ушла от VWAP в сторону сделки дальше
+    # этого числа ATR, движение в основном прошло и вход ловит откат против нас.
+    # 0 = фильтр выключен.
+    ENTRY_MAX_EXTENSION_ATR: float = 2.0
     TP_CLOSE_PCT: tuple[float, float, float] = (0.5, 0.3, 0.2)
 
     # ── Risk ────────────────────────────────────────────────────
@@ -208,6 +218,11 @@ class SignalConfig(BaseSettings):
     ALERT_MIN_RR: float = 1.8                   # потенциал к риску (по умолчанию = MIN_RISK_REWARD)
     ALERT_REQUIRE_FRESH: bool = True            # не слать сетап по устаревшим данным
     ALERT_MAX_PER_CYCLE: int = 3                # не более N уведомлений за цикл
+    # Пауза после серии стопов (аналог PerformanceFilter/PairInformationFilter
+    # в freqtrade): если подряд закрылось N сделок по стопу — по этой монете
+    # не будим пользователя, пока не пройдёт пауза. 0 = выключено.
+    ALERT_STOPOUT_GUARD: int = 2
+    ALERT_STOPOUT_PAUSE_HOURS: float = 6.0
     ALERT_CHAT_IDS: str = ""                    # куда слать (по умолчанию admin chat)
     WATCHER_INTERVAL_SECONDS: int = 180         # как часто бот сам сканирует рынок
 

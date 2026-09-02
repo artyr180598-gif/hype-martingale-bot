@@ -17,6 +17,41 @@ def _clip(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
+def extension_atr(direction: str, price: float, atr: float, view: TimeframeView | None) -> float:
+    """Насколько цена УЖЕ ушла от VWAP в сторону сделки (в ATR).
+
+    «Не догоняй рынок»: для SHORT цена ниже VWAP — значит падение уже случилось,
+    и новый шорт ловит откат; для LONG — зеркально. Возвращает 0.0, если движения
+    в сторону сделки нет (цена по другую сторону VWAP) или данных нет.
+
+    VWAP взят потому, что он уже посчитан в ``TimeframeView`` и привязан к
+    реальному объёму сессии, а не к произвольному периоду скользящей средней.
+    """
+    if direction not in ("LONG", "SHORT") or view is None or price <= 0 or not math.isfinite(atr) or atr <= 0:
+        return 0.0
+    dist_pct = float(view.vwap_dist_pct or 0.0)
+    # SHORT выгоден, когда цена НИЖЕ VWAP (dist < 0) — но тогда она уже упала
+    moved = -dist_pct if direction == "SHORT" else dist_pct
+    if moved <= 0:
+        return 0.0
+    return round(abs(moved) / 100.0 * price / atr, 3)
+
+
+def chase_reason(direction: str, price: float, atr: float, view: TimeframeView | None, cfg: SignalConfig) -> str:
+    """Объяснение человеческим языком, если вход был бы «в догонку»."""
+    limit = float(cfg.ENTRY_MAX_EXTENSION_ATR or 0.0)
+    if limit <= 0:
+        return ""
+    ext = extension_atr(direction, price, atr, view)
+    if ext <= limit:
+        return ""
+    side = "упала" if direction == "SHORT" else "выросла"
+    return (
+        f"цена уже {side} на {ext:.1f} ATR от VWAP (порог {limit:.1f}) — "
+        "движение в основном пройдено, ждём откат, а не догоняем"
+    )
+
+
 def build_levels(
     direction: str,
     price: float,
@@ -38,6 +73,8 @@ def build_levels(
     sl_mult = _clip(cfg.ATR_SL_MULTIPLIER, cfg.ATR_MIN_SL_MULTIPLIER, cfg.ATR_MAX_SL_MULTIPLIER)
     if view is not None and view.squeeze:
         sl_mult = _clip(sl_mult * 0.85, cfg.ATR_MIN_SL_MULTIPLIER, cfg.ATR_MAX_SL_MULTIPLIER)
+    # Буфер в ATR: стоп относится ЗА очевидный уровень, а не ровно на него.
+    buffer_atr = max(0.0, float(cfg.ATR_STOP_BUFFER)) * atr
 
     # Structure-based stop first, but keep it inside 0.8-3.5 ATR.
     stop = price - sl_mult * atr if is_long else price + sl_mult * atr
@@ -48,20 +85,21 @@ def build_levels(
     if view is not None and view.support is not None and is_long:
         dist = abs(price - view.support)
         if view.support < price and cfg.ATR_MIN_SL_MULTIPLIER * atr <= dist <= cfg.ATR_MAX_SL_MULTIPLIER * atr:
-            stop = view.support
-            why.append(f"stop moved to structural support {view.support:.8g}")
+            # не ровно на уровне (его выбивают сбором ликвидности), а ЗА ним
+            stop = view.support - buffer_atr
+            why.append(f"stop moved to structural support {view.support:.8g} (буфер {buffer_atr:.8g})")
     if view is not None and view.resistance is not None and not is_long:
         dist = abs(price - view.resistance)
         if view.resistance > price and cfg.ATR_MIN_SL_MULTIPLIER * atr <= dist <= cfg.ATR_MAX_SL_MULTIPLIER * atr:
-            stop = view.resistance
-            why.append(f"stop moved to structural resistance {view.resistance:.8g}")
+            stop = view.resistance + buffer_atr
+            why.append(f"stop moved to structural resistance {view.resistance:.8g} (буфер {buffer_atr:.8g})")
 
     # Явная подсказка стопа (например, от сценария liquidity sweep).
     if stop_override is not None and (stop_override < price if is_long else stop_override > price):
         dist = abs(price - stop_override)
         if cfg.ATR_MIN_SL_MULTIPLIER * 0.5 * atr <= dist <= cfg.ATR_MAX_SL_MULTIPLIER * 1.1 * atr:
-            stop = stop_override
-            why.append(f"stop anchored to scenario level {stop_override:.8g}")
+            stop = stop_override - buffer_atr if is_long else stop_override + buffer_atr
+            why.append(f"stop anchored to scenario level {stop_override:.8g} (буфер {buffer_atr:.8g})")
 
     # Entry zone: anchored to market structure when it is near the price.
     # A zone is always bounded to 1.0 ATR and stays close enough to fill
