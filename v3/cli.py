@@ -530,9 +530,9 @@ def build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="daemon",
-        help="signal | scan | backtest | walkforward | calibrate | status | pulse | serve | daemon | bot | watch (default: daemon)",
+        help="signal | scan | backtest | walkforward | calibrate | status | pulse | serve | daemon | bot | watch | replay | record (default: daemon)",
     )
-    parser.add_argument("symbol", nargs="?", default="", help="symbol")
+    parser.add_argument("symbol", nargs="?", default="", help="symbol (для replay — путь к файлу снапшота)")
     parser.add_argument("--mode", default="beginner", help="beginner | pro")
     parser.add_argument("--tf", default="15m", help="entry timeframe")
     parser.add_argument("--bars", type=int, default=1000)
@@ -543,6 +543,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top", type=int, default=None, help="deep-analysis top N")
     parser.add_argument("--host", default="0.0.0.0", help="serve host")
     parser.add_argument("--port", type=int, default=8400, help="serve port")
+    parser.add_argument("--out", default="", help="record: куда сохранить снапшот (default: data/replay/<SYMBOL>.json)")
+    parser.add_argument("--walk", type=int, default=0, help="replay: сколько точек прохода по истории снять")
+    parser.add_argument("--step", type=int, default=1, help="replay: шаг прохода в свечах входного ТФ")
+    parser.add_argument("--json", action="store_true", help="replay: напечатать результат JSON-ом")
     return parser
 
 
@@ -606,5 +610,20 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "watch":
         syms = [s.strip().upper() for s in args.symbol.split(",") if s.strip()] if args.symbol else None
         return asyncio.run(run_watch(syms))
-    print("Доступные команды: signal, scan, market, backtest, walkforward, calibrate, status, pulse, serve, daemon, bot, watch")
+    if cmd == "replay":
+        if not args.symbol:
+            print("Укажите файл снапшота: python -m v3 replay v3/tests/fixtures/okx_btcusdt_swap_capture.json")
+            return 2
+        from v3.replay import run_replay
+
+        return run_replay(args.symbol, args.mode, args.walk, args.step, args.json, _cfg)
+    if cmd == "record":
+        if not args.symbol:
+            print("Укажите символ: python -m v3 record BTCUSDT --out data/replay/btcusdt.json")
+            return 2
+        from v3.replay import record_symbol
+
+        out = args.out or f"data/replay/{args.symbol.upper()}.json"
+        return asyncio.run(record_symbol(args.symbol, out, _cfg))
+    print("Доступные команды: signal, scan, market, backtest, walkforward, calibrate, status, pulse, serve, daemon, bot, watch, replay, record")
     return 2

@@ -331,7 +331,7 @@ PyBroker: walkforward-разбиения, **bootstrap-метрики** (BCa-до
   честен; но как только появляется *обучаемый* слой (Optuna-веса, калибровка,
   ML — P2-2/ML-1), у признаков warm-up 100–200 баров (EMA-200, atr_pctl,
   zigzag) и fold-окна без паузы → нужен purge/embargo;
-  (в) **roтационное ранжирование** как формальный каркас для сканера.
+  (в) **ротационное ранжирование** как формальный каркас для сканера.
 * Ссылки: [edtechre/pybroker](https://github.com/edtechre/pybroker),
   [Walkforward tutorial](https://medium.com/@edtechre/algotrading-in-python-with-machine-learning-walkforward-analysis-1ebfb8a9fcf0).
 
@@ -384,7 +384,7 @@ CoinGlass/Coinalyze — индустриальный стандарт чтени
   [Funding + OI: how to spot liquidations](https://tradelink.pro/blog/funding-rate-open-interest/),
   [CoinGlass learn](https://www.coinglass.com/learn/how-to-judge-market-by-fr-en).
 
-### 3.7 Режимы рынка: regimе-детекция через HMM / changepoint (hmmlearn, ruptures)
+### 3.7 Режимы рынка: regime-детекция через HMM / changepoint (hmmlearn, ruptures)
 
 Перечисленные выше repository по market-regime (HMM/GMM/ruptures + walk-forward
 валидация) — показательный **второй контур** поверх наших правил: статистическая
@@ -468,7 +468,7 @@ CoinGlass/Coinalyze — индустриальный стандарт чтени
 ```
 rs24  = z( pct24h(coin) − pct24h(BTC) , по всем кандидатам )
 rs7d  = z( pct7d(coin) − pct7d(BTC) )
-rvol  = vol(15m/pоследN) / mean50(vol(15m))         # нормализация по монете
+rvol  = vol(15m/последних N) / mean50(vol(15m))         # нормализация по монете
 dpos  = (close − low24h) / (high24h − low24h)        # 0..1 в диапазоне
 oiΔ   = oi_now / oi_24h_ago − 1
 fund  = clamp(|funding| / 0.001, 0, 1)               # 0 = нейтрально
@@ -485,7 +485,7 @@ bb_pctb, mfi_14, wpr_14, roc_20, macd_cross, stoch_cross, obv_trend, cvd_trend
 rv20, atr_pctl (уже есть), vwap24_dist_pct (новый rolling VWAP 24ч)
 ```
 
-**Dеrivatивы-матрица (новый `PositioningScore` 0–100):**
+**Derivatives-матрица (новый `PositioningScore` 0–100):**
 ```
 if OI_Δ>0 and price_Δ>0:   позиционирование = «здоровый лонг-билд» (50→70, если funding нейтр.)
 if OI_Δ>0 and price_Δ<0 and funding>0: «перегрев лонгов, риск каскада» (→25)

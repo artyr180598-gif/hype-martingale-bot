@@ -85,9 +85,10 @@ src/core (logging/time/errors), src/config, src/analysis/waves
 | `v3/store.py` | SQLite signals/outcomes + cooldown lifecycle. |
 | `v3/watcher.py` | background lifecycle observer (`v3 watch`). |
 | `v3/backtest.py` | walk-forward with fees, slippage, no look-ahead. |
+| `v3/replay.py` | offline run of the LIVE path on a captured exchange snapshot (`v3 replay` / `v3 record`). |
 | `v3/report.py` | beginner / pro Telegram rendering. |
 | `v3/api.py` | FastAPI endpoints. |
-| `v3/cli.py` | `signal`, `scan`, `backtest`, `walkforward`, `watch`, `bot`, `status`, `serve`. |
+| `v3/cli.py` | `signal`, `scan`, `backtest`, `walkforward`, `watch`, `bot`, `status`, `serve`, `replay`, `record`. |
 
 ## Quick start
 
@@ -109,6 +110,10 @@ python -m v3 signal SOLUSDT --mode beginner
 python -m v3 backtest BTCUSDT --tf 15m --bars 2000 --warmup 120
 python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
 python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000
+
+# прогон движка на РЕАЛЬНЫХ данных без сети (снятый снапшот биржи)
+python -m v3 replay v3/tests/fixtures/okx_btcusdt_swap_capture.json
+python -m v3 record BTCUSDT --out data/replay/btcusdt.json   # снять свой снапшот
 
 # passive lifecycle observer / telegram / full daemon
 python -m v3 watch BTCUSDT,ETHUSDT
@@ -277,11 +282,52 @@ be revalidated with walk-forward before any threshold is changed.
 
 ## Stale data (live gate)
 
-`DataBundle.data_age_seconds` is derived from ticker `ts_ms`; each analyzed
-timeframe also checks how old the newest closed bar is. If the ticker or any
-timeframe is older than `MAX_DATA_AGE_SECONDS`, the bundle is marked degraded
-and `validate()` returns `NO_TRADE`, guaranteeing no signal is published from
-stale data.
+`DataBundle.data_age_seconds` берётся из `ts_ms` тикера; если тикер не дал
+биржевой timestamp, возраст считается по входному таймфрейму — от **закрытия**
+последней свечи (`open + длительность`), а не от её открытия.
+
+Каждый таймфрейм отдельно проверяется на «отстающий график»: сервис данных
+отдаёт только закрытые свечи, поэтому свежие данные — это «последняя закрытая
+свеча закрылась не раньше одного таймфрейма назад»
+(`now - (last_open + tf) <= tf + MAX_DATA_AGE_SECONDS`). Запас
+`MAX_DATA_AGE_SECONDS` нужен, потому что биржа отдаёт только что закрытую свечу
+не мгновенно.
+
+История (важно): раньше правило сравнивало **время открытия** свечи с
+`tf + MAX_DATA_AGE_SECONDS`. Закрытая часовая свеча по построению старше часа,
+поэтому движок объявлял данные устаревшими почти всё время и отвечал `NO_TRADE`
+(«stale kline data»). Ошибка не ловилась ни юнит-тестами, ни бэктестом — они
+вызывают `evaluate_bundle()` напрямую и не проходят этот участок `analyze()`.
+Нашёл её прогон на реальных свечах биржи (`v3/replay.py`, см. «Replay на
+реальных данных»); регрессия закрыта в `v3/tests/test_replay_realdata.py`.
+
+Если тикер или график всё же устарели, bundle помечается degraded и `validate()`
+возвращает `NO_TRADE` — сигнал из устаревших данных не публикуется.
+
+## Replay на реальных данных (`v3/replay.py`)
+
+Юнит-тесты проверяют логику на синтетических сигналах, живой запуск требует
+сеть. Реплей закрывает середину: настоящие свечи, тикер, ставка финансирования,
+открытый интерес и стакан с биржи прогоняются через те же кодовые пути, что и
+прод (`SnapshotSource → FuturesDataService → FuturesSignalEngine.analyze →
+render_signal + assess_confidence + evaluate_alert`), без HTTP-запросов.
+
+```bash
+# прогон готового снапшота (реальные свечи OKX BTC-USDT-SWAP, 2026-09-02)
+python -m v3 replay v3/tests/fixtures/okx_btcusdt_swap_capture.json
+python -m v3 replay <файл> --mode pro --walk 12 --step 2   # + проход по истории
+python -m v3 replay <файл> --json
+
+# снять свой снапшот с биржи (нужен доступ к сети), потом гонять его офлайн
+python -m v3 record BTCUSDT --out data/replay/btcusdt.json
+```
+
+Часы реплея фиксируются на моменте съёма снапшота — иначе данные, свежие на
+момент съёма, выглядели бы устаревшими. Цены, объёмы и таймстемпы не меняются.
+Чего в снапшоте нет (новости, ликвидации, глобальный контекст, long/short),
+того нет и в отчёте: источник отдаёт честную ошибку, и бот показывает «н/д»
+вместо выдуманных цифр — таблица «ЧТО В СНАПШОТЕ РЕАЛЬНОЕ» печатается в начале
+прогона.
 
 ## Observability (`v3/observability.py`)
 

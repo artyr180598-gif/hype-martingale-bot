@@ -215,6 +215,10 @@ python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
 python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000
 python -m v3 status | pulse                # health / самодиагностика
 python -m v3 daemon                        # API + watcher + Telegram
+
+# прогон движка на РЕАЛЬНЫХ данных без сети (снапшот, снятый с биржи)
+python -m v3 replay v3/tests/fixtures/okx_btcusdt_swap_capture.json
+python -m v3 record BTCUSDT --out data/replay/btcusdt.json
 ```
 
 ## REST API (порт 8400)
@@ -282,7 +286,7 @@ make check   # ruff + pytest
 make test    # pytest
 ```
 
-**72 теста**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
+**155 тестов**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
 gate, lifecycle, backtest-метрики (+ разбивка regime/direction), калибровка,
 Telegram core/авторизация/callback'и/настройки, TTL-кэш, 429 retry,
 структурный entry zone, publisher/stale validation, config validation,
@@ -290,7 +294,12 @@ Bybit account-ratio endpoint (+ 300s TTL), **инварианты «только
 данные»** (`v3/tests/test_realdata.py`: demo у конфигурации/factory удалён,
 fail-closed без тикера/свечей/timestamp, WS-ликвидации на фейк-сессии),
 **история диалога** (`v3/tests/test_telegram_history.py`: независимые запросы
-→ новые сообщения, навигация внутри результата → правка, без `delete`).
+→ новые сообщения, навигация внутри результата → правка, без `delete`),
+**прогон на реальных данных биржи** (`v3/tests/test_replay_realdata.py`:
+снапшот OKX BTC-USDT-SWAP — 5 таймфреймов × 60 свечей, тикер, фандинг,
+открытый интерес, стакан; движок проходит живой путь `analyze()` без сети,
+проверка свежести свечей не даёт ложных «данные устарели», отстающий график
+по-прежнему виден, неснятые источники показываются как «н/д»).
 
 ## Только реальные данные (политика платформы)
 
