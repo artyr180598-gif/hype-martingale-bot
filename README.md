@@ -289,7 +289,7 @@ make check   # ruff + pytest
 make test    # pytest
 ```
 
-**168 тестов**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
+**171 тест**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
 gate, lifecycle, backtest-метрики (+ разбивка regime/direction), калибровка,
 Telegram core/авторизация/callback'и/настройки, TTL-кэш, 429 retry,
 структурный entry zone, publisher/stale validation, config validation,
@@ -330,7 +330,7 @@ fail-closed без тикера/свечей/timestamp, WS-ликвидации 
 
 ## Безопасность
 
-* Read-only: в проекте нет пути исполнения ордеров.
+* Read-only: в проекте нет пути исполнения ордеров (нет ни одного `create_order`/`place_order`, приватные ключи не подписывают запросы). Инвариант защищён тестом `test_project_has_no_order_execution_anywhere`.
 * Секреты только из env/`.env`; `.env`, `data/`, `*.log` в `.gitignore`.
 * Telegram закрыт allow-list; API закрыт `V3_API_TOKEN` (по желанию).
 * AI-слой не может изменить direction/levels/score — гейт всегда первичен.
