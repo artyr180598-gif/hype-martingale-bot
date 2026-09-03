@@ -86,7 +86,10 @@ class SignalConfig(BaseSettings):
     SCAN_MIN_TURNOVER_USD: float = 20_000_000.0
     SCAN_MIN_VOLUME_USD: float = 5_000_000.0
     SCAN_SHOW_QUALITY_MIN: float = 72.0  # строгий порог «⭐ ТОП» (A и выше)
-    SCAN_LIST_QUALITY_MIN: float = 58.0  # тир-осознанные списки LONG/SHORT (B/C видны)
+    # Тир-осознанные списки LONG/SHORT. ВАЖНО: не ниже QUALITY_MIN, иначе
+    # сигнал, который прошёл гейт движка (качество ≥55), «теряется» в UI —
+    # пользователь просит сетап, а бот отвечает «нет подходящих».
+    SCAN_LIST_QUALITY_MIN: float = 55.0
     SCAN_MAJOR_PENALTY: float = 4.0      # штраф мажоров (по WATCHLIST_SYMBOLS, не хардкод)
     # «намечающееся движение»: ловим до разгона, а не после (+ к heat ранга)
     SCAN_EMERGENCE_ENABLED: bool = True
@@ -396,6 +399,13 @@ def validate_config(cfg: SignalConfig | None = None) -> list[str]:
         errors.append(
             "SCAN_LIST_QUALITY_MIN must be in (0, SCAN_SHOW_QUALITY_MIN] — "
             "списки не могут быть строже «⭐ ТОП»"
+        )
+    # Инвариант «сигнал не может быть скрыт от списков»: любой сетап, который
+    # прошёл Q-гейт движка, обязан быть видимым в тир-осознанных списках.
+    if cfg.SCAN_LIST_QUALITY_MIN < cfg.QUALITY_MIN:
+        errors.append(
+            f"SCAN_LIST_QUALITY_MIN={cfg.SCAN_LIST_QUALITY_MIN} < QUALITY_MIN={cfg.QUALITY_MIN}: "
+            "сигналы, прошедшие гейт, не будут показываться в списках"
         )
     if not (0 < cfg.MIN_RISK_REWARD_REVERSAL <= cfg.MIN_RISK_REWARD):
         errors.append("MIN_RISK_REWARD_REVERSAL must be in (0, MIN_RISK_REWARD]")
