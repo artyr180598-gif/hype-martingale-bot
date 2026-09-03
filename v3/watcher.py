@@ -123,47 +123,73 @@ class V3Watcher:
         if not scanned_universe:
             signals = await self.engine.analyze_batch(self.watchlist, concurrency=4)
 
+        # ``emitted`` is kept as the list of observations processed by this
+        # cycle (the return contract used by the CLI/tests). It is deliberately
+        # different from ``alert_items``: only the latter can reach Telegram.
         emitted: list[dict[str, Any]] = []
-        alert_items: list[AlertItem] = []
+        worthy: list[tuple[Any, Any]] = []
         suppressed: list[str] = []
         for raw in signals:
             sig, violations = sanitize_for_publish(raw, self.cfg)
             if violations:
-                raw.no_trade_reasons = list(dict.fromkeys(raw.no_trade_reasons + violations))[:8]
-            # Check cooldown before persisting this observation: latest_sent_at
-            # intentionally reads the store, so saving first would make a fresh
-            # signal look like its own previous emission and suppress the first
-            # alert of every watcher cycle.
-            allowed, reason = self.lifecycle.should_emit(sig)
-            self.store.save_signal(sig)
-            if allowed:
-                self.lifecycle.register(sig)
-                emitted.append(sig.to_dict())
-                # Порог авто-сигнала: публикуем наблюдение всегда, а в чат
-                # отправляем только «действительно хороший» сетап.
-                decision = evaluate_alert(sig, self.cfg)
-                if decision.ok:
-                    # Пауза после серии стопов по этой монете: сетап остаётся
-                    # в базе и в разделах списков, но в чат не летит.
-                    paused, why = stopout_pause(self.store.outcomes(sig.symbol), self.cfg)
-                    if paused:
-                        suppressed.append(f"{sig.symbol}: {why}")
-                    else:
-                        alert_items.append(AlertItem(kind="signal", signal=sig, decision=decision))
-                else:
-                    suppressed.append(f"{sig.symbol}: {decision.reasons[0] if decision.reasons else 'порог не пройден'}")
-            else:
-                sig.no_trade_reasons = [reason] if not sig.no_trade_reasons else sig.no_trade_reasons
-                self.store.save_signal(sig)
+                sig.no_trade_reasons = list(dict.fromkeys(sig.no_trade_reasons + violations))[:8]
 
-        # Не больше N уведомлений за цикл: если сильных сетапов несколько,
-        # отправляем самые уверенные, остальные остаются в разделах списков.
-        if len(alert_items) > max(1, self.cfg.ALERT_MAX_PER_CYCLE):
-            alert_items.sort(
-                key=lambda item: (item.decision.percent if item.decision else 0.0),
-                reverse=True,
-            )
-            alert_items = alert_items[: max(1, self.cfg.ALERT_MAX_PER_CYCLE)]
+            # Evaluate before saving the observation. ``latest_sent_at`` is the
+            # persistent cooldown source and must not see the current snapshot
+            # as if it were an earlier alert.
+            decision = evaluate_alert(sig, self.cfg)
+            allowed = False
+            lifecycle_reason = ""
+            if decision.ok:
+                # Пауза после серии стопов по этой монете: сетап остаётся в
+                # базе и в разделах списков, но в чат не летит.
+                paused, why = stopout_pause(self.store.outcomes(sig.symbol), self.cfg)
+                if paused:
+                    suppressed.append(f"{sig.symbol}: {why}")
+                else:
+                    # Do this before persistence; a candidate that is not sent
+                    # must not consume the cooldown of a future good setup.
+                    allowed, lifecycle_reason = self.lifecycle.should_emit(sig)
+                    if not allowed:
+                        suppressed.append(f"{sig.symbol}: {lifecycle_reason}")
+                    else:
+                        worthy.append((sig, decision))
+            else:
+                suppressed.append(
+                    f"{sig.symbol}: {decision.reasons[0] if decision.reasons else 'порог не пройден'}"
+                )
+
+            # Persist every observation for the audit/history screens, including
+            # weak and NO_TRADE setups. Only selected worthy setups are
+            # registered below, so an unsent setup cannot later generate a
+            # TP/SL message without an entry notification.
+            self.store.save_signal(sig)
+            emitted.append(sig.to_dict())
+
+        # Select the strongest candidates before registering them. This avoids
+        # tracking an extra setup as active when the per-cycle notification cap
+        # means it will not actually be sent.
+        worthy.sort(key=lambda item: item[1].percent, reverse=True)
+        alert_items: list[AlertItem] = []
+        selected_symbols: set[str] = set()
+        max_alerts = max(1, self.cfg.ALERT_MAX_PER_CYCLE)
+        for sig, decision in worthy:
+            if sig.symbol in selected_symbols:
+                suppressed.append(f"{sig.symbol}: повторный кандидат в одном цикле")
+                continue
+            if len(alert_items) >= max_alerts:
+                suppressed.append(f"{sig.symbol}: лимит {max_alerts} уведомлений за цикл")
+                continue
+            # ``should_emit`` was checked before the observation was saved. The
+            # explicit active check here accounts for several new symbols
+            # competing for the remaining slots in this same cycle.
+            if len(self.lifecycle.active()) >= self.lifecycle.max_active and sig.symbol not in self.lifecycle._active:
+                suppressed.append(f"{sig.symbol}: max_active_reached")
+                continue
+            self.lifecycle.register(sig)
+            selected_symbols.add(sig.symbol)
+            alert_items.append(AlertItem(kind="signal", signal=sig, decision=decision))
+
         self.last_checked = len(emitted)
         self.last_suppressed = suppressed[0] if suppressed else ""
 

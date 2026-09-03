@@ -219,11 +219,15 @@ exchange timestamp, etc.
 `ALERT_MIN_QUALITY`, уверенность бота `ALERT_MIN_BOT_CONFIDENCE`, полнота
 данных `ALERT_MIN_DATA_CONFIDENCE`, риск `ALERT_MAX_RISK_SCORE`, потенциал к
 риску `ALERT_MIN_RR`, свежесть, фаза импульса (не `EXHAUSTED`), наличие стопа
-и ≥2 целей. `V3Watcher` сохраняет ВСЕ наблюдения, а в чат отправляет только
+и ≥2 целей. `V3Watcher` сохраняет ВСЕ наблюдения, но в чат отправляет только
 прошедшие порог (не больше `ALERT_MAX_PER_CYCLE` за цикл, cooldown
-`COOLDOWN_SECONDS` на символ). Пауза/включение и «Проверить сейчас» — в
-разделе «🔔 АВТО-СИГНАЛЫ» (callback `alerts`, `alerts:toggle`, `alerts:now`),
-состояние — в `GET /api/v3/alerts`.
+`COOLDOWN_SECONDS` на символ). Авто-push — короткая карточка: LONG/SHORT,
+уверенность в процентах, 2–3 причины выбора, зона входа, TP/частичная фиксация,
+безубыток после TP1 и стоп-инвалидация. Слабые наблюдения не регистрируются как
+активные и не могут породить ложное событие TP/SL или заблокировать следующий
+сильный сигнал. Пауза/включение и «Проверить сейчас» — в разделе
+«🔔 АВТО-СИГНАЛЫ» (callback `alerts`, `alerts:toggle`, `alerts:now`), состояние —
+в `GET /api/v3/alerts`.
 
 ## NO TRADE is a feature
 

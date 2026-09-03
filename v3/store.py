@@ -35,7 +35,11 @@ CREATE TABLE IF NOT EXISTS v3_signals (
     rr REAL NOT NULL,
     payload TEXT NOT NULL,
     index_ts INTEGER NOT NULL,
-    created_ms INTEGER NOT NULL
+    created_ms INTEGER NOT NULL,
+    -- 1 only after SignalLifecycle.register() makes the setup eligible for a
+    -- push. Analysis snapshots remain stored, but must not consume cooldown.
+    alert_emitted INTEGER NOT NULL DEFAULT 0,
+    alert_emitted_ms INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_v3_signals_symbol ON v3_signals(symbol);
 CREATE INDEX IF NOT EXISTS idx_v3_signals_ts ON v3_signals(ts_ms);
@@ -71,6 +75,24 @@ class SignalStore:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            # ``CREATE TABLE IF NOT EXISTS`` does not add columns to databases
+            # created by an older bot version. Keep the migration tiny and
+            # idempotent so an existing signal history remains usable.
+            columns = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(v3_signals)").fetchall()
+            }
+            if "alert_emitted" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE v3_signals ADD COLUMN alert_emitted INTEGER NOT NULL DEFAULT 0"
+                )
+            if "alert_emitted_ms" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE v3_signals ADD COLUMN alert_emitted_ms INTEGER NOT NULL DEFAULT 0"
+                )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_v3_signals_alert "
+                "ON v3_signals(symbol, alert_emitted, alert_emitted_ms)"
+            )
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.commit()
 
@@ -83,14 +105,54 @@ class SignalStore:
         with self._lock:
             return self._conn.execute(sql, params).fetchall()
 
-    def save_signal(self, signal: TradingSignal) -> None:
+    def save_signal(
+        self,
+        signal: TradingSignal,
+        *,
+        alert_emitted: bool = False,
+        alert_emitted_ms: int = 0,
+    ) -> None:
+        """Persist an observation without accidentally marking it as sent.
+
+        The watcher stores every scan result, while ``SignalLifecycle.register``
+        marks only a setup that is actually eligible for an auto-alert. A
+        separate flag is required: using the newest LONG/SHORT observation for
+        cooldown would make a weak, unsent setup block the next good one.
+        ``alert_emitted_ms`` uses wall-clock send time rather than the exchange
+        candle timestamp, so a delayed snapshot cannot bypass the cooldown.
+        """
         payload = json.dumps(signal.to_dict(), ensure_ascii=False, default=str)
         self._execute(
             """
-            INSERT OR REPLACE INTO v3_signals
+            INSERT INTO v3_signals
             (uid, symbol, ts_ms, direction, status, score, confidence, quality, tier,
-             regime, price, entry, sl, rr, payload, index_ts, created_ms)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             regime, price, entry, sl, rr, payload, index_ts, created_ms,
+             alert_emitted, alert_emitted_ms)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(uid) DO UPDATE SET
+                symbol=excluded.symbol,
+                ts_ms=excluded.ts_ms,
+                direction=excluded.direction,
+                status=excluded.status,
+                score=excluded.score,
+                confidence=excluded.confidence,
+                quality=excluded.quality,
+                tier=excluded.tier,
+                regime=excluded.regime,
+                price=excluded.price,
+                entry=excluded.entry,
+                sl=excluded.sl,
+                rr=excluded.rr,
+                payload=excluded.payload,
+                index_ts=excluded.index_ts,
+                created_ms=excluded.created_ms,
+                -- Once sent, a later status update must not erase the marker.
+                alert_emitted=MAX(v3_signals.alert_emitted, excluded.alert_emitted),
+                alert_emitted_ms=CASE
+                    WHEN excluded.alert_emitted=1
+                    THEN MAX(v3_signals.alert_emitted_ms, excluded.alert_emitted_ms)
+                    ELSE v3_signals.alert_emitted_ms
+                END
             """,
             (
                 signal.uid,
@@ -110,6 +172,8 @@ class SignalStore:
                 payload,
                 signal.ts_ms,
                 signal.created_ms,
+                int(bool(alert_emitted)),
+                int(alert_emitted_ms or 0) if alert_emitted else 0,
             ),
         )
 
@@ -127,8 +191,23 @@ class SignalStore:
         return [self._row_to_dict(r) for r in rows]
 
     def latest_sent_at(self, symbol: str) -> int:
+        """Timestamp of the latest setup that was eligible for an auto-push.
+
+        Stored observations are not sends. Filtering by ``alert_emitted`` keeps
+        a weak/ignored LONG or SHORT from blocking a later high-quality setup.
+        """
         rows = self._query(
-            "SELECT MAX(ts_ms) AS ts FROM v3_signals WHERE symbol=? AND direction IN ('LONG','SHORT')",
+            """
+            SELECT MAX(
+                CASE
+                    WHEN alert_emitted=1 AND alert_emitted_ms > 0 THEN alert_emitted_ms
+                    WHEN alert_emitted=1 THEN ts_ms
+                    ELSE 0
+                END
+            ) AS ts
+            FROM v3_signals
+            WHERE symbol=? AND direction IN ('LONG','SHORT')
+            """,
             (symbol.upper(),),
         )
         return int(rows[0]["ts"] or 0) if rows else 0
@@ -217,8 +296,9 @@ class SignalLifecycle:
 
     def register(self, signal: TradingSignal) -> None:
         self._active[signal.symbol] = signal
-        self._last_emitted[signal.symbol] = int(time.time() * 1000)
-        self.store.save_signal(signal)
+        emitted_ms = int(time.time() * 1000)
+        self._last_emitted[signal.symbol] = emitted_ms
+        self.store.save_signal(signal, alert_emitted=True, alert_emitted_ms=emitted_ms)
 
     def active(self) -> list[TradingSignal]:
         return list(self._active.values())
