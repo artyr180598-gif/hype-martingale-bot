@@ -214,14 +214,15 @@ def test_alert_gate_rejects_stale_exhausted_and_short_plan():
     assert not wait.ok and any("направления" in r for r in wait.reasons)
 
 
-def test_alert_card_is_self_explanatory():
+def test_alert_card_is_a_short_report():
     cfg = SignalConfig()
     text = render_signal_alert(strong_signal(), cfg)
-    assert "🚨 **АВТО-СИГНАЛ**" in text
-    assert "УВЕРЕННОСТЬ БОТА" in text and "из 100" in text
-    assert "Вход:" in text and "Стоп-лосс:" in text and "Цели:" in text
-    assert "Потенциал к риску 1:2.6" in text
-    assert "Почему бот уверен" in text
+    assert "🔔 **SOLUSDT**" in text
+    assert "LONG" in text and "ставка на рост" in text
+    assert "Вход:" in text
+    assert "Ожидание:" in text
+    assert "Стоп:" in text and "идея отменена" in text
+    assert "потенциал 1:2.6" in text
     assert "не гарантия результата" in text
     for token in _INTERNAL_TOKENS:
         assert token not in text.lower()
@@ -231,7 +232,8 @@ def test_render_alert_dispatches_signal_and_event():
     cfg = SignalConfig()
     sig = strong_signal()
     item = AlertItem(kind="signal", signal=sig, decision=evaluate_alert(sig, cfg))
-    assert "АВТО-СИГНАЛ" in render_alert(item, cfg)
+    rendered = render_alert(item, cfg)
+    assert "SOLUSDT" in rendered and "LONG" in rendered and "Ожидание:" in rendered
 
     event = AlertItem(kind="event", event={"symbol": "SOLUSDT", "event": "TP1_HIT", "price": 143.5})
     text = render_alert(event, cfg)

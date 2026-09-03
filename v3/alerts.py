@@ -1,4 +1,4 @@
-"""Авто-сигналы: порог «действительно хороший сетап» + красивая карточка.
+"""Авто-сигналы: порог «действительно хороший сетап» + короткий отчёт.
 
 Задача раздела: бот сам сканирует рынок и молчит, пока не найдёт сетап, который
 проходит ВСЕ пороги качества. Всё, что не дотянуло, сохраняется в SQLite и видно
@@ -19,13 +19,6 @@ from typing import Any
 from v3.analysis.confidence import ConfidenceReport, assess_confidence
 from v3.config import SignalConfig
 from v3.models import TradingSignal
-from v3.tg.render import (
-    confidence_bar,
-    confidence_headline,
-    data_completeness_line,
-    quality_label,
-    source_stamp,
-)
 
 # События жизненного цикла, по которым тоже пишем в чат (TP/SL).
 EVENT_EMOJI = {
@@ -197,9 +190,13 @@ def _target_line(signal: TradingSignal) -> str:
 
 
 def render_signal_alert(signal: TradingSignal, cfg: SignalConfig | None = None) -> str:
-    """Карточка, которая приходит сама: уверенность, план сделки, почему."""
+    """Короткий отчёт, который бот присылает сам: направление, цена, ожидание.
+
+    Полного разбора здесь нет — он в карточке по запросу. В авто-сообщении
+    ровно то, что нужно для решения «смотреть или нет»: Лонг/Шорт, по какой
+    цене вход, чего ждать (цели) и где идея отменяется (стоп). И дисклеймер.
+    """
     cfg = cfg or SignalConfig()
-    report = assess_confidence(signal, cfg)
     emoji = "🟢" if signal.direction == "LONG" else "🔻"
     side = "LONG — ставка на рост" if signal.direction == "LONG" else "SHORT — ставка на падение"
     entry_low, entry_high = signal.entry_zone or (0.0, 0.0)
@@ -209,51 +206,20 @@ def render_signal_alert(signal: TradingSignal, cfg: SignalConfig | None = None) 
         if entry_mid and signal.stop_loss
         else 0.0
     )
-    rb = signal.risk_brief
-    risk_pct = float(getattr(rb, "max_deposit_pct", 0.0) or 0.0)
-    leverage = int(getattr(signal, "leverage", 0) or (getattr(rb, "leverage", 1) or 1))
 
-    lines = [
-        f"🚨 **АВТО-СИГНАЛ** · {emoji} **{signal.symbol}** — {side}",
-        "",
-        confidence_headline(report),
-        f"{confidence_bar(report.percent)} {report.percent:.0f} из 100 · {report.verdict}",
-        source_stamp(signal.source, signal.ts_ms, signal.data_age_seconds),
-        "",
-        f"⭐ Оценка сетапа: {quality_label(signal.quality, signal.tier, cfg)}",
-        data_completeness_line(signal),
-        "",
-        "💰 **План сделки:**",
-        f"• Вход: {entry_low:.6g}–{entry_high:.6g}",
-        f"• Стоп-лосс: {signal.stop_loss:.6g} (−{stop_pct:.1f}% от входа) — идея отменена",
-    ]
+    lines = [f"🔔 **{signal.symbol}** — {emoji} {side}"]
+    if entry_low and entry_high:
+        lines.append(f"• Вход: {entry_low:.6g}–{entry_high:.6g}")
+    elif entry_mid:
+        lines.append(f"• Вход: {entry_mid:.6g}")
     targets = _target_line(signal)
     if targets:
-        lines.append(f"• Цели: {targets}")
-    tail = f"• Потенциал к риску 1:{signal.rr:.1f} · плечо до {leverage}x"
-    if risk_pct:
-        tail += f" · риск ≈ {risk_pct:.1f}% депозита"
+        lines.append(f"• Ожидание: {targets}")
+    tail = f"• Стоп: {signal.stop_loss:.6g} (−{stop_pct:.1f}%) — идея отменена"
+    if signal.rr:
+        tail += f" · потенциал 1:{signal.rr:.1f}"
     lines.append(tail)
-
-    lines += ["", "🔍 **Почему бот уверен** (вес анализа в цифре):"]
-    for part in report.parts:
-        lines.append(f"• {part.title}: {part.score:.0f}% (вес {part.weight * 100:.0f}%) — {part.note}")
-
-    human_risks = [r for r in (signal.risks or []) if not r.startswith(("stop distance", "priority"))][:3]
-    if human_risks:
-        lines += ["", "⚠️ **На что смотреть:**"]
-        lines += [f"• {r}" for r in human_risks]
-    if report.warnings:
-        lines += ["", "📉 **Что снижает уверенность:**"]
-        lines += [f"• {w}" for w in report.warnings]
-
-    lines += [
-        "",
-        "❗ Авто-сигнал — аналитика, не гарантия результата и не приказ входить. "
-        "Решение и риск на вас.",
-        "🤖 Бот сделки не открывает: он только советует, куда и по какой цене "
-        "смотреть. Торговые ключи ему не нужны.",
-    ]
+    lines += ["", "❗ Аналитика, не гарантия результата."]
     return "\n".join(lines)
 
 
