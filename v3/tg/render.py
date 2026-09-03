@@ -416,6 +416,68 @@ _EMERGENCE_NOT_EARLY = (
 )
 
 
+_EARLY_WORDS = {
+    "LONG": ("LONG (в лонг, ставка на рост)", "🟢"),
+    "SHORT": ("SHORT (в шорт, ставка на падение)", "🔻"),
+}
+# Ранняя фаза = меньше подтверждений, значит и плечо меньше «боевого» лимита.
+EMERGING_MAX_LEVERAGE = 3
+
+
+def _emerging_direction(cand: dict[str, Any], sig: TradingSignal | None) -> str:
+    """Куда, вероятно, пойдёт движение: сначала полный анализ, потом подсказка."""
+    if sig is not None and getattr(sig, "direction", "") in ("LONG", "SHORT"):
+        return str(sig.direction)
+    early = str(cand.get("early_direction") or "FLAT")
+    return early if early in ("LONG", "SHORT") else "FLAT"
+
+
+def _emerging_levels(
+    cand: dict[str, Any], sig: TradingSignal | None, direction: str
+) -> list[str]:
+    """Строки с ценами: вход, стоп, цели. Из сигнала — точные, иначе ориентиры."""
+    if sig is not None and getattr(sig, "entry_zone", None) and sig.entry_zone[0]:
+        out = [
+            f"  Цены: вход {sig.entry_zone[0]:.6g}–{sig.entry_zone[1]:.6g}"
+            f" · стоп {sig.stop_loss:.6g}"
+        ]
+        targets = _targets_pct_line(sig)
+        if targets:
+            out.append(f"  {targets[0].upper() + targets[1:]}")
+        return out
+
+    price = float(cand.get("price") or 0.0)
+    if price <= 0 or direction not in ("LONG", "SHORT"):
+        return []
+    hi = float(cand.get("high_24h") or 0.0) or price * 1.05
+    lo = float(cand.get("low_24h") or 0.0) or price * 0.95
+    if direction == "LONG":
+        entry_lo, entry_hi = price * 0.997, price * 1.004
+        stop = max(lo, price * 0.95) * 0.999
+        t1, t2 = price * 1.02, max(hi, price * 1.045)
+    else:
+        entry_lo, entry_hi = price * 0.996, price * 1.003
+        stop = min(hi, price * 1.05) * 1.001
+        t1, t2 = price * 0.98, min(lo, price * 0.955)
+    return [
+        f"  Цены (ориентир, цена сейчас {price:.6g}): вход {entry_lo:.6g}–{entry_hi:.6g}"
+        f" · стоп {stop:.6g}",
+        f"  Цели: {t1:.6g} → {t2:.6g}",
+    ]
+
+
+def _emerging_leverage_line(sig: TradingSignal | None, cfg: SignalConfig) -> str:
+    """Плечо: берём из риск-брифа, но в ранней фазе режем до безопасного потолка."""
+    rb = getattr(sig, "risk_brief", None) if sig is not None else None
+    base = int(getattr(sig, "leverage", 0) or (rb.leverage if rb else 0) or 0)
+    cap = min(EMERGING_MAX_LEVERAGE, int(cfg.MAX_LEVERAGE))
+    lev = min(base, cap) if base else cap
+    tail = ""
+    if rb is not None and rb.max_deposit_pct:
+        tail = f" · риск ~{rb.max_deposit_pct:.1f}% депозита"
+    return f"  Плечо: не выше {lev}x (ранняя фаза — вход маленьким объёмом){tail}"
+
+
 def _emergence_notes(item: dict[str, Any]) -> list[str]:
     """Готовые человеческие заметки emergence (из сигнала или из кандидата)."""
     sig = item.get("signal")
@@ -458,7 +520,15 @@ def render_emerging(
             "NEUTRAL": "наблюдение",
         }.get(phase, "ранняя фаза")
         hint = " · ".join(notes[:2]) if notes else "признаков хватает, но коротко их не описать"
-        lines.append(f"• **{symbol}** — подогрев {ignition:.0f}/100 · фаза: {phase_text}")
+        direction = _emerging_direction(cand, sig)
+        dir_text, dir_emoji = _EARLY_WORDS.get(
+            direction, ("направление ещё не определилось — входа нет, только наблюдение", "⏳")
+        )
+        lines.append(f"• {dir_emoji} **{symbol}** — подогрев {ignition:.0f}/100 · фаза: {phase_text}")
+        lines.append(f"  Куда: {dir_text}")
+        if direction in ("LONG", "SHORT"):
+            lines += _emerging_levels(cand, sig, direction)
+            lines.append(_emerging_leverage_line(sig, cfg))
         lines.append(f"  Признаки: {hint}")
         if sig is not None:
             # Глубокий анализ уже есть — показываем обе метрики отдельными
