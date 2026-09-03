@@ -1,8 +1,10 @@
-"""Авто-сигналы: порог «действительно хороший сетап» + короткий отчёт.
+"""Авто-сигналы: строгий порог + короткий план сделки.
 
 Задача раздела: бот сам сканирует рынок и молчит, пока не найдёт сетап, который
-проходит ВСЕ пороги качества. Всё, что не дотянуло, сохраняется в SQLite и видно
-в разделах «⭐ ТОП / 🔥 LONG / 🔻 SHORT» — но в чат не летит.
+проходит ВСЕ пороги качества. В push попадает только такой сетап: направление,
+процент согласованности анализов, короткая причина, вход и план выхода. Всё, что
+не дотянуло, сохраняется в SQLite и видно в разделах «⭐ ТОП / 🔥 LONG / 🔻 SHORT»
+— но в чат не летит.
 
 Порог намеренно строже основного гейта входа (``validator.validate_signal``):
 основной гейт отвечает на «можно ли это показывать», порог авто-сигнала — на
@@ -189,14 +191,65 @@ def _target_line(signal: TradingSignal) -> str:
     return " → ".join(parts)
 
 
-def render_signal_alert(signal: TradingSignal, cfg: SignalConfig | None = None) -> str:
-    """Короткий отчёт, который бот присылает сам: направление, цена, ожидание.
+def _compact_reasons(signal: TradingSignal, limit: int = 3) -> list[str]:
+    """Вернуть короткое объяснение выбора без сырых полей движка.
 
-    Полного разбора здесь нет — он в карточке по запросу. В авто-сообщении
-    ровно то, что нужно для решения «смотреть или нет»: Лонг/Шорт, по какой
-    цене вход, чего ждать (цели) и где идея отменяется (стоп). И дисклеймер.
+    Полная карточка уже содержит факторный разбор. Push-уведомление должно
+    оставаться коротким, но фраза «почему» обязательна: иначе пользователь
+    видит только направление и может принять процент за вероятность прибыли.
+    ``plain_reasons`` живёт в UI-модуле, поэтому импорт намеренно локальный —
+    так ``alerts`` остаётся пригодным для CLI/API без циклического импорта.
+    """
+    try:
+        from v3.tg.render import plain_reasons
+
+        reasons = plain_reasons(signal)
+    except Exception:  # noqa: BLE001 — объяснение не должно блокировать push
+        reasons = []
+
+    # В редком случае неполного объекта сигнала всё равно объясняем решение
+    # честно, не выдумывая технические факторы.
+    if not reasons:
+        reasons = ["сетап прошёл фильтры направления, качества и риска"]
+    return [str(reason).strip() for reason in reasons if str(reason).strip()][:limit]
+
+
+def _close_line(signal: TradingSignal, cfg: SignalConfig) -> str:
+    """Понятный план выхода: частичные цели, безубыток и финальное закрытие."""
+    if not signal.targets:
+        return ""
+    close_pcts = list(cfg.TP_CLOSE_PCT)
+    parts: list[str] = []
+    for index, target in enumerate(signal.targets[:3], 1):
+        share = close_pcts[index - 1] if index <= len(close_pcts) else None
+        share_text = f" — закрыть {share * 100:.0f}%" if share is not None else ""
+        parts.append(f"TP{index} {target:.6g}{share_text}")
+    plan = "; ".join(parts)
+    if len(signal.targets) >= 2:
+        final_target = min(3, len(signal.targets))
+        plan += f". После TP1 стоп в безубыток; остаток закрыть на TP{final_target}"
+    else:
+        plan += ". Закрыть позицию на цели"
+    return f"• Закрытие: {plan}."
+
+
+def render_signal_alert(
+    signal: TradingSignal,
+    cfg: SignalConfig | None = None,
+    decision: AlertDecision | None = None,
+) -> str:
+    """Короткий push-отчёт, который бот присылает сам.
+
+    Уведомление содержит ровно план, необходимый для решения «смотреть или
+    нет»: LONG/SHORT, процент согласованности анализов (не вероятность
+    прибыли), короткое «почему», зону входа, цели, момент частичной/полной
+    фиксации и уровень отмены идеи. Полный разбор остаётся по кнопке анализа.
     """
     cfg = cfg or SignalConfig()
+    # Переданный decision важен для push: гейт и текст показывают один и тот
+    # же расчёт уверенности. При вызове напрямую (тест/legacy) считаем его
+    # здесь, не меняя публичный двухаргументный контракт.
+    report = decision.report if decision is not None and decision.report is not None else assess_confidence(signal, cfg)
     emoji = "🟢" if signal.direction == "LONG" else "🔻"
     side = "LONG — ставка на рост" if signal.direction == "LONG" else "SHORT — ставка на падение"
     entry_low, entry_high = signal.entry_zone or (0.0, 0.0)
@@ -207,14 +260,24 @@ def render_signal_alert(signal: TradingSignal, cfg: SignalConfig | None = None) 
         else 0.0
     )
 
-    lines = [f"🔔 **{signal.symbol}** — {emoji} {side}"]
+    lines = [
+        f"🔔 **{signal.symbol}** — {emoji} {side}",
+        f"🎯 Уверенность бота: **{report.percent:.0f}% — {report.label}** "
+        "(согласованность анализов, НЕ вероятность прибыли)",
+        "",
+        "**Почему выбран:**",
+    ]
+    lines.extend(f"• {reason}" for reason in _compact_reasons(signal))
     if entry_low and entry_high:
-        lines.append(f"• Вход: {entry_low:.6g}–{entry_high:.6g}")
+        lines.append(f"• Вход: {signal.direction} {entry_low:.6g}–{entry_high:.6g}")
     elif entry_mid:
-        lines.append(f"• Вход: {entry_mid:.6g}")
+        lines.append(f"• Вход: {signal.direction} {entry_mid:.6g}")
     targets = _target_line(signal)
     if targets:
         lines.append(f"• Ожидание: {targets}")
+    close_line = _close_line(signal, cfg)
+    if close_line:
+        lines.append(close_line)
     tail = f"• Стоп: {signal.stop_loss:.6g} (−{stop_pct:.1f}%) — идея отменена"
     if signal.rr:
         tail += f" · потенциал 1:{signal.rr:.1f}"
@@ -267,7 +330,7 @@ def render_alert(item: Any, cfg: SignalConfig | None = None) -> str:
     cfg = cfg or SignalConfig()
     if isinstance(item, AlertItem):
         if item.kind == "signal" and item.signal is not None:
-            return render_signal_alert(item.signal, cfg)
+            return render_signal_alert(item.signal, cfg, item.decision)
         return render_event_alert(item.event or {}, cfg)
     # legacy-контракт: список словарей (sig.to_dict() / событие)
     data = item if isinstance(item, dict) else {}
