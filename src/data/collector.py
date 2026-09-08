@@ -23,6 +23,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import time
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -238,12 +239,15 @@ class BybitSource(_Http, MarketDataSource):
                     category=category,
                     status=str(it.get("status", "Trading")),
                     price_scale=int(it.get("priceScale", 4) or 4),
-                    qty_scale=int(str(it.get("lotSizeFilter", {}).get("qtyStep", "0.001")).split(".")[-1].rstrip("0") or 3),
+                    qty_scale=_decimal_places(it.get("lotSizeFilter", {}).get("qtyStep", "0.001"), 3),
                     tick_size=float(it.get("priceFilter", {}).get("tickSize", 0.0001) or 0.0001),
                     qty_step=float(it.get("lotSizeFilter", {}).get("qtyStep", 0.001) or 0.001),
                     min_qty=float(it.get("lotSizeFilter", {}).get("minOrderQty", 0) or 0),
                     min_notional=float(it.get("lotSizeFilter", {}).get("minOrderAmt", 5) or 5),
-                    max_leverage=int(it.get("leverageFilter", {}).get("maxLeverage", 50) or 50),
+                    # Bybit may return decimal strings (for example "50.00").
+                    # int("50.00") crashed the whole primary source and forced
+                    # every production cycle onto Binance.
+                    max_leverage=int(float(it.get("leverageFilter", {}).get("maxLeverage", 50) or 50)),
                     maker_fee=0.0002,
                     taker_fee=0.00055,
                     launch_time_ms=int(it.get("launchTime", 0) or 0) or None,
@@ -1255,3 +1259,12 @@ def _none_or_int(v: Any) -> int | None:
         return int(v) if v not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+def _decimal_places(v: Any, default: int = 0) -> int:
+    """Number of decimal places in an exchange step, including 1e-N form."""
+    try:
+        exponent = Decimal(str(v)).normalize().as_tuple().exponent
+        return max(0, -int(exponent))
+    except (InvalidOperation, TypeError, ValueError):
+        return default
