@@ -299,6 +299,41 @@ def test_bybit_account_ratio_uses_public_endpoint():
     assert calls == ["/v5/market/account-ratio"], "second call must hit the 300s cache"
 
 
+def test_bybit_instruments_accept_decimal_max_leverage_and_step_scale():
+    """Real Bybit payloads may encode maxLeverage as e.g. ``50.00``."""
+    from src.config.settings import Settings
+    from src.data.collector import BybitSource
+
+    src = BybitSource(Settings())
+
+    async def fake_get(path: str, params: dict | None = None):  # noqa: ANN001
+        return {
+            "retCode": 0,
+            "result": {"list": [{
+                "symbol": "TESTUSDT", "baseCoin": "TEST", "quoteCoin": "USDT",
+                "status": "Trading", "priceScale": "4", "launchTime": "1700000000000",
+                "priceFilter": {"tickSize": "0.0001"},
+                "lotSizeFilter": {
+                    "qtyStep": "0.001", "minOrderQty": "0.001", "minOrderAmt": "5",
+                },
+                "leverageFilter": {"maxLeverage": "50.00"},
+            }]},
+        }
+
+    src.get = fake_get  # type: ignore[method-assign]
+
+    async def run():
+        try:
+            return await src.discover_instruments()
+        finally:
+            await src.close()
+
+    instruments = asyncio.run(run())
+    assert len(instruments) == 1
+    assert instruments[0].max_leverage == 50
+    assert instruments[0].qty_scale == 3
+
+
 # ── levels: structure-anchored entry zone ──────────────────────
 def test_levels_anchors_entry_zone_to_support():
     from v3.analysis.levels import build_levels
