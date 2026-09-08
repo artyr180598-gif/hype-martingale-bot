@@ -109,6 +109,14 @@ def evaluate_alert(signal: Any, cfg: SignalConfig | None = None) -> AlertDecisio
     emergence = (getattr(signal, "features", None) or {}).get("emergence") or {}
     if str(emergence.get("phase", "")) == "EXHAUSTED":
         reasons.append("движение уже выжато — догонять поздно")
+    scenario = str((getattr(signal, "features", None) or {}).get("scenario") or getattr(signal, "scenario", ""))
+    if scenario == "early_cycle":
+        if str(emergence.get("cycle_stage", "")) != "CONFIRMED":
+            reasons.append("цикл только формируется — ждём закрытого подтверждающего бара")
+        if str(emergence.get("early_direction", "")) != direction:
+            reasons.append("направление цикла не совпадает с торговым сигналом")
+        if float(emergence.get("cycle_score", 0.0) or 0.0) < cfg.CYCLE_TRADE_SCORE_MIN:
+            reasons.append("оценка начала цикла ниже торгового порога")
 
     stop_loss = float(getattr(signal, "stop_loss", 0.0) or 0.0)
     targets = list(getattr(signal, "targets", []) or [])
@@ -268,6 +276,14 @@ def render_signal_alert(
         "**Почему выбран:**",
     ]
     lines.extend(f"• {reason}" for reason in _compact_reasons(signal))
+    emergence = (signal.features or {}).get("emergence") or {}
+    if emergence and signal.direction in ("LONG", "SHORT"):
+        stage = str(emergence.get("cycle_stage", ""))
+        score = float(emergence.get("cycle_score", 0.0) or 0.0)
+        margin = float(emergence.get("bias_margin", 0.0) or 0.0)
+        if stage in ("TURNING", "CONFIRMED") and score > 0:
+            stage_ru = "первый импульс подтверждён" if stage == "CONFIRMED" else "цикл разворачивается"
+            lines.append(f"• Начало цикла: {stage_ru} · {score:.0f}/100 · перевес {margin:.0f}")
     if entry_low and entry_high:
         lines.append(f"• Вход: {signal.direction} {entry_low:.6g}–{entry_high:.6g}")
     elif entry_mid:
@@ -282,6 +298,8 @@ def render_signal_alert(
     if signal.rr:
         tail += f" · потенциал 1:{signal.rr:.1f}"
     lines.append(tail)
+    if signal.condition:
+        lines.append(f"• Условие: {signal.condition}")
     lines += ["", "❗ Аналитика, не гарантия результата."]
     return "\n".join(lines)
 

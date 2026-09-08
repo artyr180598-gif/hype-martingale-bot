@@ -274,6 +274,14 @@ def plain_reasons(signal: TradingSignal) -> list[str]:
         out.append("цена у границы диапазона — игра на возврат к середине")
     elif scenario == "breakout_watch":
         out.append("волатильность сжата — ждём подтверждённый пробой")
+    elif scenario == "early_cycle":
+        em = features.get("emergence") or {}
+        side = "роста" if direction == "LONG" else "падения"
+        out.append(
+            f"обнаружено раннее начало цикла {side}: "
+            f"оценка {float(em.get('cycle_score', 0.0) or 0.0):.0f}/100, "
+            f"перевес стороны {float(em.get('bias_margin', 0.0) or 0.0):.0f}"
+        )
     else:
         aligned = [str(v.get("timeframe")) for v in views[:4] if v.get("trend") == want]
         if aligned:
@@ -433,7 +441,7 @@ def _emerging_direction(cand: dict[str, Any], sig: TradingSignal | None) -> str:
 
 
 def _emerging_levels(
-    cand: dict[str, Any], sig: TradingSignal | None, direction: str
+    cand: dict[str, Any], sig: TradingSignal | None, direction: str, cfg: SignalConfig
 ) -> list[str]:
     """Строки с ценами: вход, стоп, цели. Из сигнала — точные, иначе ориентиры."""
     if sig is not None and getattr(sig, "entry_zone", None) and sig.entry_zone[0]:
@@ -447,23 +455,24 @@ def _emerging_levels(
         return out
 
     price = float(cand.get("price") or 0.0)
+    em = (getattr(sig, "features", None) or {}).get("emergence") if sig is not None else {}
+    trigger = float((em or {}).get("trigger_price", 0.0) or 0.0)
+    invalidation = float((em or {}).get("invalidation_price", 0.0) or 0.0)
     if price <= 0 or direction not in ("LONG", "SHORT"):
         return []
-    hi = float(cand.get("high_24h") or 0.0) or price * 1.05
-    lo = float(cand.get("low_24h") or 0.0) or price * 0.95
-    if direction == "LONG":
-        entry_lo, entry_hi = price * 0.997, price * 1.004
-        stop = max(lo, price * 0.95) * 0.999
-        t1, t2 = price * 1.02, max(hi, price * 1.045)
-    else:
-        entry_lo, entry_hi = price * 0.996, price * 1.003
-        stop = min(hi, price * 1.05) * 1.001
-        t1, t2 = price * 0.98, min(lo, price * 0.955)
-    return [
-        f"  Цены (ориентир, цена сейчас {price:.6g}): вход {entry_lo:.6g}–{entry_hi:.6g}"
-        f" · стоп {stop:.6g}",
-        f"  Цели: {t1:.6g} → {t2:.6g}",
-    ]
+    # Если полный гейт не дал торговый сигнал, не выдумываем проценты входа,
+    # стопа и целей из 24h high/low. Показываем только реальную границу базы.
+    if trigger > 0:
+        side = "выше" if direction == "LONG" else "ниже"
+        out = [
+            f"  Триггер: закрытие {cfg.INTERMEDIATE_TF}-свечи {side} "
+            f"{trigger:.6g} (сейчас {price:.6g})"
+        ]
+        if invalidation > 0:
+            out.append(f"  Отмена наблюдения: {invalidation:.6g}")
+        out.append("  Вход/стоп/цели бот пришлёт только после полного торгового гейта")
+        return out
+    return ["  Входа пока нет: ждём подтверждение и расчёт точных уровней"]
 
 
 def _emerging_leverage_line(sig: TradingSignal | None, cfg: SignalConfig) -> str:
@@ -527,7 +536,7 @@ def render_emerging(
         lines.append(f"• {dir_emoji} **{symbol}** — подогрев {ignition:.0f}/100 · фаза: {phase_text}")
         lines.append(f"  Куда: {dir_text}")
         if direction in ("LONG", "SHORT"):
-            lines += _emerging_levels(cand, sig, direction)
+            lines += _emerging_levels(cand, sig, direction, cfg)
             lines.append(_emerging_leverage_line(sig, cfg))
         lines.append(f"  Признаки: {hint}")
         if sig is not None:

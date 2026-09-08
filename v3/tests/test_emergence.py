@@ -21,7 +21,7 @@ from v3.analysis.derivatives import analyze_derivatives
 from v3.analysis.emergence import detect_emergence
 from v3.analysis.timeframes import build_timeframe_view
 from v3.config import SignalConfig
-from v3.engine import FuturesSignalEngine
+from v3.engine import FuturesSignalEngine, early_cycle_candidate
 from v3.models import DataBundle
 from v3.scanner import Scanner
 from v3.tg.render import EMERGING_DISCLAIMER
@@ -101,6 +101,67 @@ def test_emergence_is_feature_not_gate_direction():
     # тест инварианта: у модели нет поля direction/gate — только ранняя подсказка
     e = detect_emergence(df, cfg=cfg)
     assert e.early_direction in ("LONG", "SHORT", "FLAT")
+
+
+def _turning_cycle_df(side: str) -> pd.DataFrame:
+    """База + ранний направленный поворот без большого состоявшегося хода."""
+    n = 180
+    rng = np.random.default_rng(42 if side == "LONG" else 43)
+    returns = rng.normal(0.0, 0.00025, n)
+    direction = 1.0 if side == "LONG" else -1.0
+    returns[-8:] += direction * np.linspace(0.00015, 0.0012, 8)
+    close = 100.0 * np.cumprod(1.0 + returns)
+    opens = np.r_[close[0], close[:-1]]
+    wick = np.full(n, 0.00045)
+    highs = np.maximum(opens, close) * (1.0 + wick)
+    lows = np.minimum(opens, close) * (1.0 - wick)
+    volume = np.full(n, 1_000.0)
+    volume[-8:] = np.linspace(1_050.0, 2_200.0, 8)
+    ts = np.arange(n, dtype=np.int64) * 3_600_000 + 1_700_000_000_000
+    return pd.DataFrame({"ts": ts, "open": opens, "high": highs, "low": lows, "close": close, "volume": volume})
+
+
+def test_cycle_score_is_directional_and_symmetric():
+    cfg = SignalConfig(CYCLE_DIRECTION_SCORE_MIN=50, CYCLE_BIAS_MARGIN_MIN=8)
+    up = detect_emergence(_turning_cycle_df("LONG"), cfg=cfg)
+    down = detect_emergence(_turning_cycle_df("SHORT"), cfg=cfg)
+    assert up.long_score > up.short_score
+    assert up.early_direction == "LONG"
+    assert up.trigger_price > up.invalidation_price > 0
+    assert down.short_score > down.long_score
+    assert down.early_direction == "SHORT"
+    assert down.invalidation_price > down.trigger_price > 0
+
+
+def test_cycle_candidate_blocks_building_and_opposite_macro():
+    cfg = SignalConfig(CYCLE_TRADE_SCORE_MIN=68, CYCLE_BIAS_MARGIN_MIN=12)
+    e = detect_emergence(_turning_cycle_df("LONG"), cfg=SignalConfig(
+        CYCLE_DIRECTION_SCORE_MIN=45, CYCLE_TRADE_SCORE_MIN=45, CYCLE_BIAS_MARGIN_MIN=5,
+    ))
+    # Принудительно фиксируем контракт гейта независимо от синтетической фазы.
+    e.cycle_stage = "BUILDING"
+    assert early_cycle_candidate(e, [], cfg)[0] == "WAIT"
+    e.cycle_stage = "CONFIRMED"
+    e.cycle_score = 80
+    e.bias_margin = 25
+    macro = build_timeframe_view(make_df(300, "down"), "4h")
+    macro.trend = "down"
+    macro.adx = 35
+    assert early_cycle_candidate(e, [macro], cfg)[0] == "WAIT"
+
+
+def test_cycle_candidate_returns_clear_trigger_condition():
+    cfg = SignalConfig(CYCLE_TRADE_SCORE_MIN=60, CYCLE_BIAS_MARGIN_MIN=10)
+    e = detect_emergence(_turning_cycle_df("LONG"), cfg=SignalConfig(
+        CYCLE_DIRECTION_SCORE_MIN=45, CYCLE_TRADE_SCORE_MIN=45, CYCLE_BIAS_MARGIN_MIN=5,
+    ))
+    e.early_direction = "LONG"
+    e.cycle_stage = "TURNING"
+    e.cycle_score = 75
+    e.bias_margin = 20
+    direction, condition = early_cycle_candidate(e, [], cfg)
+    assert direction == "LONG"
+    assert "закрытия" in condition and str(round(e.trigger_price, 4))[:4] in condition
 
 
 # ── timeframes: новые поля + исправленный BOS/CHoCH ─────────────

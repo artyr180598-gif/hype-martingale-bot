@@ -67,6 +67,44 @@ def _weighted_vote(views: list[TimeframeView]) -> tuple[str, float]:
     return "flat", score
 
 
+def early_cycle_candidate(
+    emergence: Any,
+    views: list[TimeframeView],
+    cfg: SignalConfig,
+) -> tuple[str, str]:
+    """Вернуть раннюю сторону и исполняемое условие либо ``WAIT``.
+
+    Cycle detector может показать BUILDING для наблюдения, но торговый движок
+    принимает только TURNING/CONFIRMED с достаточным отрывом сторон. Сильный
+    старший тренд в противоположную сторону блокирует вход.
+    """
+    if not cfg.CYCLE_TRADING_ENABLED or emergence is None or not getattr(emergence, "enabled", False):
+        return "WAIT", ""
+    direction = str(getattr(emergence, "early_direction", "FLAT"))
+    stage = str(getattr(emergence, "cycle_stage", "NEUTRAL"))
+    score = float(getattr(emergence, "cycle_score", 0.0) or 0.0)
+    margin = float(getattr(emergence, "bias_margin", 0.0) or 0.0)
+    if direction not in ("LONG", "SHORT") or stage not in ("TURNING", "CONFIRMED"):
+        return "WAIT", ""
+    if score < cfg.CYCLE_TRADE_SCORE_MIN or margin < cfg.CYCLE_BIAS_MARGIN_MIN:
+        return "WAIT", ""
+    if views:
+        macro = views[-1]
+        opposite = (direction == "LONG" and macro.trend == "down") or (
+            direction == "SHORT" and macro.trend == "up"
+        )
+        if opposite and macro.adx >= cfg.ADX_TREND_MIN:
+            return "WAIT", ""
+
+    trigger = float(getattr(emergence, "trigger_price", 0.0) or 0.0)
+    if stage == "TURNING" and trigger > 0:
+        side = "выше" if direction == "LONG" else "ниже"
+        condition = f"вход только после закрытия {cfg.INTERMEDIATE_TF}-свечи {side} {trigger:.8g}"
+    else:
+        condition = f"ранний цикл подтверждён закрытой {cfg.INTERMEDIATE_TF}-свечой; не входить вне зоны"
+    return direction, condition
+
+
 def _emergence_snapshot(bundle: DataBundle, tf_map: dict[str, Any], cfg: SignalConfig):
     """Build the early-impulse feature from a closed intermediate timeframe.
 
@@ -279,6 +317,22 @@ class FuturesSignalEngine:
                 stop_hint = candidate.stop_hint
                 reasons.extend(candidate.reasons)
 
+        # Отдельный путь начала цикла. Он работает только если обычный тренд
+        # и сценарии ещё не дали вход: так бот способен увидеть первый
+        # направленный поворот, но не переопределяет уже подтверждённый сетап.
+        if direction == "WAIT" and not regime.conflicts:
+            cycle_direction, cycle_condition = early_cycle_candidate(emergence, views, self.cfg)
+            if cycle_direction in ("LONG", "SHORT"):
+                direction = cycle_direction
+                scenario = "early_cycle"
+                condition = cycle_condition
+                side_word = "вверх" if direction == "LONG" else "вниз"
+                reasons.append(
+                    f"раннее начало цикла {side_word}: направленный счёт "
+                    f"{float(getattr(emergence, 'cycle_score', 0.0)):.0f}/100, "
+                    f"отрыв сторон {float(getattr(emergence, 'bias_margin', 0.0)):.0f}"
+                )
+
         # «Не догоняй рынок»: если цена уже ушла от VWAP в сторону сделки
         # дальше ENTRY_MAX_EXTENSION_ATR, основная часть движения пройдена и
         # вход с высокой вероятностью ловит откат против нас (на реальных
@@ -353,6 +407,8 @@ class FuturesSignalEngine:
                 risks.append("сценарий stop-hunt — стоп за фитилём ложного пробоя")
             elif scenario == "range_reversion":
                 risks.append("вход в диапазоне — меньший размер, выход у середины")
+            elif scenario == "early_cycle":
+                risks.append("ранняя фаза цикла — вход только после условия и уменьшенным объёмом")
             if condition:
                 risks.append("условный сетап: вход только после подтверждения условия")
             # positioning-риски простыми словами (раунд 4)

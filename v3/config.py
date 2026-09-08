@@ -23,8 +23,8 @@ def _data_dir_default() -> Path:
 # оставалась 3.1.0 — пользователь не видел, что код обновился. Версия и
 # подпись раунда теперь печатаются в HELP / меню / настройках / баннере
 # старта: по строке сборки видно, какой процесс реально запущен.
-APP_VERSION_DEFAULT = "3.3.0"
-APP_RELEASE_DEFAULT = "Раунд 6: уверенность бота отдельным блоком + авто-сигналы"
+APP_VERSION_DEFAULT = "3.4.0"
+APP_RELEASE_DEFAULT = "Раунд 7: раннее начало цикла LONG/SHORT"
 
 # Веса «уверенности бота» (v3/analysis/confidence.py). Ключ = анализ,
 # значение = вклад в итоговый процент. Сумма нормируется, поэтому веса можно
@@ -150,6 +150,13 @@ class SignalConfig(BaseSettings):
     EMERGENCE_MAX_RECENT_MOVE_ATR: float = 2.5      # импульс уже слишком далеко от базы
     EMERGENCE_MIN_ROOM_PCT: float = 0.15            # минимум 15% диапазона до границы
     EMERGENCE_IGNITION_MIN: float = 50.0
+    # Направленный cycle score использует только закрытые бары. Сторона
+    # считается определённой, только когда набрала минимум и заметно обогнала
+    # противоположную — это режет шумовые LONG/SHORT в боковике.
+    CYCLE_DIRECTION_SCORE_MIN: float = 58.0
+    CYCLE_BIAS_MARGIN_MIN: float = 12.0
+    CYCLE_TRADE_SCORE_MIN: float = 68.0
+    CYCLE_TRADING_ENABLED: bool = True
     # positioning (OI × funding × цена) — «кто и где стоит»
     OI_CHANGE_BUILD_PCT: float = 2.0
     OI_CHANGE_UNWIND_PCT: float = -2.0
@@ -399,6 +406,10 @@ def validate_config(cfg: SignalConfig | None = None) -> list[str]:
         )
     if not (0 < cfg.MIN_RISK_REWARD_REVERSAL <= cfg.MIN_RISK_REWARD):
         errors.append("MIN_RISK_REWARD_REVERSAL must be in (0, MIN_RISK_REWARD]")
+    if not (0 < cfg.CYCLE_DIRECTION_SCORE_MIN <= cfg.CYCLE_TRADE_SCORE_MIN <= 100):
+        errors.append("CYCLE_DIRECTION_SCORE_MIN <= CYCLE_TRADE_SCORE_MIN must be in (0, 100]")
+    if not (0 <= cfg.CYCLE_BIAS_MARGIN_MIN <= 100):
+        errors.append("CYCLE_BIAS_MARGIN_MIN must be in 0..100")
     tfs = cfg.timeframes
     if not tfs:
         errors.append("TIMEFRAMES is empty")
