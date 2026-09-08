@@ -138,6 +138,13 @@ class EmergenceSnapshot:
     phase: str = "NEUTRAL"                     # EARLY | TRIGGERED | EXHAUSTED | NEUTRAL
     ignition: float = 0.0                       # 0..100 — готовность импульса
     early_direction: str = "FLAT"              # LONG | SHORT | FLAT (направление-подсказка)
+    long_score: float = 0.0                     # независимая оценка начала цикла вверх 0..100
+    short_score: float = 0.0                    # независимая оценка начала цикла вниз 0..100
+    cycle_score: float = 0.0                    # сильнейшая из LONG/SHORT оценок
+    bias_margin: float = 0.0                    # отрыв выбранной стороны от противоположной
+    cycle_stage: str = "NEUTRAL"               # BUILDING | TURNING | CONFIRMED | EXHAUSTED | NEUTRAL
+    trigger_price: float = 0.0                  # граница базы, после которой вход подтверждается
+    invalidation_price: float = 0.0             # противоположная граница базы
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:

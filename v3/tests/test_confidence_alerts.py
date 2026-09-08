@@ -214,6 +214,40 @@ def test_alert_gate_rejects_stale_exhausted_and_short_plan():
     assert not wait.ok and any("направления" in r for r in wait.reasons)
 
 
+def test_early_cycle_alert_waits_for_confirmation():
+    cfg = SignalConfig()
+    sig = strong_signal(scenario="early_cycle")
+    sig.features["scenario"] = "early_cycle"
+    sig.features["emergence"].update({
+        "cycle_stage": "TURNING", "cycle_score": 82.0, "bias_margin": 24.0,
+        "early_direction": "LONG",
+    })
+    waiting = evaluate_alert(sig, cfg)
+    assert not waiting.ok
+    assert any("подтверждающего бара" in reason for reason in waiting.reasons)
+
+    sig.features["emergence"]["cycle_stage"] = "CONFIRMED"
+    confirmed = evaluate_alert(sig, cfg)
+    assert confirmed.ok
+
+
+def test_early_cycle_alert_prints_cycle_and_entry_condition():
+    cfg = SignalConfig()
+    sig = strong_signal(
+        scenario="early_cycle",
+        condition="ранний цикл подтверждён закрытой 1h-свечой; не входить вне зоны",
+    )
+    sig.features["scenario"] = "early_cycle"
+    sig.features["emergence"].update({
+        "cycle_stage": "CONFIRMED", "cycle_score": 86.0, "bias_margin": 31.0,
+        "early_direction": "LONG",
+    })
+    text = render_signal_alert(sig, cfg)
+    assert "Начало цикла: первый импульс подтверждён" in text
+    assert "86/100" in text and "перевес 31" in text
+    assert "Условие:" in text and "не входить вне зоны" in text
+
+
 def test_alert_card_is_a_short_report():
     cfg = SignalConfig()
     text = render_signal_alert(strong_signal(), cfg)

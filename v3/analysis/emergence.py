@@ -170,6 +170,138 @@ def _breakout_pressure(fe: pd.DataFrame, atr: float, close: float) -> float:
     return round(_clip(0.50 * body + 0.35 * close_location + 0.15 * consistency), 3)
 
 
+def _series_delta(fe: pd.DataFrame, column: str, bars: int = 3) -> float:
+    """Изменение индикатора за несколько ЗАКРЫТЫХ баров."""
+    try:
+        values = pd.to_numeric(fe[column], errors="coerce").dropna()
+        if len(values) <= bars:
+            return 0.0
+        return _safe(values.iloc[-1] - values.iloc[-1 - bars])
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _cycle_scores(
+    fe: pd.DataFrame,
+    *,
+    rvol: float,
+    volume_acceleration: float,
+    pressure: float,
+    squeeze_now: bool,
+    squeeze_release: bool,
+    consolidated: bool,
+    near_breakout: bool,
+    near_breakdown: bool,
+    breakout_up: bool,
+    breakout_down: bool,
+) -> tuple[float, float, list[str], list[str]]:
+    """Симметричная оценка зарождения цикла вверх/вниз.
+
+    Она не пытается угадать будущее одной свечой. Баллы требуют согласования
+    нескольких независимых групп: база/сжатие, ранний объём, разворот MACD и
+    RSI, EMA, DI, OBV/CVD и давление закрытий. Все расчёты используют только
+    переданные (в live-пути уже закрытые) бары.
+    """
+    last = fe.iloc[-1]
+    long_score = 0.0
+    short_score = 0.0
+    long_notes: list[str] = []
+    short_notes: list[str] = []
+
+    # Нейтральная «пружина» повышает готовность обеих сторон, но сама не
+    # выбирает направление.
+    if squeeze_now or consolidated:
+        long_score += 8.0
+        short_score += 8.0
+    if squeeze_release:
+        long_score += 7.0
+        short_score += 7.0
+    if rvol >= 1.2:
+        participation = min(10.0, 4.0 + (rvol - 1.2) * 6.0)
+        long_score += participation
+        short_score += participation
+    if volume_acceleration >= 1.20:
+        long_score += 4.0
+        short_score += 4.0
+
+    macd = _safe(last.get("macd_hist"))
+    macd_delta = _series_delta(fe, "macd_hist", 3)
+    if macd_delta > 0:
+        long_score += 14.0
+        long_notes.append("импульс MACD разворачивается вверх")
+        if macd > 0:
+            long_score += 5.0
+    elif macd_delta < 0:
+        short_score += 14.0
+        short_notes.append("импульс MACD разворачивается вниз")
+        if macd < 0:
+            short_score += 5.0
+
+    rsi = _safe(last.get("rsi_14"), 50.0)
+    rsi_delta = _series_delta(fe, "rsi_14", 3)
+    if rsi_delta >= 2.0 and 38.0 <= rsi <= 68.0:
+        long_score += 12.0
+        long_notes.append("RSI растёт без перекупленности")
+    elif rsi_delta <= -2.0 and 32.0 <= rsi <= 62.0:
+        short_score += 12.0
+        short_notes.append("RSI снижается без перепроданности")
+
+    ema9 = _safe(last.get("ema_9"))
+    ema20 = _safe(last.get("ema_20"))
+    ema_gap = ema9 - ema20
+    try:
+        prev = fe.iloc[-4]
+        old_gap = _safe(prev.get("ema_9")) - _safe(prev.get("ema_20"))
+    except Exception:  # noqa: BLE001
+        old_gap = ema_gap
+    if ema_gap > 0 or ema_gap > old_gap:
+        long_score += 13.0
+        long_notes.append("быстрая EMA пересекает или догоняет медленную снизу")
+    if ema_gap < 0 or ema_gap < old_gap:
+        short_score += 13.0
+        short_notes.append("быстрая EMA пересекает или догоняет медленную сверху")
+
+    plus_di = _safe(last.get("plus_di"))
+    minus_di = _safe(last.get("minus_di"))
+    if plus_di > minus_di:
+        long_score += 10.0
+    elif minus_di > plus_di:
+        short_score += 10.0
+
+    obv_delta = _series_delta(fe, "obv", 5)
+    cvd_delta = _series_delta(fe, "cvd", 5)
+    if obv_delta > 0:
+        long_score += 6.0
+    elif obv_delta < 0:
+        short_score += 6.0
+    if cvd_delta > 0:
+        long_score += 7.0
+        long_notes.append("объёмный поток подтверждает покупателей")
+    elif cvd_delta < 0:
+        short_score += 7.0
+        short_notes.append("объёмный поток подтверждает продавцов")
+
+    if pressure >= 0.20:
+        long_score += 10.0
+    elif pressure <= -0.20:
+        short_score += 10.0
+    if near_breakout:
+        long_score += 8.0
+    if near_breakdown:
+        short_score += 8.0
+    if breakout_up:
+        long_score += 10.0
+    if breakout_down:
+        short_score += 10.0
+
+    return (
+        round(min(100.0, long_score), 1),
+        round(min(100.0, short_score), 1),
+        long_notes,
+        short_notes,
+    )
+
+
 def detect_emergence(
     df: pd.DataFrame,
     *,
@@ -222,6 +354,26 @@ def detect_emergence(
         and pressure <= -cfg.EMERGENCE_MIN_BREAKOUT_PRESSURE * 0.6
     )
 
+    base = fe.iloc[-cfg.EMERGENCE_BREAKOUT_LOOKBACK - 1 : -1]
+    base_high = _safe(pd.to_numeric(base["high"], errors="coerce").max(), close)
+    base_low = _safe(pd.to_numeric(base["low"], errors="coerce").min(), close)
+
+    long_score, short_score, long_cycle_notes, short_cycle_notes = _cycle_scores(
+        fe,
+        rvol=rvol,
+        volume_acceleration=volume_acceleration,
+        pressure=pressure,
+        squeeze_now=squeeze_now,
+        squeeze_release=squeeze_release,
+        consolidated=consolidated,
+        near_breakout=near_breakout,
+        near_breakdown=near_breakdown,
+        breakout_up=breakout_up,
+        breakout_down=breakout_down,
+    )
+    best_cycle_score = max(long_score, short_score)
+    bias_margin = abs(long_score - short_score)
+
     oi_build = None
     if oi_delta_pct is not None and _safe(oi_delta_pct, float("nan")) == _safe(oi_delta_pct):
         oi_build = float(oi_delta_pct)
@@ -234,6 +386,11 @@ def detect_emergence(
         early_direction = "LONG"
     elif breakout_down and pressure <= -cfg.EMERGENCE_MIN_BREAKOUT_PRESSURE:
         early_direction = "SHORT"
+    elif (
+        best_cycle_score >= cfg.CYCLE_DIRECTION_SCORE_MIN
+        and bias_margin >= cfg.CYCLE_BIAS_MARGIN_MIN
+    ):
+        early_direction = "LONG" if long_score > short_score else "SHORT"
     elif pressure >= cfg.EMERGENCE_MIN_BREAKOUT_PRESSURE and dpos >= 0.45 and (squeeze_now or squeeze_release or consolidated):
         early_direction = "LONG"
     elif pressure <= -cfg.EMERGENCE_MIN_BREAKOUT_PRESSURE and dpos <= 0.55 and (squeeze_now or squeeze_release or consolidated):
@@ -310,6 +467,10 @@ def detect_emergence(
         ignition += 8.0
         notes.append(f"слабее BTC ({rs24:+.1f}%), но до нижней границы ещё есть место")
 
+    selected_cycle_notes = long_cycle_notes if early_direction == "LONG" else short_cycle_notes
+    if early_direction in ("LONG", "SHORT") and selected_cycle_notes:
+        notes.extend(selected_cycle_notes[:3])
+
     # Анти-chase: отделяем «движение начинается» от «движение уже выжато».
     exhausted = False
     pct = price_24h_pct or 0.0
@@ -329,6 +490,10 @@ def detect_emergence(
         notes.append("близко ко дну после заметного хода — часть движения уже состоялась")
 
     ignition = max(0.0, min(100.0, ignition))
+    if not exhausted and early_direction in ("LONG", "SHORT"):
+        # Cycle score способен увидеть поворот до пробоя; ignition остаётся
+        # общей силой ранних признаков, поэтому берём более сильную оценку.
+        ignition = max(ignition, best_cycle_score)
     triggered = (breakout_up and early_direction == "LONG") or (breakout_down and early_direction == "SHORT")
     if exhausted:
         phase = "EXHAUSTED"
@@ -338,6 +503,20 @@ def detect_emergence(
         phase = "EARLY"
     else:
         phase = "NEUTRAL"
+
+    if exhausted:
+        cycle_stage = "EXHAUSTED"
+    elif triggered:
+        cycle_stage = "CONFIRMED"
+    elif early_direction in ("LONG", "SHORT") and best_cycle_score >= cfg.CYCLE_TRADE_SCORE_MIN:
+        cycle_stage = "TURNING"
+    elif early_direction in ("LONG", "SHORT"):
+        cycle_stage = "BUILDING"
+    else:
+        cycle_stage = "NEUTRAL"
+
+    trigger_price = base_high if early_direction == "LONG" else base_low if early_direction == "SHORT" else 0.0
+    invalidation_price = base_low if early_direction == "LONG" else base_high if early_direction == "SHORT" else 0.0
 
     return EmergenceSnapshot(
         enabled=True,
@@ -359,5 +538,12 @@ def detect_emergence(
         phase=phase,
         ignition=round(ignition, 1),
         early_direction=early_direction,
+        long_score=long_score,
+        short_score=short_score,
+        cycle_score=round(best_cycle_score, 1),
+        bias_margin=round(bias_margin, 1),
+        cycle_stage=cycle_stage,
+        trigger_price=round(trigger_price, 8),
+        invalidation_price=round(invalidation_price, 8),
         notes=notes,
     )
