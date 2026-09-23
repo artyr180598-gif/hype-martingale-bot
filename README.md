@@ -263,7 +263,7 @@ Swagger: `/docs`.
 | `TIMEFRAMES` | `5m,15m,1h,4h,1d` | порядок быстрый → медленный |
 | `SCAN_TOP` | `20` | сколько кандидатов анализировать глубоко (Stage 2) |
 | `SCAN_SHOW_QUALITY_MIN` | `72` | порог показа в строгом «⭐ ТОП» |
-| `SCAN_LIST_QUALITY_MIN` | `58` | порог тир-осознанных списков (B/C тоже видны, 0 < x ≤ 72) |
+| `SCAN_LIST_QUALITY_MIN` | `55` | порог тир-осознанных списков; не ниже `QUALITY_MIN`, иначе валидные сигналы не показываются |
 | `WATCHER_SCAN_UNIVERSE` | `true` | daemon сканирует всю ликвидную вселенную; явный `watch SYMS` — точечный режим |
 | `SCAN_EXCLUDE_EXHAUSTED` | `true` | не отправлять уже выжатые импульсы в глубокий анализ |
 | `EMERGENCE_MAX_TRIGGER_ATR` | `0.75` | максимум расстояния закрытия от пробитой базы в ATR |
@@ -293,7 +293,7 @@ make check   # ruff + pytest
 make test    # pytest
 ```
 
-**171 тест**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
+**172 теста**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
 gate, lifecycle, backtest-метрики (+ разбивка regime/direction), калибровка,
 Telegram core/авторизация/callback'и/настройки, TTL-кэш, 429 retry,
 структурный entry zone, publisher/stale validation, config validation,

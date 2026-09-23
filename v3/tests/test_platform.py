@@ -168,6 +168,19 @@ def test_config_validation_bad_timeframes(monkeypatch):
     assert any("unsupported" in e for e in errors)
 
 
+def test_config_list_quality_never_hides_signals():
+    """Списки «🔥 LONG / 🔻 SHORT» обязаны показывать все сетапы после гейта.
+
+    Порог показа не может быть ниже `QUALITY_MIN`, иначе движок может найти
+    сигнал (качество 55–57), но пользователь увидит «нет подходящих».
+    """
+    cfg = SignalConfig()
+    assert cfg.SCAN_LIST_QUALITY_MIN >= cfg.QUALITY_MIN
+    assert validate_config(cfg) == []
+    bad = SignalConfig(SCAN_LIST_QUALITY_MIN=40, QUALITY_MIN=55)
+    assert any("SCAN_LIST_QUALITY_MIN" in e and "QUALITY_MIN" in e for e in validate_config(bad))
+
+
 # ── HTTP 429 retry ──────────────────────────────────────────────
 def test_http_retries_429_with_backoff():
     hits = {"n": 0}
