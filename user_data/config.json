@@ -37,7 +37,6 @@
     "secret": "",
     "ccxt_config": {},
     "ccxt_async_config": {},
-    "use_public_trades": true,
     "pair_whitelist": [],
     "pair_blacklist": [
       ".*UP/USDT:USDT",
@@ -45,14 +44,6 @@
       ".*BULL/USDT:USDT",
       ".*BEAR/USDT:USDT"
     ]
-  },
-  "orderflow": {
-    "cache_size": 200,
-    "max_candles": 300,
-    "scale": 0.1,
-    "stacked_imbalance_range": 3,
-    "imbalance_volume": 1,
-    "imbalance_ratio": 3
   },
   "pairlists": [
     {
