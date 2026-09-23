@@ -1,7 +1,7 @@
 [project]
-name = "hype-futures-engine"
-version = "3.0.0"
-description = "HYPE Futures Signal Intelligence — AI/quant crypto futures analyst: scanning, multi-timeframe analysis, NO-TRADE gate, walk-forward, lifecycle, Telegram, observability"
+name = "hype-ultimate-scanner"
+version = "4.0.0"
+description = "HYPE ULTIMATE — Multi-exchange crypto scanner & signal intelligence: Binance, Bybit, OKX, MEXC, KuCoin, Gate, Bitget. LONG/SHORT signals with ATR TP/SL, expected move, confidence, orderbook liquidity, STOBB/SBM/JUMP, confluence voting, Telegram & API"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,21 +9,28 @@ dependencies = [
     "uvicorn[standard]>=0.28.0",
     "pydantic>=2.6.0",
     "pydantic-settings>=2.2.0",
-    "numpy>=1.26.4",
-    "pandas>=2.2.1",
+    "python-dotenv>=1.0.0",
+    "ccxt>=4.2.0",
     "httpx>=0.27.0",
     "aiohttp>=3.9.3",
+    "websockets>=12.0",
+    "numpy>=1.26.4",
+    "pandas>=2.2.1",
+    "ta>=0.11.0",
     "aiogram>=3.4.0",
+    "rich>=13.7.0",
+    "loguru>=0.7.0",
     "matplotlib>=3.8.0",
 ]
 
 [project.scripts]
-hype-engine = "v3.cli:main"
+hype = "src.hype.cli:main"
+hype-ultimate = "src.hype.cli:main"
 
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = "-ra -q --asyncio-mode=auto"
-testpaths = ["v3/tests"]
+testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.ruff]
@@ -33,8 +40,3 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501", "F401", "F841"]
-
-[tool.mypy]
-python_version = "3.11"
-ignore_missing_imports = true
-disallow_untyped_defs = false

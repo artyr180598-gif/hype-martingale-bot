@@ -1,62 +1,24 @@
+version: "3.8"
+
 services:
-  # Единый движок v3. Для Railway/одного процесса используйте v3-daemon;
-  # для multi-service деплоя — v3-api + v3-worker (общий volume ./data).
-  v3-daemon:
-    image: hype-futures-engine
+  hype-ultimate:
     build: .
-    container_name: hype-futures-engine
+    container_name: hype-ultimate
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8400}:8400"
     env_file:
       - .env
     environment:
-      RUN_V3: "true"
-      V3_COMMAND: "daemon"
-      PORT: ${PORT:-8400}
-    ports:
-      - "${PORT:-8400}:${PORT:-8400}"
+      - HOST=0.0.0.0
+      - PORT=8400
+      - DATA_DIR=/app/data
     volumes:
       - ./data:/app/data
-    restart: unless-stopped
-    command: ["./entrypoint.sh"]
+    command: ["daemon"]
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:${PORT:-8400}/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8400/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
-
-  v3-api:
-    image: hype-futures-engine
-    build: .
-    container_name: hype-futures-api
-    env_file:
-      - .env
-    environment:
-      V3_COMMAND: "serve"
-      PORT: ${V3_PORT:-8400}
-    ports:
-      - "${V3_PORT:-8400}:${V3_PORT:-8400}"
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-    command: ["python", "-m", "v3", "serve", "--host", "0.0.0.0", "--port", "${V3_PORT:-8400}"]
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:${V3_PORT:-8400}/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-
-  v3-worker:
-    image: hype-futures-engine
-    build: .
-    container_name: hype-futures-worker
-    env_file:
-      - .env
-    environment:
-      V3_COMMAND: "watch"
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-    command: ["python", "-m", "v3", "watch"]
-    depends_on:
-      - v3-api

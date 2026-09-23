@@ -1,27 +1,23 @@
-.PHONY: help install test lint check run serve scan signal backtest walkforward calibrate watch bot status clean
+.PHONY: help install test lint check run serve scan signal market status bot clean
 
-# инструменты: сначала локальный .venv (если есть), иначе системный PATH
 PYTEST := $(shell if [ -x .venv/bin/pytest ]; then echo .venv/bin/pytest; else echo pytest; fi)
 RUFF := $(shell if [ -x .venv/bin/ruff ]; then echo .venv/bin/ruff; else echo ruff; fi)
 
 help:
-	@echo "HYPE Futures Signal Intelligence — единый движок v3"
+	@echo "HYPE ULTIMATE v4 — Multi-exchange scanner"
 	@echo ""
-	@echo "  make install       - установить зависимости"
-	@echo "  make test          - запустить тесты (v3)"
+	@echo "  make install       - deps"
+	@echo "  make test          - pytest"
 	@echo "  make lint          - ruff"
-	@echo "  make check         - lint + тесты"
-	@echo "  make run           - API + watcher + Telegram в одном процессе (daemon)"
-	@echo "  make serve         - только FastAPI"
-	@echo "  make scan          - скан вселенной USDT-perp"
-	@echo "  make signal SYM=BTCUSDT MODE=pro - разовый сигнал"
-	@echo "  make backtest SYM=BTCUSDT TF=15m BARS=2000"
-	@echo "  make walkforward SYM=BTCUSDT TF=15m BARS=5000 FOLDS=5"
-	@echo "  make calibrate SYMS=BTCUSDT,ETHUSDT TF=15m BARS=2000"
-	@echo "  make watch SYMS=BTCUSDT,ETHUSDT - фоновый lifecycle-наблюдатель"
-	@echo "  make bot           - Telegram-бот + watcher"
-	@echo "  make status        - сохранённые сигналы и health"
-	@echo "  make clean         - очистить кэши"
+	@echo "  make check         - lint + test"
+	@echo "  make run           - daemon API+watcher+Telegram"
+	@echo "  make serve         - API only"
+	@echo "  make scan          - scan universe"
+	@echo "  make signal SYM=BTCUSDT MODE=pro"
+	@echo "  make market        - market overview"
+	@echo "  make status        - config + recent"
+	@echo "  make bot           - Telegram only"
+	@echo "  make clean"
 
 install:
 	pip install -r requirements.txt
@@ -35,37 +31,25 @@ lint:
 check: lint test
 
 run:
-	python -m v3 daemon --host $(or $(HOST),0.0.0.0) --port $(or $(PORT),8400)
+	python -m src.hype.cli daemon --host $(or $(HOST),0.0.0.0) --port $(or $(PORT),8400)
 
 serve:
-	python -m v3 serve --host $(or $(HOST),0.0.0.0) --port $(or $(PORT),8400)
+	python -m src.hype.cli serve --host $(or $(HOST),0.0.0.0) --port $(or $(PORT),8400)
 
 scan:
-	python -m v3 scan --mode $(or $(MODE),beginner) --limit $(or $(LIMIT),250) --top $(or $(TOP),20)
-
-market:
-	python -m v3 market
+	python -m src.hype.cli scan --limit $(or $(LIMIT),250) --top $(or $(TOP),20)
 
 signal:
-	python -m v3 signal $(or $(SYM),BTCUSDT) --mode $(or $(MODE),beginner)
+	python -m src.hype.cli signal $(or $(SYM),BTCUSDT) --mode $(or $(MODE),pro)
 
-backtest:
-	python -m v3 backtest $(or $(SYM),BTCUSDT) --tf $(or $(TF),15m) --bars $(or $(BARS),1000) --warmup $(or $(WARMUP),120)
-
-walkforward:
-	python -m v3 walkforward $(or $(SYM),BTCUSDT) --tf $(or $(TF),15m) --bars $(or $(BARS),5000) --folds $(or $(FOLDS),5)
-
-calibrate:
-	python -m v3 calibrate $(or $(SYMS),BTCUSDT,ETHUSDT,SOLUSDT) --tf $(or $(TF),15m) --bars $(or $(BARS),2000) --warmup $(or $(WARMUP),120)
-
-watch:
-	python -m v3 watch $(or $(SYMS),BTCUSDT,ETHUSDT)
-
-bot:
-	python -m v3 bot
+market:
+	python -m src.hype.cli market
 
 status:
-	python -m v3 status
+	python -m src.hype.cli status
+
+bot:
+	python -m src.hype.cli bot
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +

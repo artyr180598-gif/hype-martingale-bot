@@ -1,104 +1,128 @@
-# HYPE — Crypto Market Intelligence & Trading Analysis Platform
+# HYPE ULTIMATE v4 — Multi-Exchange Crypto Scanner & Signal Intelligence
 
-Профессиональная аналитическая платформа для USDT/USDC perpetual futures с
-Telegram-интерфейсом. Не «бот с индикаторами», а система:
+> **Полностью переписан с нуля** из лучших open-source проектов GitHub. Старый мартингейл-бот удален. Теперь это мега-бот для поиска монет на любых биржах, анализа и советов LONG/SHORT с ценой, ожидаемым скачком, TP/SL.
 
-```
-Market Data → Normalization → Scanner → Liquidity/Volume → Technical Analysis
-→ Market Structure → Derivatives → Volatility → Signal Engine → Risk Engine
-→ Confidence/Quality → AI Explanation → Telegram
-```
+## 🧬 Откуда взята логика (самые мощные проекты GitHub)
 
-**Бот не торгует.** Это аналитический сигнальный слой: исполнение ордеров
-полностью отделено и здесь не реализовано. Все отчёты — статистическая оценка,
-а не гарантия результата.
+| Проект | Звезд | Что портировано |
+|--------|-------|-----------------|
+| **freqtrade/freqtrade** | 54.7k | Архитектура, риск-менеджмент, ROI, стоп-лосс, бэктест, мульти-биржа через CCXT |
+| **CryptoMarius/CryptoScanBot** | — | **STOBB, SBM, JUMP** детекторы, мультибиржа Binance/Bybit/MEXC/KuCoin/OKX, скан вселенной |
+| **Haehnchen/crypto-trading-bot** | — | Multi-pair в одном инстансе, Web UI, LONG/SHORT, Telegram/Slack |
+| **chibyk71/crypto-scanner** | — | Production-grade TS сканер, multi-timeframe, scoring, ML, backtest suite |
+| **samshoaib123/Trading_Signal_Bot** | — | ATR TP/SL, confidence 1-3, position sizing, дедупликация |
+| **OfficialGIGA/crypto-signal-scanner** | — | BTC dominance, корреляции, AI summaries, smart alerts dedupe |
+| **python-telegramBot/crypto-liquidity-ai-trading-bot** | — | Liquidity walls, gaps, sweep detection, orderbook imbalance |
 
----
-
-## Возможности
-
-* 🎯 **«Уверенность бота» отдельным блоком (раунд 6)**: в каждой карточке —
-  процент уверенности с разбором по шести независимым анализам (качество
-  сетапа 34%, свежесть и полнота данных 16%, согласованность таймфреймов 16%,
-  объём/стакан/позиции 14%, риск-профиль 10%, ранняя готовность импульса 10%),
-  шкала `высокая / умеренная / низкая / очень низкая`, слабые места и прямая
-  оговорка, что это НЕ вероятность прибыли. Три метрики («уверенность бота»,
-  «оценка сетапа», «полнота данных») названы по-разному и объясняются рядом с
-  цифрой, чтобы их нельзя было перепутать.
-* 🔔 **Авто-сигналы без запроса (раунд 6)**: фоновый сканер сам обходит
-  ликвидную вселенную каждые `WATCHER_INTERVAL_SECONDS` (по умолчанию 180с) и
-  пишет в чат только тогда, когда сетап прошёл ВСЕ пороги: качество
-  ≥ `ALERT_MIN_QUALITY`, уверенность бота ≥ `ALERT_MIN_BOT_CONFIDENCE`,
-  полнота данных ≥ `ALERT_MIN_DATA_CONFIDENCE`, риск ≤ `ALERT_MAX_RISK_SCORE`,
-  потенциал к риску ≥ `ALERT_MIN_RR`, данные свежие, импульс не выжат. Всё
-  остальное сохраняется в SQLite и видно в разделах списков — бот молчит, а не
-  спамит. Сам push короткий: LONG/SHORT, уверенность в процентах, причины
-  выбора, зона входа, цели и план закрытия (частичная фиксация, безубыток после
-  TP1, финальная цель и стоп). Слабые наблюдения не потребляют cooldown и не
-  создают ложные TP/SL-события. Статус, пороги, счётчик отправленных и причина
-  последнего отказа — в разделе «🔔 АВТО-СИГНАЛЫ» (`/alerts`), там же пауза и
-  «Проверить сейчас».
-* ⚡ **Ранний отбор «намечающегося движения» (раунд 4)**: сканер больше не
-  ловит «уже разогретое» — в heat входят RVOL, выход из сжатия (squeeze
-  release), консолидация, близость к экстремуму 24h-диапазона, рост OI при
-  спокойной цене, относительная сила vs BTC; анти-chase штраф у вершины/дна
-  после большого хода; «⚡ Намечается движение» в карточке — это признак
-  *ранжирования*, а не триггер (детерминированный гейт не изменён);
-  диверсификация корзины (макс. кандидатов одной «корзины» в Stage 2),
-  метка возраста листинга (`fresh` — отдельный режим); фазы `EARLY` /
-  `TRIGGERED` / `EXHAUSTED`, проверка давления закрытой свечи и запас до
-  границы диапазона; формирующаяся свеча исключается, поэтому RVOL/пробой не
-  «перерисовываются» внутри часа. В daemon-режиме этот поиск идёт по всей
-  ликвидной вселенной, а не только по `WATCHLIST_SYMBOLS`.
-* 🔎 **Интерактивный Telegram UI**: главное меню, «Сканировать рынок»,
-  «Лучшие LONG/SHORT», «Топ возможности», «Анализ монеты», «Мой рынок»,
-  «Настройки», «Помощь»; пагинация, кнопки «Обновить», «PRO», «Назад».
-  **История диалога не затирается**: независимые запросы публикуются новыми
-  сообщениями; правится только навигация внутри одного результата
-  (пагинация/«PRO»/«🔄 ОБНОВИТЬ»).
-* 🔒 **Закрытый бот**: `TELEGRAM_ALLOWED_USER_IDS` (fallback — числовой
-  `TELEGRAM_ADMIN_CHAT_ID`); без allow-list доступ закрыт для всех.
-* 🧠 **Двухэтапный скан**: Stage 1 — быстрый отсев вселенной по
-  turnover/спреду/heat; Stage 2 — глубокий анализ топ-N с полным гейтом.
-* 📈 **Multi-timeframe**: `5m,15m,1h,4h,1d` (настраивается через `TIMEFRAMES`),
-  конфликт таймфреймов → `NO TRADE` с объяснением.
-* 🧪 **Индикаторы в контексте** (не «RSI<30 = BUY»): EMA/SMA, RSI, MACD, ATR,
-  ADX, Bollinger, Stochastic, VWAP, volume-z, OBV/CVD, squeeze, SuperTrend.
-* 🏗 **Market structure**: HH/HL/LH/LL, BOS/CHoCH (свинги + зигзаг),
-  поддержка/сопротивление, инвалидация по структуре. Сценарии: тренд,
-  CHoCH-разворот, liquidity sweep, mean-reversion в диапазоне, условный пробой.
-* 📉 **Derivatives**: funding (история/тренд), open interest (+ изменение за
-  24ч после накопления истории), **реальные ликвидации Bybit v5** (публичный
-  WebSocket `liquidation.<SYMBOL>`, один коллектор на процесс; офлайн → «н/д»),
-  **Bybit Long/Short account-ratio** (публичный эндпоинт, 300s TTL) и
-  **mark/index** (из тикера, 0 доп. запросов); спред/глубина стакана,
-  imbalance, slippage-прокси.
-* 🧭 **Market regime + BTC/ETH контекст**: TRENDING_UP/DOWN, RANGING,
-  HIGH/LOW_VOLATILITY, BREAKOUT/BREAKDOWN, ACCUMULATION/DISTRIBUTION,
-  UNCERTAIN; контекст меняет интерпретацию, но не генерирует сигнал сам.
-* 🎯 **Entry plan**: entry zone (якорится на поддержку/VWAP), SL по ATR и
-  структуре, TP1/TP2/TP3, R:R, invalidation, risk brief (риск $, позиция,
-  плечо ≤ по волатильности, ликвидация).
-* ⛔ **NO TRADE — полноценная функция**: система не обязана выдавать сигнал.
-* 🕐 **Data freshness**: timestamp в каждом отчёте; устаревшие данные →
-  `⚠️ DATA STALE` и блокировка сигнала.
-* 📚 **Глоссарий**: кнопка «Что это?» объясняет RSI, ATR, ADX, BOS/CHoCH,
-  funding, OI, R:R, VWAP, regime простым языком.
-* ⚙️ **Настройки пользователя**: режим beginner/pro, депозит, риск на сделку
-  (хранятся в SQLite, ограничены безопасными границами).
-* 🧪 **Backtesting**: fees/slippage/funding, без look-ahead, метрики + разбивка
-  по направлению и market regime; walk-forward и read-only калибровка.
-* 🤖 **AI-слой только для объяснений**: rule-based по умолчанию, опциональный
-  OpenAI; не может изменить direction/levels/score.
-* ✅ **Надёжность и только реальные данные**: TTL-кэши (tickers/klines/стакан/
-  funding/ликвидции), параллельный сбор bundle, ретраи с экспоненциальным
-  backoff + `Retry-After` на 429, failover Bybit → Binance → MEXC (без
-  демо-фолбэка: `MARKET_DATA_MODE=demo` удалён), graceful degradation; без
-  данных — «Нет реальных данных», retry и диагностика по каждому источнику.
+Все идеи объединены в **единый движок ULTIMATE**.
 
 ---
 
-## Быстрый старт
+## 🚀 Что умеет бот (задача из ТЗ)
+
+### 1. Находить монеты на любых биржах
+- Поддерживает **7 бирж**: Binance, Bybit, OKX, MEXC, KuCoin, Gate, Bitget через CCXT
+- `build_universe()` агрегирует тикеры, сортирует по turnover, фильтрует по ликвидности
+- Primary + fallback: если Bybit недоступен → Binance → OKX → MEXC
+- Сканит **300 монет** за цикл, анализирует топ 25 глубоко
+
+### 2. Делать анализ — полный тех.анализ
+**Тренд:** EMA 9/20/50/200, SMA, SuperTrend, ADX, PSAR, Ichimoku  
+**Моментум:** RSI 7/14/21, Stochastic K/D, StochRSI, MFI, Williams %R, CCI, MACD, AO, дивергенции  
+**Волатильность:** ATR, Bollinger Bands, Keltner Channel, Donchian, Squeeze (BB inside KC)  
+**Объем:** OBV, CVD, VWAP, VWMA, Volume Z, RVOL, CMF, spike detection  
+**Структура:** Swing highs/lows, HH/HL/LH/LL, BOS/CHoCH, поддержка/сопротивление, Fibonacci  
+**Деривативы:** Funding rate, OI, orderbook depth, imbalance, liquidation walls/sweeps
+
+### 3. Давать совет LONG / SHORT
+- **11 стратегий голосуют** (как в Confluence Terminal):
+  1. EMA crossover 9/21
+  2. 200 EMA trend filter
+  3. RSI
+  4. MACD
+  5. Bollinger %B
+  6. Donchian breakout (ADX gated)
+  7. RSI-2 mean reversion
+  8. Stochastic
+  9. VWAP
+  10. Consecutive candles
+  11. RSI divergence
+- Bias = LONG если long_score > short_score + 12, иначе SHORT, иначе NEUTRAL → NO TRADE
+
+### 4. Писать цену, ожидаемый скачок, TP/SL
+
+Пример карточки:
+
+```
+🟢 LONG BTCUSDT — BYBIT
+💎 Оценка сетапа: 84/100 (S)
+
+🎯 УВЕРЕННОСТЬ БОТА: 81% — высокая
+████████░░ 81 из 100
+
+💰 Цена входа: 67234.50
+📍 Зона входа: 67000 — 67450
+
+🛑 Стоп-лосс: 65800 (-2.13%) | 4/10
+🎯 Тейк-профиты:
+  TP1 68500 (+1.88%) — закрыть 50%
+  TP2 69800 (+3.81%) — закрыть 30%
+  TP3 71200 (+5.90%) — закрыть 20%
+
+📈 R:R = 1:2.8
+🚀 Ожидаемый скачок: +3.2% → 69380 (ATR 2.2 + measured move)
+
+🏛 Режим: TRENDING_UP
+⚡ Фаза: TRIGGERED (heat 72)
+📚 Стакан: imbalance 0.68 — BULLISH
+
+🔍 Детекторы:
+  • SBM LONG — Stoch K=18 D=19 BB%=0.12 RSI=34 + EMA20>50>200 + PSAR bullish
+  • JUMP LONG — +3.5% price + 2.8x volume
+
+💡 Почему этот сигнал:
+  • Сильный консенсус 32% — 11 стратегий согласны
+  • SBM сигнал — STOBB + MA alignment
+  • Плотный стакан 78% — ликвидность есть
+```
+
+### 5. Все грамотно настроено
+- **Risk engine:** ATR SL 2.2x, TP1 1R, TP2 2R, TP3 3.2R, позиция по % риска, плечо по волатильности, ликвидация
+- **Quality scoring:** S/A/B/C, 0-100, учитывает консенсус, режим, стакан, R:R, STOBB/SBM/JUMP, early impulse
+- **Bot confidence:** 6 независимых анализов (quality 30%, data 15%, trend 20%, confirm 15%, risk 10%, impulse 10%)
+- **Early impulse:** heat scoring, RVOL, squeeze release, consolidation, room to move, фазы EARLY/TRIGGERED/EXHAUSTED
+- **Orderbook:** imbalance, стены >$100k, depth, spread, sweep detection (stop hunt)
+- **NO TRADE gate:** если качество < min, R:R < 1.8, риск > 7, данные stale, цена ушла от VWAP >2.2 ATR → NO TRADE
+- **Авто-сигналы:** фоновый watcher каждые 180с, пишет только если quality≥75, conf≥68%, R:R≥1.8
+
+---
+
+## 📦 Архитектура
+
+```
+Market Data (CCXT 7 exchanges)
+  → Ticker + Orderbook + Klines (5m,15m,1h,4h,1d) + Funding
+  → TTL Cache + Failover Bybit→Binance→OKX→MEXC
+  → Universe Builder (turnover filter)
+  → Heat Scoring (RVOL, squeeze, consolidation, room)
+  → Early Impulse (EARLY/TRIGGERED/EXHAUSTED)
+  → Indicators (trend, momentum, volatility, volume, structure)
+  → Confluence (11 strategies voting)
+  → Regime (TRENDING/RANGING/BREAKOUT/HIGH_VOL)
+  → Orderbook Analysis (imbalance, walls, sweep)
+  → STOBB/SBM/JUMP detectors (from CryptoScanBot)
+  → Risk Engine (ATR SL/TP, RR, leverage, liquidation)
+  → Quality Scoring (S/A/B/C)
+  → Bot Confidence (6 components)
+  → Expected Move (ATR + measured move)
+  → Signal Generator (LONG/SHORT + entry zone + 3 TP + SL)
+  → SQLite Store
+  → Telegram + REST API + Watcher
+```
+
+---
+
+## 🔧 Быстрый старт
 
 ```bash
 git clone https://github.com/artyr180598-gif/hype-martingale-bot
@@ -106,243 +130,141 @@ cd hype-martingale-bot
 
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env         # заполните TELEGRAM_* при необходимости
+cp .env.example .env  # заполни TELEGRAM_BOT_TOKEN и TELEGRAM_ALLOWED_USER_IDS
 
-# самодиагностика источников (офлайн покажет «недоступен», без подмены данными)
-python -m v3 pulse
+# Проверка
+python -m src.hype.cli status
 
-# live/auto (публичные данные Bybit, ключи не нужны)
-python -m v3 signal SOLUSDT --mode pro
-python -m v3 scan --limit 250 --top 12
-python -m v3 market
+# Анализ одной монеты
+python -m src.hype.cli signal BTCUSDT --mode pro
 
-# полный движок: API + watcher + Telegram
-python -m v3 daemon            # (это и команда по умолчанию)
+# Скан рынка
+python -m src.hype.cli scan --limit 200 --top 15
+
+# Обзор рынка
+python -m src.hype.cli market
+
+# Полный daemon: API + watcher + Telegram
+python -m src.hype.cli daemon
+# или
+python main.py daemon
 ```
 
-> **Telegram-доступ**: задайте `TELEGRAM_BOT_TOKEN` и
-> `TELEGRAM_ALLOWED_USER_IDS=YOUR_TELEGRAM_USER_ID`. Узнать свой ID можно у
-> @userinfobot. Без allow-list бот отвечает «⛔ НЕТ ДОСТУПА» всем.
+### Docker
 
-## Как читать цифры — объяснение для новичка
-
-В отчёте три разные метрики. Их часто путают, поэтому они названы по-разному и
-поясняются прямо рядом с цифрой:
-
-| Метрика | Что это | Чего НЕ означает |
-|---|---|---|
-| 🎯 **Уверенность бота** (0–100%) | насколько независимые анализы бота согласны между собой | не вероятность прибыли |
-| ⭐ **Оценка сетапа** (0–100, `S/A/B/C`) | качество комбинации факторов: тренд, структура, объёмы, стакан, деривативы | не вероятность прибыли |
-| 📦 **Полнота данных** (%) | сколько реальных источников ответило и насколько свежие свечи | не качество самой идеи |
-
-Уверенность бота считается детерминированно из уже собранных данных (без новых
-запросов), поэтому Telegram, REST API, SQLite и бэктест видят одну и ту же
-цифру. В карточке всегда видно, из чего она сложилась и что её снижает:
-
-```
-🎯 УВЕРЕННОСТЬ БОТА: 81% — высокая
-████████░░ 81 из 100
-
-🔍 Из чего сложилась уверенность (вес каждого анализа):
-• Качество сетапа: 84% (вес 34%) — оценка сетапа 84/100 (S)
-• Свежесть и полнота данных: 96% (вес 16%) — 4 таймфрейма получено, данные 3с назад
-• Согласованность таймфреймов: 75% (вес 16%) — 3 из 4 таймфреймов в сторону сделки
-• Объём, стакан и позиции: 70% (вес 14%) — стакан плотный; в монету заходят деньги
-• Риск-профиль: 68% (вес 10%) — риск 4/10, потенциал к риску 1:2.6
-• Ранняя готовность импульса: 88% (вес 10%) — ранние признаки совпали с направлением
+```bash
+docker-compose up --build
+# API на :8400, health на /health
 ```
 
-Практическое чтение: **высокая** — анализы согласны, сетап сильный; **умеренная**
-— идея рабочая, но часть анализов её не подтверждает, вход только с дисциплиной;
-**низкая / очень низкая** — наблюдать, а не входить. Веса настраиваются через
-`BOT_CONFIDENCE_WEIGHTS` (сумма нормируется автоматически).
+---
 
-## Как бот ищет импульс — объяснение для новичка
+## 📡 REST API (порт 8400)
 
-Главная ошибка обычного сканера: он сортирует монеты по росту за 24 часа.
-Так в топ попадает то, что уже выросло, а не то, где движение только
-формируется. HYPE теперь разделяет **готовность импульса** и уже случившийся
-ход:
+| Метод | Путь | Описание |
+|-------|------|----------|
+| GET | `/health` | health, версия, биржи |
+| GET | `/api/v1/universe?limit=100` | вселенная монет |
+| GET | `/api/v1/signal/{symbol}` | полный сигнал по монете |
+| POST | `/api/v1/scan` | скан рынка `{"limit":250,"top":20,"min_quality":55}` |
+| GET | `/api/v1/top?direction=LONG&limit=20` | топ из БД |
+| GET | `/api/v1/history/{symbol}?limit=50` | история сигналов |
+| GET | `/api/v1/market` | BTC/ETH + gainers |
+| GET | `/api/v1/alerts` | статус авто-сигналов |
 
-1. **Stage 1** отбрасывает неликвидные пары и смотрит всю вселенную USDT-perp.
-2. Для лучших кандидатов берутся реальные свечи `1h`. Последняя формирующаяся
-   свеча не используется: её объём и цена ещё меняются.
-3. Проверяются независимые признаки: объём относительно прошлых свечей (RVOL),
-   ускорение объёма, сжатие ATR/Bollinger, узкая база, закрытие около края
-   свечи, пробой предыдущего коридора, запас до границы 24h-диапазона,
-   относительная сила к BTC и изменение OI.
-4. Кандидат получает понятную фазу:
-   * **EARLY** — база просыпается, но пробой ещё не убежал;
-   * **TRIGGERED** — закрытая свеча подтвердила первый выход из коридора;
-   * **EXHAUSTED** — цена уже слишком далеко после сильного хода; такой
-     кандидат не показывается в блоке ранних возможностей.
-5. Только после этого Stage 2 запускает полный multi-timeframe анализ и тот же
-   строгий гейт: спред, стакан, свежесть, конфликт таймфреймов, риск, R:R и
-   качество. Метка «намечается» **не является приказом входить**.
+Swagger: `/docs`
 
-Ориентир по чтению результата: **EARLY** — добавить в наблюдение и ждать
-подтверждения; **TRIGGERED** — проверять уровни и входить только по готовому
-сетапу движка; **EXHAUSTED** — не догонять. `S/A/B/C` — качество комбинации
-факторов, а не вероятность прибыли. Если чистого сетапа нет, правильный ответ
-бота — `NO TRADE`.
+---
 
-В фоновом `daemon` поиск всей вселенной включён параметром
-`WATCHER_SCAN_UNIVERSE=true`. Точечная команда `python -m v3 watch
-BTCUSDT,ETHUSDT` оставляет старый режим наблюдения выбранных символов.
-
-## Telegram — что нажимать
+## 🤖 Telegram
 
 | Кнопка | Что делает |
-|---|---|
-| 🔎 СКАНИРОВАТЬ РЫНОК | Stage 1 скан вселенной → Stage 2 глубокий анализ |
-| 🔥 ЛУЧШИЕ LONG / 🔻 ЛУЧШИЕ SHORT | топ сетапы по направлению (quality-фильтр) |
-| ⭐ ТОП ВОЗМОЖНОСТИ | лучшие сетапы без фильтра направления |
-| 🔍 АНАЛИЗ МОНЕТЫ | выбор/ввод символа → полный отчёт |
-| 🔔 АВТО-СИГНАЛЫ | статус фонового поиска, пороги, пауза, «Проверить сейчас» |
-| 📊 МОЙ РЫНОК | BTC/ETH/глобальный/страх&жадность/гайнеры |
-| ⚙️ НАСТРОЙКИ | режим отчёта, депозит, риск на сделку |
-| 📚 ПОМОЩЬ | глоссарий «что это?» |
+|--------|------------|
+| 🔎 Сканировать рынок | Stage1 heat → Stage2 глубокий анализ |
+| 🔥 Лучшие LONG / 🔻 Лучшие SHORT | топ по направлению из БД |
+| ⭐ Топ возможности | без фильтра направления |
+| 🔍 Анализ монеты | ввод символа → полный разбор |
+| 🔔 Авто-сигналы | статус, пороги, пауза, проверить сейчас |
+| 📊 Мой рынок | BTC/ETH + топ рост |
+| ⚙️ Настройки | режим beginner/pro, депозит, риск |
+| 📚 Помощь | глоссарий |
 
-После анализа: `🔄 ОБНОВИТЬ` (свежие данные), `📈 PRO` (полный разбор),
-«Назад», «Главная». Команды `/signal`, `/scan`, `/market`, `/alerts`,
-`/walkforward`, `/status` работают как раньше. `/start` показывает
-приветствие: что умеет бот, как читать его цифры и с чего начать.
+После сигнала: `🔄 Обновить`, `📈 PRO` (полный разбор с консенсусом и структурой), `📊 График`.
 
-## CLI
+Команды: `/start`, `/scan`, `/signal BTCUSDT`, `/market`, `/help`
 
-```bash
-python -m v3 signal BTCUSDT --mode pro     # полный анализ
-python -m v3 scan --mode pro               # скан вселенной
-python -m v3 market                        # обзор рынка
-python -m v3 backtest BTCUSDT --tf 15m --bars 2000
-python -m v3 walkforward BTCUSDT --tf 15m --bars 5000 --folds 5
-python -m v3 calibrate BTCUSDT,ETHUSDT,SOLUSDT --tf 15m --bars 2000
-python -m v3 status | pulse                # health / самодиагностика
-python -m v3 daemon                        # API + watcher + Telegram
+---
 
-# прогон движка на РЕАЛЬНЫХ данных без сети (снапшот, снятый с биржи)
-python -m v3 replay v3/tests/fixtures/okx_btcusdt_swap_capture.json
-python -m v3 record BTCUSDT --out data/replay/btcusdt.json
+## ⚙️ Переменные окружения (ключевые)
 
-# бэктест на РЕАЛЬНЫХ свечах (300 баров 15m BTC-USDT-SWAP с OKX, без сети)
-python -m v3 replay v3/tests/fixtures/okx_btcusdt_15m_300.json --backtest
-```
+| Переменная | По умолчанию | Описание |
+|------------|--------------|----------|
+| `EXCHANGES` | `binance,bybit,okx,mexc,kucoin,gate,bitget` | список бирж |
+| `PRIMARY_EXCHANGE` | `bybit` | основная |
+| `SCAN_TOP` | `25` | глубокий анализ топ-N |
+| `SCAN_LIMIT` | `300` | размер вселенной |
+| `TIMEFRAMES` | `5m,15m,1h,4h,1d` | таймфреймы |
+| `STOBB_STOCH_K_MAX` | `25` | порог STOBB |
+| `JUMP_PRICE_PCT_MIN` | `3.0` | мин % для JUMP |
+| `ATR_SL_MULTIPLIER` | `2.2` | стоп в ATR |
+| `MIN_RISK_REWARD` | `1.8` | мин R:R |
+| `ALERT_MIN_QUALITY` | `75` | порог авто-сигнала |
+| `ALERT_MIN_BOT_CONFIDENCE` | `68` | мин уверенность % |
+| `WATCHER_INTERVAL_SECONDS` | `180` | интервал скана |
 
-## REST API (порт 8400)
+Полный список — `.env.example`
 
-| Метод | Путь | Что возвращает |
-|---|---|---|
-| GET | `/health` | health, режим, счётчики |
-| GET | `/api/v3/market` | market overview (BTC/ETH/global/movers) |
-| GET | `/api/v3/top?direction=LONG&limit=10` | топ сетапы из последнего скана |
-| POST | `/api/v3/scan` | авто-скан, `tradable` |
-| GET | `/api/v3/signal/{symbol}` | полный сигнал (валидируется перед сохранением) |
-| GET | `/api/v3/history/{symbol}` | история сигналов |
-| GET | `/api/v3/alerts` | статус и пороги авто-сигналов |
-| POST | `/api/v3/track` | TP/SL lifecycle по ценам |
-| GET | `/api/v3/backtest/{symbol}` | бэктест |
-| GET | `/api/v3/walk-forward/{symbol}` | walk-forward |
-| GET | `/api/v3/calibrate` | read-only калибровка |
-| GET | `/api/v3/explain/{uid}` | score breakdown |
-| GET | `/api/v3/glossary/{term}` | объяснение термина |
-| GET | `/api/v3/outcomes` | исходы сигналов |
+---
 
-Если задан `V3_API_TOKEN`, тяжёлые эндпоинты требуют заголовок `X-API-Token`.
-Swagger: `/docs`.
+## 🧪 Что внутри детекторов
 
-## Переменные окружения
+### STOBB (из CryptoScanBot)
+Oversold на Stochastic + Bollinger:
+- LONG: Stoch K<25, D<25, BB %B <0.15, RSI<40
+- SHORT: Stoch K>75, D>75, BB %B >0.85, RSI>60
 
-Полный список — [`v3/.env.example`](v3/.env.example). Ключевые:
+### SBM (STOBB + MA + PSAR)
+- STOBB + EMA20>50>200 + PSAR bullish + price>EMA20 → LONG SBM (сильнее STOBB)
+- Инверс для SHORT
 
-| Переменная | По умолчанию | Значение |
-|---|---|---|
-| `MARKET_DATA_MODE` | `live` | `live` / `auto` (demo **удалён** — ошибка конфигурации при старте) |
-| `TELEGRAM_BOT_TOKEN` | пусто | токен бота (алиас `TELEGRAM_TOKEN`) |
-| `TELEGRAM_ALLOWED_USER_IDS` | пусто | user ids через запятую — **доступ бота закрыт без него** |
-| `TELEGRAM_ADMIN_CHAT_ID` | пусто | уведомления (numeric — fallback allow-list) |
-| `TIMEFRAMES` | `5m,15m,1h,4h,1d` | порядок быстрый → медленный |
-| `SCAN_TOP` | `20` | сколько кандидатов анализировать глубоко (Stage 2) |
-| `SCAN_SHOW_QUALITY_MIN` | `72` | порог показа в строгом «⭐ ТОП» |
-| `SCAN_LIST_QUALITY_MIN` | `58` | порог тир-осознанных списков (B/C тоже видны, 0 < x ≤ 72) |
-| `WATCHER_SCAN_UNIVERSE` | `true` | daemon сканирует всю ликвидную вселенную; явный `watch SYMS` — точечный режим |
-| `SCAN_EXCLUDE_EXHAUSTED` | `true` | не отправлять уже выжатые импульсы в глубокий анализ |
-| `EMERGENCE_MAX_TRIGGER_ATR` | `0.75` | максимум расстояния закрытия от пробитой базы в ATR |
-| `EMERGENCE_MIN_ROOM_PCT` | `0.15` | минимум запаса до границы диапазона для раннего кандидата |
-| `MIN_RISK_REWARD_REVERSAL` | `1.5` | смягчённый R:R только для разворотных сценариев |
-| `LIQUIDATIONS_WS_ENABLED` | `true` | реальные ликвидации Bybit WS; недоступно → «н/д» |
-| `WATCHER_INTERVAL_SECONDS` | `180` | как часто фоновый сканер сам ищет сетапы |
-| `ALERTS_ENABLED` | `true` | авто-сигналы без запроса (пауза — в «🔔 АВТО-СИГНАЛЫ») |
-| `ALERT_MIN_QUALITY` | `78` | минимальная оценка сетапа для авто-сигнала |
-| `ALERT_MIN_BOT_CONFIDENCE` | `70` | минимальная уверенность бота, % |
-| `ALERT_MIN_DATA_CONFIDENCE` | `0.60` | минимальная полнота данных 0..1 |
-| `ALERT_MAX_RISK_SCORE` | `6` | максимальный риск-скор для авто-сигнала |
-| `ALERT_MIN_RR` | `1.8` | минимальный потенциал к риску для авто-сигнала (не мягче `MIN_RISK_REWARD`) |
-| `ALERT_MAX_PER_CYCLE` | `3` | не более N уведомлений за цикл скана |
-| `ALERT_CHAT_IDS` | пусто | куда слать (по умолчанию `TELEGRAM_ADMIN_CHAT_ID`) |
-| `BOT_CONFIDENCE_WEIGHTS` | см. `.env.example` | веса анализов в уверенности бота (сумма нормируется) |
-| `MAX_DATA_AGE_SECONDS` | `120` | stale → NO TRADE |
-| `QUALITY_MIN` | `55` | минимальный quality для сигнала |
-| `MIN_RISK_REWARD` | `1.8` | минимальный R:R |
-| `V3_API_TOKEN` | пусто | защита тяжёлых endpoint'ов |
-| `OPENAI_API_KEY` | пусто | опциональный AI-аннотатор |
+### JUMP
+Резкий рост цены + объема:
+- Price change ≥3% за 6 баров + Volume ≥2.5x avg + RVOL high
 
-## Тесты
+### Liquidity
+- Imbalance >0.65 bullish, <0.35 bearish
+- Walls >$100k — поддержка/сопротивление
+- Sweep: wick за recent high/low + возврат → stop hunt
 
-```bash
-make check   # ruff + pytest
-make test    # pytest
-```
+### Early Impulse
+- Heat 0-100 из RVOL, squeeze release, consolidation, room, volume_z, ATR%, RSI mid, MFI, ADX
+- Фазы: EARLY (база просыпается), TRIGGERED (пробой подтвержден), EXHAUSTED (выжато), WATCH
 
-**171 тест**: анализаторы, сканер, walk-forward, AI reasoning, stale-data
-gate, lifecycle, backtest-метрики (+ разбивка regime/direction), калибровка,
-Telegram core/авторизация/callback'и/настройки, TTL-кэш, 429 retry,
-структурный entry zone, publisher/stale validation, config validation,
-Bybit account-ratio endpoint (+ 300s TTL), **инварианты «только реальные
-данные»** (`v3/tests/test_realdata.py`: demo у конфигурации/factory удалён,
-fail-closed без тикера/свечей/timestamp, WS-ликвидации на фейк-сессии),
-**история диалога** (`v3/tests/test_telegram_history.py`: независимые запросы
-→ новые сообщения, навигация внутри результата → правка, без `delete`),
-**прогон на реальных данных биржи** (`v3/tests/test_replay_realdata.py`:
-снапшот OKX BTC-USDT-SWAP — 5 таймфреймов × 60 свечей, тикер, фандинг,
-открытый интерес, стакан; движок проходит живой путь `analyze()` без сети,
-проверка свежести свечей не даёт ложных «данные устарели», отстающий график
-по-прежнему виден, неснятые источники показываются как «н/д»; плюс серия из
-300 реальных свечей 15m → бэктест `v3/backtest.py` исполняется офлайн,
-недоформированная свеча отбрасывается, движок находит сетапы на живом рынке
-и их результат сравнивается с живыми порогами публикации/авто-сигнала), **качество входа** (`v3/tests/test_entry_quality.py`: стоп за уровнем, фильтр «не догоняй рынок», пауза после серии стопов, A/B старых и новых порогов на реальной серии).
+---
 
-## Только реальные данные (политика платформы)
+## 🔒 Безопасность
 
-* **ТОЛЬКО** реальные биржи Bybit → Binance → MEXC; `MARKET_DATA_MODE=demo`
-  удалён: ошибка конфигурации на старте (и в `v3/config.py`, и в `build_source`).
-* Возраст данных — **по биржевым timestamp** (свеча/тикер); без биржевого
-  timestamp метрики НЕ публикуются: валидатор блокирует, движок отвечает NO TRADE.
-* Нет минимального набора (тикер + свечи) → сообщение «⚠️ Нет реальных данных —
-  анализ невозможен» + причины + вердикт по каждому источнику + кнопка
-  «🔄 ПОПРОБОВАТЬ СНОВА». Ничего не подставляется вместо недостающих данных.
+- Read-only: нет `create_order`/`place_order` — только аналитика, исполнение отделено
+- Секреты только из env/.env, `.env` в `.gitignore`
+- Telegram закрыт allow-list
+- API закрыт `API_TOKEN` опционально
+- AI не может менять direction/levels/score
 
-## Развёртывание (Railway / Docker)
+---
 
-* Startup: `python -m v3 daemon` (или `V3_COMMAND=daemon` через
-  [`entrypoint.sh`](entrypoint.sh)); порт — из `PORT` (Railway инжектит сам).
-* Healthcheck: `GET /health` (есть в [`Dockerfile`](Dockerfile)).
-* Данные SQLite — в `DATA_DIR` (по умолчанию `./data`); для multi-replica
-  используйте volume.
-* Один процесс: API + watcher + Telegram; SIGTERM → graceful shutdown.
-* При старте выполняется `validate_config` — ошибки конфигурации логируются,
-  процесс не падает от отсутствия опциональных секретов.
+## 📚 Дисклеймер
 
-## Безопасность
+Любой анализ/сигнал — **статистическая оценка, не гарантия результата**. Quality ≈ качество сетапа, **не вероятность прибыли**. Криптофьючерсы высокорискованны; не используйте плечо, которое не можете позволить потерять.
 
-* Read-only: в проекте нет пути исполнения ордеров (нет ни одного `create_order`/`place_order`, приватные ключи не подписывают запросы). Инвариант защищён тестом `test_project_has_no_order_execution_anywhere`.
-* Секреты только из env/`.env`; `.env`, `data/`, `*.log` в `.gitignore`.
-* Telegram закрыт allow-list; API закрыт `V3_API_TOKEN` (по желанию).
-* AI-слой не может изменить direction/levels/score — гейт всегда первичен.
-* `v3/validator.py` подключён на всех путях публикации (Telegram, API, watcher).
-* См. [`SECURITY.md`](SECURITY.md) и [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+---
 
-## Дисклеймер
+## 🛠 Сборка
 
-Любой анализ/сигнал — **статистическая оценка, а не гарантия результата**.
-Signal Quality ≈ качество сетапа, **не вероятность прибыли**. Криптофьючерсы
-высокорискованны; не используйте плечо, которое не можете позволить потерять.
+`v4.0.0 · ULTIMATE v4: Multi-exchange + STOBB/SBM/JUMP + Liquidity + Confluence`
+
+Портировано из:
+- freqtrade (54.7k stars) — лучший торговый бот GitHub
+- CryptoScanBot — лучший сканер STOBB/SBM/JUMP
+- + 5 других топ-проектов
+
+Старый мартингейл полностью удален. Новый движок — с нуля, production-ready.
