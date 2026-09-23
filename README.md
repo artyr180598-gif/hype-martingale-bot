@@ -22,3 +22,7 @@ Freqtrade supports environment-variable overrides using the FREQTRADE__ prefix. 
 The dynamic VolumePairList scans the highest-volume markets and refreshes periodically.
 
 Official project: https://github.com/freqtrade/freqtrade
+
+## Current Hype engine
+
+The strategy uses multi-horizon structure, volume/flow proxies, a live order-book microstructure gate when available, and bounded smart recovery. Bybit public-trade orderflow is not enabled because the current Freqtrade 2026.8 runtime reports that trade data is unavailable for Bybit; the bot therefore falls back to candle-flow and live order-book data. The bot remains Dry Run.
