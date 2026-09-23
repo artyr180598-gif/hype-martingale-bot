@@ -228,10 +228,17 @@ async def monitor(bot):
         await asyncio.sleep(10)
 
 async def post_init(app: Application):
-    app.create_task(monitor(app.bot))
+    app.bot_data["monitor_task"] = asyncio.create_task(monitor(app.bot))
+    print("Russian Telegram UI started", flush=True)
 
 async def post_shutdown(app: Application):
-    await asyncio.sleep(0)
+    task = app.bot_data.get("monitor_task")
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 def run_freqtrade():
     return subprocess.Popen([
@@ -242,6 +249,7 @@ def run_freqtrade():
 
 if __name__ == "__main__":
     child = run_freqtrade()
+    print("Freqtrade subprocess started", flush=True)
 
     def stop_child(*_):
         if child.poll() is None:
