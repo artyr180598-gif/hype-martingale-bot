@@ -88,7 +88,7 @@ def fmt_trade(t):
         f"🪙 {pair}\n"
         f"💵 Вход: {open_rate}\n"
         f"📍 Сейчас: {current}\n"
-        f"📊 Результат: {profit}\n"
+        f"📊 Результат: {profit}\n" + f"🧠 Score/Flow: {tag}\n"
         f"⚡ Плечо: {lev}x\n"
         f"🛡 Стоп: {stop if stop is not None else 'по правилам стратегии'}\n"
         f"🧠 Причина входа: {tag}"
@@ -144,7 +144,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 out = ["📜 *Последние сделки*"]
                 for t in trades[:10]:
                     side = "SHORT" if t.get("is_short") else "LONG"
-                    out.append(f"#{t.get('trade_id')} · {t.get('pair')} · {side} · {fmt_pct(t.get('close_profit_abs') or t.get('close_profit'))}")
+                    out.append(f"#{t.get('trade_id')} · {t.get('pair')} · {side} · {f"{float(t.get('close_profit_abs')):+.2f} USDT" if t.get('close_profit_abs') is not None else fmt_pct(t.get('close_profit'))}")
                 await send(update, "\n".join(out))
         elif text == "🟢 Запустить":
             data = await asyncio.to_thread(ft.post, "/start")
@@ -167,10 +167,13 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "ℹ️ *Как работает бот*\n\n"
                 "• Бот анализирует ликвидные фьючерсные пары Bybit.\n"
                 "• Основной таймфрейм — 5 минут.\n"
-                "• Стратегия Prime использует EMA, RSI, ATR, объём и силу тренда.\n"
+                "• Стратегия Hype использует структуру, EMA, RSI, ATR, объём и поток сделок.\n"
+                "• Есть ранний вход по совокупному Score 0–100, а не отдельному индикатору.\n"
+                "• При наличии public trades используются delta/imbalance orderflow; без них работает свечной flow-прокси.\n"
+                "• Есть ограниченное smart recovery: максимум 2 дополнительных входа, только при сохранении исходной идеи.\n"
                 "• Есть LONG и SHORT.\n"
                 "• Максимальное плечо ограничено 3x.\n"
-                "• Мартингейла и усреднения позиции в новой стратегии нет.\n"
+                "• Recovery не является слепым удвоением: размеры ограничены 70 и 90 USDT.\n"
                 "• Сейчас включён Dry Run — все сделки виртуальные.\n\n"
                 "⚠️ Сигнал стратегии не является гарантией прибыли.")
         elif text == "⚙️ Настройки":
@@ -184,7 +187,9 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Размер одной сделки: 50 USDT\n"
                 "Максимальное плечо: 3x\n"
                 "Режим: Dry Run 🧪\n"
-                "Мартингейл: ❌")
+                "Smart Recovery: 2 шага (70 + 90 USDT)\n"
+                "Flow/Orderflow: включён\n"
+                "Initial stake: 50 USDT")
     except Exception as e:
         await send(update, f"⚠️ Не удалось получить данные. Бот продолжает работать, ошибка интерфейса: {type(e).__name__}")
 
