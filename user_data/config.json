@@ -18,7 +18,7 @@
   "minimal_roi": {"0": 0.03, "30": 0.015, "120": 0},
   "stoploss": -0.02,
   "exchange": {
-    "name": "binance",
+    "name": "bybit",
     "key": "",
     "secret": "",
     "ccxt_config": {},
