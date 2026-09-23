@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schema.freqtrade.io/schema.json",
+  "dry_run": true,
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "max_open_trades": 3,
+  "stake_currency": "USDT",
+  "stake_amount": 50,
+  "tradable_balance_ratio": 0.95,
+  "fiat_display_currency": "USD",
+  "timeframe": "5m",
+  "strategy": "PrimeStrategy",
+  "cancel_open_orders_on_exit": true,
+  "process_only_new_candles": true,
+  "use_exit_signal": true,
+  "exit_profit_only": false,
+  "ignore_roi_if_entry_signal": true,
+  "minimal_roi": {"0": 0.03, "30": 0.015, "120": 0},
+  "stoploss": -0.02,
+  "exchange": {
+    "name": "binance",
+    "key": "",
+    "secret": "",
+    "ccxt_config": {},
+    "ccxt_async_config": {},
+    "pair_whitelist": [],
+    "pair_blacklist": [
+      ".*UP/USDT:USDT",
+      ".*DOWN/USDT:USDT",
+      ".*BULL/USDT:USDT",
+      ".*BEAR/USDT:USDT"
+    ]
+  },
+  "pairlists": [
+    {
+      "method": "VolumePairList",
+      "number_assets": 80,
+      "sort_key": "quoteVolume",
+      "min_value": 1000000,
+      "refresh_period": 900
+    }
+  ],
+  "telegram": {
+    "enabled": true,
+    "token": "",
+    "chat_id": ""
+  },
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "verbosity": "error",
+    "enable_openapi": true,
+    "jwt_secret_key": "CHANGE_ME_IN_RAILWAY",
+    "CORS_origins": [],
+    "username": "freqtrade",
+    "password": "CHANGE_ME_IN_RAILWAY"
+  },
+  "bot_name": "Prime Freqtrade",
+  "db_url": "sqlite:////freqtrade/user_data/tradesv3.sqlite",
+  "initial_state": "running",
+  "force_entry_enable": false,
+  "internals": {
+    "process_throttle_secs": 5
+  }
+}
