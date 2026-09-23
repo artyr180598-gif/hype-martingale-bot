@@ -17,6 +17,16 @@
   "ignore_roi_if_entry_signal": true,
   "minimal_roi": {"0": 0.03, "30": 0.015, "120": 0},
   "stoploss": -0.02,
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
   "exchange": {
     "name": "bybit",
     "key": "",
