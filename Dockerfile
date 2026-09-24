@@ -1,6 +1,6 @@
-FROM freqtradeorg/freqtrade:stable
-WORKDIR /freqtrade
-COPY user_data /freqtrade/user_data
-COPY telegram_ui.py /freqtrade/telegram_ui.py
-ENTRYPOINT ["python3"]
-CMD ["/freqtrade/telegram_ui.py"]
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY signal_engine.py telegram_ui.py ./
+CMD ["python", "telegram_ui.py"]
