@@ -218,14 +218,38 @@ class ConfluenceAnalyzer:
         concurrency = min(8, len(symbols))
         sem = asyncio.Semaphore(concurrency)
         tasks = [asyncio.create_task(self._analyze_one(symbol, sem)) for symbol in symbols]
-        results = await asyncio.gather(*tasks)
+        # Do not let one batch of exchange calls keep Telegram waiting forever.
+        # Return whatever completed before the hard scan deadline; unfinished
+        # tasks are cancelled and never converted into fake signals.
+        done, pending = await asyncio.wait(tasks, timeout=75)
+        results = []
+        for task in done:
+            try:
+                results.append(task.result())
+            except asyncio.CancelledError:
+                results.append(None)
+            except Exception:
+                log.exception("Signal scan task failed")
+                results.append(None)
+
+        if pending:
+            log.warning(
+                "Signal scan deadline reached: completed=%d pending=%d",
+                len(done),
+                len(pending),
+            )
+            for task in pending:
+                task.cancel()
 
         found = [signal for signal in results if signal and signal.valid]
         found.sort(key=lambda x: x.score, reverse=True)
+        failed = sum(1 for signal in results if signal is None)
         log.info(
-            "Signal scan finished: symbols=%d valid=%d errors/timeouts=%d",
+            "Signal scan finished: symbols=%d completed=%d valid=%d failed=%d pending=%d",
             len(symbols),
+            len(results),
             len(found),
-            len(symbols) - len(results),
+            failed,
+            len(pending),
         )
         return found[:limit]
