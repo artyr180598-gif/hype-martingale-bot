@@ -108,6 +108,9 @@ class PumpScanner:
         self.ws_symbols: list[str] = []
         self.ws_ready = False
         self._history_seed_task: asyncio.Task | None = None
+        self.history_ready = False
+        self.last_diagnostic = 0.0
+        self.diagnostic_interval = 30.0
 
     async def start(self) -> None:
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12))
@@ -240,10 +243,12 @@ class PumpScanner:
                         pass
 
             await asyncio.gather(*(seed(s) for s in symbols))
-            log.info("Seeded price history for %d/%d symbols", len(self.prices), len(symbols))
+            self.history_ready = bool(self.prices) and len(self.prices) >= max(1, int(len(symbols) * 0.5))
+            log.info("Seeded price history for %d/%d symbols; ready=%s", len(self.prices), len(symbols), self.history_ready)
         except asyncio.CancelledError:
             return
         except Exception:
+            self.history_ready = False
             log.exception("Could not seed price history")
 
     def _trim(self, symbol: str, now: float) -> deque[tuple[float, float]]:
@@ -255,6 +260,12 @@ class PumpScanner:
 
     async def update(self) -> list[PumpSignal]:
         if not self.running:
+            return []
+        if not self.history_ready:
+            now = time.time()
+            if now - self.last_diagnostic >= self.diagnostic_interval:
+                self.last_diagnostic = now
+                log.info("Scanner not ready: universe=%d tickers=%d history=%d", len(self.ws_symbols), len(self.ticker_cache), len(self.prices))
             return []
 
         # WebSocket is primary. REST refresh is a safety net if a symbol has
@@ -313,8 +324,12 @@ class PumpScanner:
             candidates.append((t.copy(), direction, change, start, day_pct))
 
         if not candidates:
+            if now - self.last_diagnostic >= self.diagnostic_interval:
+                self.last_diagnostic = now
+                log.info("Scanner cycle: universe=%d tickers=%d history=%d candidates=0 threshold=%.2f%%", len(self.ws_symbols), len(self.ticker_cache), len(self.prices), self.settings.threshold_pct)
             return []
 
+        log.info("Scanner candidates: %d (universe=%d tickers=%d)", len(candidates), len(self.ws_symbols), len(self.ticker_cache))
         # Do not hit REST for hundreds of candidates at once.
         candidates.sort(key=lambda x: abs(x[2]), reverse=True)
         candidates = candidates[:20]
@@ -328,6 +343,7 @@ class PumpScanner:
                 continue
             self.last_trigger[(result.symbol, result.direction)] = now
             output.append(result)
+        log.info("Scanner signals: %d", len(output))
         return output
 
     async def _enrich(
