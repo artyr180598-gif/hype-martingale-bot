@@ -61,7 +61,8 @@ class TelegramBot:
                         retry_after = int((data.get('parameters') or {}).get('retry_after') or 60)
                         self.telegram_cooldown_until = max(self.telegram_cooldown_until, time.monotonic() + retry_after)
                         log.error('Telegram flood control: %s; pausing outbound messages for %ss', error, retry_after)
-                        raise RuntimeError(error)
+                        # Rate-limit is not a network failure. Pause outbound traffic without crashing the worker.
+                        return None
                     last_error = RuntimeError(error)
                     log.error('%s (attempt %s/%s)', error, attempt, retries)
                     if response.status in {400, 401, 403, 404}:
@@ -129,7 +130,8 @@ class TelegramBot:
                 if signals:
                     # Alert-only by design: send at most three strongest fresh signals per cycle.
                     # This prevents a volatile market from flooding the Telegram chat.
-                    signals = sorted(signals, key=lambda s: abs(s.change_pct), reverse=True)[:3]
+                    signals = [s for s in signals if s.quality_score >= self.scanner.settings.min_signal_score]
+                    signals = sorted(signals, key=lambda s: (s.quality_score, abs(s.change_pct)), reverse=True)[:3]
                     for signal in signals:
                         try:
                             await self._send(self.chat_id, self.scanner.format_signal(signal))
@@ -241,7 +243,8 @@ class TelegramBot:
             f'2. Порог изменения цены: {s.threshold_pct:.2f}%\n'
             f'3. RSI: {"ON" if s.rsi_enabled else "OFF"} ({rsi_tfs}), уровни {s.rsi_overbought:.0f}/{s.rsi_oversold:.0f}\n'
             f'4. Рост/падение 24ч: {"ON" if s.day_filter_enabled else "OFF"} ({s.day_min_pct:.1f}%)\n'
-            f'5. Типы сигналов: {s.signal_types}\n\n'
+            f'5. Типы сигналов: {s.signal_types}\n'
+            f'6. Минимальное качество авто-сигнала: {s.min_signal_score}/100\n\n'
             f'Доп. данные: дисбаланс {"ON" if s.show_imbalance else "OFF"}, объём {"ON" if s.show_volume else "OFF"}, funding {"ON" if s.show_funding else "OFF"}, листинг {"ON" if s.show_listing else "OFF"}.\n\n'
             'Базовая логика: цена должна пройти порог относительно минимума/максимума внутри интервала.'
         )
