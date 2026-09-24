@@ -167,13 +167,13 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "ℹ️ *Как работает бот*\n\n"
                 "• Бот анализирует ликвидные фьючерсные пары Bybit.\n"
                 "• Основной таймфрейм — 5 минут.\n"
-                "• Стратегия Hype использует структуру, EMA, RSI, ATR, объём и поток сделок.\n"
-                "• Есть ранний вход по совокупному Score 0–100, а не отдельному индикатору.\n"
-                "• При наличии public trades используются delta/imbalance orderflow; без них работает свечной flow-прокси.\n"
+                "• Стратегия Hype использует структуру, EMA, RSI, ATR, объём, VWAP и SMC-конфлюэнс.\n"
+                "• Вход проходит через совокупный Score 0–100 и подтверждение 5m + 15m + 1h.\n"
+                "• Дополнительный live-фильтр проверяет дисбаланс стакана; исторический backtest на orderbook не подменяется.\n"
                 "• Есть ограниченное smart recovery: максимум 2 дополнительных входа, только при сохранении исходной идеи.\n"
                 "• Есть LONG и SHORT.\n"
                 "• Максимальное плечо ограничено 3x.\n"
-                "• Recovery не является слепым удвоением: размеры ограничены 70 и 90 USDT.\n"
+                "• Recovery не является слепым удвоением: размеры ограничены 50 и 75 USDT.\n"
                 "• Сейчас включён Dry Run — все сделки виртуальные.\n\n"
                 "⚠️ Сигнал стратегии не является гарантией прибыли.")
         elif text == "⚙️ Настройки":
@@ -187,8 +187,8 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Размер одной сделки: 50 USDT\n"
                 "Максимальное плечо: 3x\n"
                 "Режим: Dry Run 🧪\n"
-                "Smart Recovery: 2 шага (70 + 90 USDT)\n"
-                "Flow/Orderflow: включён\n"
+                "Smart Recovery: 2 шага (50 + 75 USDT)\n"
+                "SMC/Flow: включён\n"
                 "Initial stake: 50 USDT")
     except Exception as e:
         await send(update, f"⚠️ Не удалось получить данные. Бот продолжает работать, ошибка интерфейса: {type(e).__name__}")
@@ -249,7 +249,7 @@ def run_freqtrade():
     return subprocess.Popen([
         "freqtrade", "trade",
         "--config", "/freqtrade/user_data/config.json",
-        "--strategy", "PrimeStrategy"
+        "--strategy", "HypeConfluenceStrategy"
     ])
 
 if __name__ == "__main__":
