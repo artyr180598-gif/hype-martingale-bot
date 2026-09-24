@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>og-image source</title>
+  <!-- Source for og-image.png. Render at exactly 1280x640 and screenshot. Not linked from the site. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;1,6..72,400&display=swap">
+  <style>
+    html, body { margin: 0; width: 1280px; height: 640px; overflow: hidden; background: #0d0d0f; }
+    body {
+      color: #ebe6da; position: relative;
+      font-family: "Newsreader", "Iowan Old Style", Palatino, Georgia, serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .rule { position: absolute; left: 72px; right: 72px; height: 1px; background: rgba(240,180,41,.5); }
+    .rule.top { top: 64px; } .rule.bottom { top: 576px; }
+    .brand { position: absolute; left: 72px; top: 30px; font-size: 22px; letter-spacing: -0.01em; }
+    .brand i { display: inline-block; width: 9px; height: 15px; background: #f0b429; margin-right: 10px; vertical-align: -1px; }
+    .brand em { color: #a8a195; }
+    .meta { position: absolute; right: 72px; top: 34px; font-family: "JetBrains Mono", Menlo, monospace; font-size: 14px; color: #8a8472; }
+    h1 {
+      position: absolute; left: 72px; top: 112px; width: 680px; margin: 0;
+      font-weight: 400; font-size: 74px; line-height: 0.98; letter-spacing: -0.035em;
+    }
+    .sub { position: absolute; left: 72px; top: 372px; width: 600px; font-size: 24px; line-height: 1.4; color: #a8a195; }
+    .ledger { position: absolute; right: 72px; top: 118px; width: 380px; font-family: "JetBrains Mono", Menlo, monospace; font-size: 17px; border-top: 1px solid rgba(240,180,41,.5); }
+    .ledger div { display: flex; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid #232125; }
+    .ledger span:first-child { color: #a8a195; }
+    .ledger span:last-child { color: #f0b429; font-weight: 500; }
+    .ledger span.plain { color: #ebe6da; font-weight: 400; }
+    .cmd { position: absolute; left: 72px; top: 596px; font-family: "JetBrains Mono", Menlo, monospace; font-size: 15px; color: #8a8472; }
+    .cmd b { color: #ebe6da; font-weight: 400; }
+    .cmd i { display: inline-block; width: 8px; height: 16px; background: #f0b429; vertical-align: -2px; margin-left: 2px; }
+    .lic { position: absolute; right: 72px; top: 596px; font-family: "JetBrains Mono", Menlo, monospace; font-size: 15px; color: #8a8472; }
+  </style>
+</head>
+<body>
+  <div class="brand"><i></i>HyperData <em>Terminal</em></div>
+  <div class="meta">Open-source crypto market-data terminal</div>
+  <div class="rule top"></div>
+  <h1>Real-time crypto market intelligence, right in your terminal.</h1>
+  <p class="sub">Public feeds from Hyperliquid, Binance, Bybit, OKX and Deribit. Open source. No API keys.</p>
+  <div class="ledger">
+    <div><span>Exchanges</span><span>5</span></div>
+    <div><span>Dashboards</span><span>6</span></div>
+    <div><span>Data components</span><span>14</span></div>
+    <div><span>API endpoints</span><span>17+</span></div>
+    <div><span>License</span><span class="plain">Apache-2.0</span></div>
+    <div><span>Runtime</span><span class="plain">Python 3.12+</span></div>
+  </div>
+  <div class="rule bottom"></div>
+  <div class="cmd">~ % <b>pip install -e . &amp;&amp; hyperdata</b><i></i></div>
+  <div class="lic">github.com/Co-Messi/HyperData-Terminal</div>
+  <script>
+    Promise.all([
+      document.fonts.load('17px "JetBrains Mono"'),
+      document.fonts.load('400 78px "Newsreader"'),
+      document.fonts.load('24px "Newsreader"')
+    ]).then(function () { return document.fonts.ready; })
+      .then(function () { document.documentElement.setAttribute('data-fonts-ready', '1'); });
+  </script>
+</body>
+</html>
