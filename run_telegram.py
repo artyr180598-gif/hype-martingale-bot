@@ -3,7 +3,6 @@ import logging
 import os
 import signal
 from dotenv import load_dotenv
-from src.data_layer.hub import HyperDataHub
 from src.telegram_bot import TelegramBot
 
 load_dotenv()
@@ -12,9 +11,7 @@ load_dotenv()
 
 async def main():
     logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'), format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
-    hub = HyperDataHub(demo=False)
-    bot = TelegramBot(hub)
-    await hub.start()
+    bot = TelegramBot(None)
     try:
         await bot.start()
         stop = asyncio.Event()
@@ -27,7 +24,6 @@ async def main():
         await stop.wait()
     finally:
         await bot.stop()
-        await hub.stop()
 
 if __name__ == '__main__':
     asyncio.run(main())
