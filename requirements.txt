@@ -1,3 +1,8 @@
-pandas>=2.2,<3
-requests>=2.32,<3
-python-telegram-bot>=22,<23
+# Mirrors [project].dependencies in pyproject.toml (the source of truth).
+# For reproducible installs use requirements.lock instead.
+aiohttp>=3.9.0,<4.0
+rich>=14.3.3,<15
+pyfiglet>=1.0.2,<2.0
+pandas>=3.0.1,<4
+numpy>=1.26.0,<3.0
+python-dotenv>=1.0.0,<2.0
