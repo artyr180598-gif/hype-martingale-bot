@@ -1,0 +1,274 @@
+"""
+Orderbook depth streaming engine.
+
+WebSocket-connects to Hyperliquid l2Book channel for top 10 symbols.
+Maintains live 50-level orderbooks and computes bid/ask imbalance.
+
+Usage:
+    engine = OrderBookEngine(symbols=["BTC", "ETH"])
+    await engine.start()
+    snap = engine.get_snapshot("BTC")  # OrderBookSnapshot or None
+    await engine.stop()
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass
+
+import aiohttp
+
+logger = logging.getLogger(__name__)
+
+WS_URL = "wss://api.hyperliquid.xyz/ws"
+SNAPSHOT_INTERVAL = 5.0
+DEFAULT_DEPTH = 50
+IMBALANCE_DEPTH = 10  # Use top 10 levels for imbalance calculation
+DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "AVAX", "LINK", "ARB", "WIF", "SUI"]
+
+# Orderbook snapshots are pushed continuously; if we go this long without any
+# l2Book message the feed is considered stale (a half-open socket would
+# otherwise keep serving a frozen book as if it were live).
+STALE_AFTER_SECONDS = 15.0
+
+
+@dataclass
+class OrderBookLevel:
+    price: float
+    size: float
+
+
+@dataclass
+class OrderBookSnapshot:
+    timestamp: float
+    symbol: str
+    bids: list[OrderBookLevel]  # Sorted best (highest) first
+    asks: list[OrderBookLevel]  # Sorted best (lowest) first
+    imbalance: float            # (bid_vol_top10 - ask_vol_top10) / total, [-1, 1]
+    best_bid: float
+    best_ask: float
+    spread: float
+    stale: bool = False         # True if the book hasn't updated within STALE_AFTER_SECONDS
+
+
+def compute_imbalance(
+    bids: list[OrderBookLevel],
+    asks: list[OrderBookLevel],
+    depth: int = IMBALANCE_DEPTH,
+) -> float:
+    """Bid/ask volume imbalance using top-N levels. Returns value in [-1, 1]."""
+    bid_vol = sum(lvl.size for lvl in bids[:depth])
+    ask_vol = sum(lvl.size for lvl in asks[:depth])
+    total = bid_vol + ask_vol
+    if total == 0:
+        return 0.0
+    return (bid_vol - ask_vol) / total
+
+
+class OrderBookEngine:
+    """Maintains live orderbooks via Hyperliquid l2Book WebSocket."""
+
+    def __init__(self, symbols: list[str] | None = None, depth: int = DEFAULT_DEPTH) -> None:
+        self.symbols = symbols or list(DEFAULT_SYMBOLS)
+        self.depth = depth
+        # books[symbol] = {"bids": [...], "asks": [...], "updated_at": float}
+        self.books: dict[str, dict] = {
+            sym: {"bids": [], "asks": [], "updated_at": 0.0}
+            for sym in self.symbols
+        }
+        # Latest snapshot per symbol
+        self.snapshots: dict[str, OrderBookSnapshot] = {}
+
+        # Wall-clock time the last valid l2Book message was processed. Used by
+        # the hub's staleness watchdog; 0.0 means "no data received yet".
+        self.last_message_at: float = 0.0
+
+        self._task: asyncio.Task | None = None
+        self._snapshot_task: asyncio.Task | None = None
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self._session: aiohttp.ClientSession | None = None
+        self._running = False
+
+    # ── Lifecycle ────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._run_forever(), name="orderbook-ws")
+        self._snapshot_task = asyncio.create_task(self._snapshot_loop(), name="orderbook-snapshots")
+        logger.info("OrderBookEngine started for %s", self.symbols)
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+        if self._session and not self._session.closed:
+            await self._session.close()
+        for task in [self._task, self._snapshot_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        logger.info("OrderBookEngine stopped")
+
+    # ── Public API ───────────────────────────────────────────────
+
+    def get_snapshot(self, symbol: str) -> OrderBookSnapshot | None:
+        snap = self.snapshots.get(symbol.upper())
+        if snap is not None:
+            # Recompute staleness at read time so the flag keeps tracking age
+            # even when no new books arrive (a frozen feed must read as stale).
+            snap.stale = self.data_age() > STALE_AFTER_SECONDS
+        return snap
+
+    def data_age(self, now: float | None = None) -> float:
+        """Seconds since the last l2Book message (inf if none received yet)."""
+        if self.last_message_at <= 0:
+            return float("inf")
+        return (now if now is not None else time.time()) - self.last_message_at
+
+    def is_stale(self, now: float | None = None) -> bool:
+        return self.data_age(now) > STALE_AFTER_SECONDS
+
+    # ── Book update (public for testability) ─────────────────────
+
+    def _update_book(self, symbol: str, data: dict) -> None:
+        """Parse l2Book levels data and update the in-memory book.
+
+        Malformed levels are dropped individually so one bad entry can't
+        raise out of the WS read loop and force a reconnect (or poison the
+        whole book).
+        """
+        if symbol not in self.books:
+            return
+        levels = data.get("levels", [[], []])
+        if not isinstance(levels, list):
+            logger.warning("[orderbook] malformed levels for %s: %.200s", symbol, levels)
+            return
+        bids_raw = levels[0] if len(levels) > 0 else []
+        asks_raw = levels[1] if len(levels) > 1 else []
+
+        def _parse_side(raw_levels) -> list[OrderBookLevel]:
+            parsed: list[OrderBookLevel] = []
+            if not isinstance(raw_levels, list):
+                return parsed
+            for lvl in raw_levels[:self.depth]:
+                try:
+                    parsed.append(OrderBookLevel(price=float(lvl["px"]), size=float(lvl["sz"])))
+                except (KeyError, TypeError, ValueError):
+                    logger.debug("[orderbook] dropped malformed level for %s: %.100s", symbol, lvl)
+            return parsed
+
+        bids = _parse_side(bids_raw)
+        asks = _parse_side(asks_raw)
+
+        self.books[symbol]["bids"] = bids
+        self.books[symbol]["asks"] = asks
+        self.books[symbol]["updated_at"] = time.time()
+        self.last_message_at = self.books[symbol]["updated_at"]
+        self._build_snapshot(symbol)
+
+    def _build_snapshot(self, symbol: str) -> None:
+        book = self.books[symbol]
+        bids = book["bids"]
+        asks = book["asks"]
+        imbalance = compute_imbalance(bids, asks)
+        best_bid = bids[0].price if bids else 0.0
+        best_ask = asks[0].price if asks else 0.0
+        spread = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 0.0
+
+        self.snapshots[symbol] = OrderBookSnapshot(
+            timestamp=book["updated_at"],
+            symbol=symbol,
+            bids=bids,
+            asks=asks,
+            imbalance=imbalance,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            spread=spread,
+            stale=False,
+        )
+
+    def _handle_message(self, data: dict) -> None:
+        if data.get("channel") != "l2Book":
+            return
+        book_data = data.get("data", {})
+        symbol = book_data.get("coin", "")
+        if symbol and symbol in self.books:
+            self._update_book(symbol, book_data)
+
+    # ── WebSocket loop ────────────────────────────────────────────
+
+    async def _run_forever(self) -> None:
+        backoff = 1.0
+        while self._running:
+            try:
+                await self._connect_and_listen()
+                backoff = 1.0
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("OrderBookEngine WS error (%s), reconnecting in %.1fs", exc, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+
+    async def _connect_and_listen(self) -> None:
+        self._session = aiohttp.ClientSession()
+        try:
+            # heartbeat=20 makes aiohttp ping the server and raise on a missing
+            # pong, so a half-open TCP connection triggers reconnect instead of
+            # silently serving a frozen orderbook.
+            self._ws = await self._session.ws_connect(WS_URL, heartbeat=20)
+            for sym in self.symbols:
+                await self._ws.send_json({
+                    "method": "subscribe",
+                    "subscription": {"type": "l2Book", "coin": sym, "nSigFigs": 5},
+                })
+            logger.info("[orderbook] subscribed to %d l2Book feeds", len(self.symbols))
+
+            async for msg in self._ws:
+                if not self._running:
+                    break
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    self._handle_message(msg.json())
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    break
+        finally:
+            if self._ws and not self._ws.closed:
+                await self._ws.close()
+            if self._session and not self._session.closed:
+                await self._session.close()
+
+    async def _snapshot_loop(self) -> None:
+        """Log imbalance snapshots every 5s (dashboards read from self.snapshots directly)."""
+        while self._running:
+            try:
+                # Watchdog: if the socket is open but no l2Book message has
+                # arrived for well past the stale threshold, the connection is
+                # likely dead-but-not-erroring — force-close it so _run_forever
+                # re-establishes via its backoff loop. (heartbeat handles most
+                # half-open cases; this covers a live socket that stops sending.)
+                if self.last_message_at > 0 and self.data_age() > STALE_AFTER_SECONDS * 2:
+                    if self._ws is not None and not self._ws.closed:
+                        logger.warning(
+                            "[orderbook] no data for %.0fs — forcing reconnect",
+                            self.data_age(),
+                        )
+                        await self._ws.close()
+
+                for symbol in self.symbols:
+                    snap = self.snapshots.get(symbol)
+                    if snap:
+                        logger.debug(
+                            "[orderbook] %s imbalance=%.3f spread=%.2f",
+                            symbol, snap.imbalance, snap.spread,
+                        )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("OrderBookEngine snapshot loop error")
+            await asyncio.sleep(SNAPSHOT_INTERVAL)
