@@ -1,0 +1,23 @@
+name: validate-hype
+
+on:
+  push:
+    branches:
+      - "rebuild/**"
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t hype-validate .
+      - name: Python syntax
+        run: docker run --rm --entrypoint python3 hype-validate -m py_compile /freqtrade/user_data/strategies/HypeConfluenceStrategy.py
+      - name: Strategy discovery
+        run: docker run --rm --entrypoint freqtrade hype-validate list-strategies -c /freqtrade/user_data/config.json
+      - name: Config validation
+        run: docker run --rm --entrypoint freqtrade hype-validate show-config -c /freqtrade/user_data/config.json --strategy HypeConfluenceStrategy >/tmp/hype-config.txt
+      - name: Print config summary
+        run: tail -n 40 /tmp/hype-config.txt
