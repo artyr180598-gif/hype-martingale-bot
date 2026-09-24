@@ -391,7 +391,7 @@ class HyperliquidConnection:
         while self._running:
             try:
                 async with self._session.ws_connect("wss://api.hyperliquid.xyz/ws", heartbeat=20) as ws:
-                    backoff = 1.0
+                    connected_at = time.monotonic()
                     for coin in coins:
                         await ws.send_json({
                             "method": "subscribe",
@@ -416,6 +416,11 @@ class HyperliquidConnection:
             except Exception:
                 logger.exception("[hyperliquid] WS error")
             if self._running:
+                # Do not reset backoff merely because the WebSocket handshake
+                # succeeded: an endpoint that immediately closes would otherwise
+                # reconnect every ~1 second forever.
+                if time.monotonic() - connected_at >= 30.0:
+                    backoff = 1.0
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
 
