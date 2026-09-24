@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import aiohttp
+# Railway deployment verification: runtime logic unchanged.
 from src.strategies.confluence import ConfluenceAnalyzer
 
 log = logging.getLogger(__name__)
