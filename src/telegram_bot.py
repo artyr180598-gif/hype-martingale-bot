@@ -218,4 +218,7 @@ class TelegramBot:
         await self._api("sendMessage", payload)
 
     async def _manual_scan(self, chat_id):
-        await self._send(chat_id, "🔎 Проверяю рынок Bybit...")
+        await self._send(
+            chat_id,
+            "🔎 Проверяю рынок Bybit...",
+        )
