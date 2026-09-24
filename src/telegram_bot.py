@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import aiohttp
@@ -11,8 +12,8 @@ log = logging.getLogger(__name__)
 class TelegramBot:
     def __init__(self, hub):
         self.hub = hub
-        self.token = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN', '')
-        self.chat_id = os.getenv('TELEGRAM_CHAT_ID', '')
+        self.token = (os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN', '')).strip()
+        self.chat_id = os.getenv('TELEGRAM_CHAT_ID', '').strip()
         self.offset = 0
         self.running = False
         self.session = None
@@ -29,13 +30,39 @@ class TelegramBot:
             'is_persistent': True,
         }
 
-    async def _api(self, method, payload=None):
+    async def _api(self, method, payload=None, retries=3):
+        if not self.token:
+            raise RuntimeError('Telegram token is empty')
         url = 'https://api.telegram.org/bot{}/{}'.format(self.token, method)
-        async with self.session.post(url, json=payload or {}, timeout=aiohttp.ClientTimeout(total=35)) as response:
-            data = await response.json()
-            if not data.get('ok'):
-                raise RuntimeError('Telegram API request failed')
-            return data.get('result')
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                async with self.session.post(
+                    url,
+                    json=payload or {},
+                    timeout=aiohttp.ClientTimeout(total=35),
+                ) as response:
+                    raw = await response.text()
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        data = {}
+                    if data.get('ok'):
+                        return data.get('result')
+                    description = str(data.get('description') or raw[:300]).replace(self.token, '<TOKEN>')
+                    error = f'Telegram API {method} HTTP {response.status}: {description}'
+                    last_error = RuntimeError(error)
+                    log.error('%s (attempt %s/%s)', error, attempt, retries)
+                    if response.status in {400, 401, 403, 404}:
+                        break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                log.warning('Telegram API %s connection failed (attempt %s/%s): %s', method, attempt, retries, type(exc).__name__)
+            if attempt < retries:
+                await asyncio.sleep(min(2 * attempt, 6))
+        raise last_error or RuntimeError(f'Telegram API {method} failed')
 
     async def start(self):
         if not self.token or not self.chat_id:
@@ -43,6 +70,8 @@ class TelegramBot:
         self.session = aiohttp.ClientSession()
         await self.scanner.start()
         self.running = True
+
+        # Telegram startup calls are retried and logged with the real API error.
         await self._api('deleteWebhook', {'drop_pending_updates': False})
         await self._api('setMyCommands', {'commands': [
             {'command': 'start', 'description': 'Открыть меню'},
@@ -89,8 +118,8 @@ class TelegramBot:
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                log.warning('Telegram poll failed: %s', type(exc).__name__)
-                await asyncio.sleep(3)
+                log.warning('Telegram poll failed: %s', exc)
+                await asyncio.sleep(5)
 
     def _allowed(self, update):
         message = update.get('message') or {}
@@ -173,4 +202,3 @@ class TelegramBot:
             await self._send(chat_id, f'Bybit Pump Monitor: LIVE\nИнструментов USDT: {len(tickers)}\nПорог: {self.scanner.settings.threshold_pct:.2f}%\nИнтервал: {self.scanner.settings.interval_seconds // 60} мин')
         except Exception as exc:
             await self._send(chat_id, f'Bybit Pump Monitor: ERROR ({type(exc).__name__})')
-
