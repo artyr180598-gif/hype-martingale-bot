@@ -218,7 +218,79 @@ class TelegramBot:
         await self._api("sendMessage", payload)
 
     async def _manual_scan(self, chat_id):
+        await self._send(chat_id, "🔎 Проверяю рынок Bybit...")
+        try:
+            signals = await asyncio.wait_for(self.scanner.scan_once(), timeout=25)
+        except asyncio.TimeoutError:
+            await self._send(chat_id, "⏱ Проверка заняла слишком долго. Автоматический монитор продолжает работать.")
+            return
+        except Exception:
+            log.exception("Manual scan failed")
+            await self._send(chat_id, "❌ Ошибка проверки. Подробность записана в лог.")
+            return
+        if not signals:
+            await self._send(chat_id, "ℹ️ Сейчас подходящих Pump/Dump по заданным фильтрам нет.")
+            return
+        for signal in signals:
+            await self._send(chat_id, self.scanner.format_signal(signal))
+
+    async def _settings(self, chat_id):
+        s = self.scanner.settings
+        keyboard = [
+            [
+                {"text": f"⏱ Интервал: {s.interval_seconds // 60}м", "callback_data": "noop"},
+                {"text": "30с", "callback_data": "interval:30"},
+                {"text": "1м", "callback_data": "interval:60"},
+                {"text": "3м", "callback_data": "interval:180"},
+            ],
+            [
+                {"text": f"🎯 Порог: {s.threshold_pct:g}%", "callback_data": "noop"},
+                {"text": "2%", "callback_data": "threshold:2"},
+                {"text": "3%", "callback_data": "threshold:3"},
+                {"text": "5%", "callback_data": "threshold:5"},
+            ],
+            [
+                {"text": f"📊 RSI: {'ON' if s.rsi_enabled else 'OFF'}", "callback_data": "noop"},
+                {"text": "RSI ON", "callback_data": "rsi:on"},
+                {"text": "RSI OFF", "callback_data": "rsi:off"},
+            ],
+            [
+                {"text": "5м", "callback_data": "interval:300"},
+                {"text": "10%", "callback_data": "threshold:10"},
+            ],
+            [
+                {"text": "PUMP", "callback_data": "signals:PUMP"},
+                {"text": "DUMP", "callback_data": "signals:DUMP"},
+                {"text": "BOTH", "callback_data": "signals:BOTH"},
+            ],
+            [
+                {"text": "24ч OFF", "callback_data": "day:off"},
+                {"text": "24ч ±5%", "callback_data": "daypct:5"},
+                {"text": "24ч ±10%", "callback_data": "daypct:10"},
+            ],
+            [{"text": "◀️ Меню", "callback_data": "back"}],
+        ]
+        text = (
+            "⚙️ Настройки Pump/Dump\n\n"
+            f"Интервал движения: {s.interval_seconds} сек.\n"
+            f"Порог движения: {s.threshold_pct:.1f}%\n"
+            f"RSI-фильтр: {'включён' if s.rsi_enabled else 'выключен'}\n"
+            f"24ч-фильтр: {'±' + str(s.day_min_pct) + '%' if s.day_filter_enabled else 'выключен'}\n"
+            f"Тип: {s.signal_types}\n\n"
+            "Первые два фильтра всегда работают: интервал + порог."
+        )
+        await self._send(chat_id, text, inline=keyboard)
+
+    async def _health(self, chat_id):
+        s = self.scanner.settings
+        ready = self.scanner.history_ready
         await self._send(
             chat_id,
-            "🔎 Проверяю рынок Bybit...",
+            "❤️ Состояние сканера\n\n"
+            f"Universe Bybit: {len(self.scanner.ws_symbols)}\n"
+            f"Ticker cache: {len(self.scanner.ticker_cache)}\n"
+            f"History: {len(self.scanner.prices)}\n"
+            f"Готов к детектору: {'ДА 🟢' if ready else 'НЕТ 🟡'}\n"
+            f"Порог: {s.threshold_pct:.1f}% / {s.interval_seconds} сек.\n"
+            f"Тип сигналов: {s.signal_types}"
         )
