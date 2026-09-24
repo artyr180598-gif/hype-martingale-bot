@@ -193,7 +193,13 @@ class ConfluenceAnalyzer:
             warnings=warnings,
             data=evidence,
         )
-        log.info("Signal analysis done: %s direction=%s score=%d elapsed=%.2fs", symbol, direction, score, time.monotonic() - started)
+        log.info(
+            "Signal analysis done: %s direction=%s score=%d elapsed=%.2fs",
+            symbol,
+            direction,
+            score,
+            time.monotonic() - started,
+        )
         return signal
 
     @staticmethod
@@ -201,8 +207,12 @@ class ConfluenceAnalyzer:
         trs = []
         prev = None
         for c in candles:
-            h, l = float(c["high"]), float(c["low"])
-            tr = h - l if prev is None else max(h - l, abs(h - prev), abs(l - prev))
+            high, low = float(c["high"]), float(c["low"])
+            tr = (
+                high - low
+                if prev is None
+                else max(high - low, abs(high - prev), abs(low - prev))
+            )
             trs.append(tr)
             prev = float(c["close"])
         return mean(trs[-14:]) if trs else 0.0
@@ -223,7 +233,6 @@ class ConfluenceAnalyzer:
         if not symbols:
             log.warning("Signal scan has no symbols")
             return []
-        scan_started = time.monotonic()
         log.info("Signal scan started: symbols=%d limit=%d", len(symbols), limit)
 
         # The old implementation analyzed every symbol sequentially. With 50
@@ -258,14 +267,3 @@ class ConfluenceAnalyzer:
 
         found = [signal for signal in results if signal and signal.valid]
         found.sort(key=lambda x: x.score, reverse=True)
-        failed = sum(1 for signal in results if signal is None)
-        log.info(
-            "Signal scan finished: symbols=%d completed=%d valid=%d failed=%d pending=%d",
-            len(symbols),
-            len(results),
-            len(found),
-            failed,
-            len(pending),
-            time.monotonic() - scan_started,
-        )
-        return found[:limit]
