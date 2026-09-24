@@ -1,71 +1,67 @@
-# Hype Martingale Bot — Confluence Engine
+# Hype Signal Radar
 
-This branch contains the full strategy rebuild for the Hype/Martingale bot.
+This repository is now a **signal-only crypto market analysis bot**.
 
-## What was rebuilt
+It does not open trades, place orders, manage positions, use martingale, or manage a trading balance. Its job is to scan the market, find high-quality setups, and send the user an actionable entry zone with invalidation and targets.
 
-The engine combines independently implemented ideas from established open-source trading frameworks:
+## Research-inspired architecture
 
-- Freqtrade / NostalgiaForInfinity: multi-timeframe confirmation, liquid-volume universe and explicit signal/exit separation.
-- Hummingbot: executor-style separation of entry, controlled DCA/recovery and risk barriers.
-- SMC-style systems: confirmed market structure, BOS/CHOCH, fair-value-gap and order-block proxies.
-- Live execution sanity: order-book imbalance is used only as an extra live/dry-run gate.
+The logic was rebuilt after reviewing open-source projects and research around:
 
-The implementation is original code for this repository; it does not copy proprietary or closed-source strategy logic.
+- Jesse: multi-timeframe analysis, order-flow features, look-ahead-safe research and signal evaluation.
+- SMC projects: confirmed structure, BOS/CHoCH, liquidity sweeps, FVGs, order blocks and premium/discount concepts.
+- Order-book/CVD research: imbalance, flow, absorption and microstructure as confirmation rather than standalone signals.
+- Bybit market-data tooling: public kline, ticker, order-book, funding/open-interest market data.
+- Signal-scoring projects: multiple independent factors are fused into one transparent quality score.
 
-## Signal design
+Examples reviewed include:
+- https://github.com/jesse-ai/jesse
+- https://github.com/cheetah-trade/tradefloor-mcp
+- https://github.com/AkhileshSelvan/smc-mcp
+- https://github.com/aitradingbotspro/crypto-liquidity-ai-trading-bot
+- https://github.com/ymys/Bot-Auto-Screening-Bybit-trading
+- https://github.com/nssanta/Elite-Metrics-Trade-Bybit
+- https://github.com/JS195/orderflow-alpha
+- https://github.com/bybit-exchange/trading-mcp
 
-A trade is considered only when the 5m setup agrees with 15m and 1h regime filters. The score (0–100) is a ranking score, **not a probability**.
+The implementation in this repository is original. It does not claim that any source strategy is profitable, and it does not copy third-party strategy code.
 
-Inputs include:
+## Signal pipeline
 
-- EMA trend structure
-- RSI
-- ATR / volatility extension
-- rolling VWAP
-- volume participation
-- candle-flow proxy
-- confirmed swing structure
-- BOS / CHOCH
-- FVG proxy
-- order-block proxy
-- live order-book imbalance gate
+1. Select liquid USDT perpetuals by 24h turnover.
+2. Establish 1h market regime.
+3. Confirm direction on 15m.
+4. Search for a 5m trigger.
+5. Confirm market structure using fully formed swings.
+6. Detect BOS, liquidity sweeps, FVG and order-block proxies.
+7. Check volume participation and directional candle-flow.
+8. Check rolling VWAP location.
+9. Use live top-20 order-book imbalance as a secondary confirmation.
+10. Reject overextended/chasing entries.
+11. Calculate an entry zone, structural stop and three target levels.
+12. Require a minimum quality score before Telegram delivery.
+13. Suppress repeated identical setups for one hour.
 
-The engine deliberately rejects stretched entries and contradictory higher-timeframe regimes.
+## Telegram signal
 
-## Recovery / Martingale layer
+Each alert contains:
 
-This is controlled recovery, not blind loss doubling:
+- LONG or SHORT
+- quality score 0-100
+- current price
+- entry zone
+- stop / invalidation
+- TP1 / TP2 / TP3
+- risk/reward to TP2
+- exact reasons supporting the setup
+- warnings when a confirmation factor conflicts
 
-- Initial stake: 50 USDT
-- Recovery 1: 50 USDT
-- Recovery 2: 75 USDT
-- Maximum position stake: 175 USDT
-- Maximum 2 additional entries
-- Recovery is allowed only when the original directional thesis remains valid.
-- Leverage never increases because a position is losing.
+The score is a **ranking of confluence**, not a probability and not a promise of profit.
 
-## Risk
+## Honest limitations
 
-- Bybit USDT futures
-- Isolated margin
-- Maximum 3 open trades
-- Maximum strategy leverage: 3x
-- Dry Run enabled by default
-- Cooldown, stop-loss guard and maximum-drawdown protections enabled
+The bot is intentionally selective. It can return no signal when the market is mixed or when the setup does not meet the quality gate.
 
-## Validation
+The current implementation uses public Bybit REST market data. Historical CVD and liquidation feeds are not falsely invented from candle data. Where true order-flow data is unavailable, the engine uses clearly labeled proxies instead.
 
-Every strategy change is checked by GitHub Actions for:
-
-1. Docker image build
-2. Python syntax
-3. Freqtrade strategy discovery
-4. Freqtrade configuration validation
-
-Before live trading, the strategy must also pass historical backtesting, lookahead analysis, recursive analysis and a sufficiently long dry-run period. Freqtrade explicitly recommends these validation steps and warns that backtests cannot replace dry-run testing.
-
-## Honest status
-
-No profitability claim is made here. The repository can prove that the strategy loads and passes configuration validation; profitability must be established separately from measured backtest and dry-run results.
-
+No profitability claim is made without measured historical testing and forward observation.
