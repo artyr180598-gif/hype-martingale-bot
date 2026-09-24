@@ -480,6 +480,11 @@ class HyperDataHub:
                 except Exception:
                     logger.exception("Error stopping %s (continuing shutdown)", name)
 
+        try:
+            await self.market.close()
+        except Exception:
+            logger.exception("Error closing market-data HTTP session")
+
         # Stop API server
         if self._api_server:
             try:
