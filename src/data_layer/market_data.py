@@ -43,6 +43,12 @@ class MarketData:
 
     # ── Public API ────────────────────────────────────────────────
 
+    async def close(self) -> None:
+        """Close the shared HTTP session used by market-data requests."""
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
     async def refresh(self) -> None:
         """Fetch all market data from Hyperliquid and update the cache."""
         async with self._managed_session() as session:
@@ -225,8 +231,13 @@ class MarketData:
         if not self.assets or (time.monotonic() - self.last_update) > self._cache_ttl:
             await self.refresh()
 
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
     def _managed_session(self) -> _SessionCtx:
-        """Return a context manager that provides an aiohttp session."""
+        """Return a context manager backed by one reusable HTTP session."""
         return _SessionCtx(self)
 
     async def _post(self, session: aiohttp.ClientSession, payload: dict) -> dict | list | None:
@@ -250,15 +261,11 @@ class _SessionCtx:
         self._temp: aiohttp.ClientSession | None = None
 
     async def __aenter__(self) -> aiohttp.ClientSession:
-        if self._owner._session and not self._owner._session.closed:
-            return self._owner._session
-        self._temp = aiohttp.ClientSession()
-        return self._temp
+        return await self._owner._get_session()
 
     async def __aexit__(self, *exc: object) -> None:
-        if self._temp is not None:
-            await self._temp.close()
-            self._temp = None
+        # The MarketData owner closes the shared session during hub shutdown.
+        return None
 
 
 def _timeframe_to_ms(tf: str) -> int:
