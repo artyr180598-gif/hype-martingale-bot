@@ -8,6 +8,8 @@ from src.telegram_bot import TelegramBot
 
 load_dotenv()
 
+# Railway worker entrypoint; application logic unchanged.
+
 async def main():
     logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'), format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
     hub = HyperDataHub(demo=False)
