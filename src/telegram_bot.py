@@ -177,7 +177,9 @@ class TelegramBot:
             if keyboard:
                 payload['reply_markup'] = self.menu_keyboard
             try:
-                await self._api('sendMessage', payload, retries=1)
+                result = await self._api('sendMessage', payload, retries=1)
+                if result is None:
+                    return False
                 self._next_send_at = time.monotonic() + 1.2
                 return True
             except RuntimeError as exc:
