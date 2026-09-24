@@ -1,12 +1,8 @@
-name: validate-hype-signal-radar
-
+name: validate-hype-mega-radar
 on:
   push:
-    branches:
-      - "main"
-      - "rebuild/**"
+    branches: ["main","rebuild/**"]
   pull_request:
-
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -15,9 +11,9 @@ jobs:
       - name: Build image
         run: docker build -t hype-validate .
       - name: Python syntax
-        run: docker run --rm --entrypoint python hype-validate -m py_compile /app/signal_engine.py /app/telegram_ui.py
+        run: docker run --rm --entrypoint python hype-validate -m py_compile /app/signal_engine.py /app/mega_ui.py
       - name: Import engine
         run: docker run --rm --entrypoint python hype-validate -c "import signal_engine; print('signal_engine import OK')"
-      - name: Check signal-only runtime
+      - name: Signal-only guard
         run: |
-          ! grep -R "freqtrade trade\|create_order\|adjust_trade_position" -n signal_engine.py telegram_ui.py
+          ! grep -R "create_order\|adjust_trade_position\|freqtrade trade\|place_order" -n signal_engine.py mega_ui.py
