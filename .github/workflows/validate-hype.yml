@@ -14,7 +14,7 @@ jobs:
       - name: Build image
         run: docker build -t hype-validate .
       - name: Python syntax
-        run: docker run --rm --entrypoint python3 hype-validate -B -m py_compile /freqtrade/user_data/strategies/HypeConfluenceStrategy.py
+        run: docker run --rm --entrypoint sh hype-validate -c 'cp /freqtrade/user_data/strategies/HypeConfluenceStrategy.py /tmp/HypeConfluenceStrategy.py && python3 -m py_compile /tmp/HypeConfluenceStrategy.py'
       - name: Strategy discovery
         run: docker run --rm --entrypoint freqtrade hype-validate list-strategies -c /freqtrade/user_data/config.json
       - name: Config validation
