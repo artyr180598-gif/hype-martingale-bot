@@ -1,8 +1,12 @@
 """Signal-only multi-factor market analysis built on HyperDataHub."""
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from statistics import mean
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -190,15 +194,38 @@ class ConfluenceAnalyzer:
             prev = float(c["close"])
         return mean(trs[-14:]) if trs else 0.0
 
-    async def scan(self, symbols: list[str] | None = None, limit: int = 5) -> list[AnalysisSignal]:
-        symbols = symbols or self.hub.symbols
-        found = []
-        for symbol in symbols:
+    async def _analyze_one(self, symbol: str, sem: asyncio.Semaphore):
+        async with sem:
             try:
-                signal = await self.analyze(symbol)
-                if signal and signal.valid:
-                    found.append(signal)
+                return await asyncio.wait_for(self.analyze(symbol), timeout=20)
+            except asyncio.TimeoutError:
+                log.warning("Signal scan timeout for %s", symbol)
+                return None
             except Exception:
-                continue
+                log.exception("Signal scan failed for %s", symbol)
+                return None
+
+    async def scan(self, symbols: list[str] | None = None, limit: int = 5) -> list[AnalysisSignal]:
+        symbols = list(symbols or self.hub.symbols)
+        if not symbols:
+            log.warning("Signal scan has no symbols")
+            return []
+
+        # The old implementation analyzed every symbol sequentially. With 50
+        # symbols and several HTTP requests per symbol, one slow exchange call
+        # could make Telegram look frozen for minutes. Keep the same universe
+        # and scoring, but analyze symbols concurrently with bounded pressure.
+        concurrency = min(8, len(symbols))
+        sem = asyncio.Semaphore(concurrency)
+        tasks = [asyncio.create_task(self._analyze_one(symbol, sem)) for symbol in symbols]
+        results = await asyncio.gather(*tasks)
+
+        found = [signal for signal in results if signal and signal.valid]
         found.sort(key=lambda x: x.score, reverse=True)
+        log.info(
+            "Signal scan finished: symbols=%d valid=%d errors/timeouts=%d",
+            len(symbols),
+            len(found),
+            len(symbols) - len(results),
+        )
         return found[:limit]
