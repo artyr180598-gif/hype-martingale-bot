@@ -4,6 +4,7 @@ import logging
 import os
 import time
 import aiohttp
+from aiohttp import web
 
 from src.strategies.pump_scanner import PumpScanner
 
@@ -20,6 +21,7 @@ class TelegramBot:
         self.session = None
         self.task = None
         self.monitor_task = None
+        self.web_runner = None
         self.send_lock = asyncio.Lock()
         self.telegram_cooldown_until = 0.0
         self.last_telegram_cooldown_log = 0.0
@@ -80,8 +82,16 @@ class TelegramBot:
         await self.scanner.start()
         self.running = True
 
-        # Telegram startup calls are retried and logged with the real API error.
+        # Use Telegram webhook instead of getUpdates polling. The previous logs showed
+        # HTTP 409 from another getUpdates consumer, so polling is unsafe here.
+        domain = (os.getenv('RAILWAY_PUBLIC_DOMAIN') or 'worker-production-29abc.up.railway.app').strip()
+        app = web.Application()
+        app.router.add_post('/telegram/webhook', self._webhook)
+        self.web_runner = web.AppRunner(app)
+        await self.web_runner.setup()
+        await web.TCPSite(self.web_runner, '0.0.0.0', int(os.getenv('PORT', '8080'))).start()
         await self._api('deleteWebhook', {'drop_pending_updates': False})
+        await self._api('setWebhook', {'url': 'https://' + domain + '/telegram/webhook', 'drop_pending_updates': False})
         await self._api('setMyCommands', {'commands': [
             {'command': 'start', 'description': 'Открыть меню'},
             {'command': 'scan', 'description': 'Проверить Pump/Dump'},
@@ -89,7 +99,7 @@ class TelegramBot:
             {'command': 'health', 'description': 'Проверить данные'},
         ]})
         # Do not send a startup message: restarting the worker must never create a Telegram flood.
-        self.task = asyncio.create_task(self._poll(), name='telegram-poll')
+        self.task = None
         self.monitor_task = asyncio.create_task(self._monitor_loop(), name='pump-monitor')
 
     async def stop(self):
@@ -102,6 +112,13 @@ class TelegramBot:
                 except asyncio.CancelledError:
                     pass
         await self.scanner.stop()
+        if self.web_runner:
+            try:
+                await self._api('deleteWebhook', {'drop_pending_updates': False})
+            except Exception:
+                pass
+            await self.web_runner.cleanup()
+            self.web_runner = None
         if self.session and not self.session.closed:
             await self.session.close()
 
@@ -125,18 +142,14 @@ class TelegramBot:
                 log.exception('Pump monitor cycle failed')
             await asyncio.sleep(5)
 
-    async def _poll(self):
-        while self.running:
-            try:
-                updates = await self._api('getUpdates', {'offset': self.offset, 'timeout': 25, 'allowed_updates': ['message']})
-                for update in updates or []:
-                    self.offset = int(update['update_id']) + 1
-                    await self._handle(update)
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                log.warning('Telegram poll failed: %s', exc)
-                await asyncio.sleep(5)
+    async def _webhook(self, request):
+        try:
+            update = await request.json()
+            await self._handle(update)
+            return web.Response(text='ok')
+        except Exception:
+            log.exception('Telegram webhook update failed')
+            return web.Response(text='error', status=500)
 
     def _allowed(self, update):
         message = update.get('message') or {}
