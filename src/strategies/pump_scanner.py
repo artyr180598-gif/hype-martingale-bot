@@ -115,10 +115,7 @@ class PumpScanner:
         await self._load_listings()
         self.running = True
         self._history_seed_task = asyncio.create_task(self._seed_history(), name="pump-history-seed")
-        # REST is retained as a recovery path; WebSocket is the primary ticker feed.
-        self.ws_tasks = [asyncio.create_task(self._ticker_ws_chunk(chunk), name=f"bybit-ticker-{i}")
-                         for i, chunk in enumerate(self._chunks(self.ws_symbols, 100))] if self.ws_symbols else []
-        await self._refresh_universe()
+        # WebSocket is the primary ticker feed; REST remains a recovery path.
         self.ws_tasks = [asyncio.create_task(self._ticker_ws_chunk(chunk), name=f"bybit-ticker-{i}")
                          for i, chunk in enumerate(self._chunks(self.ws_symbols, 100))]
         log.info("Pump scanner started for %d Bybit linear USDT symbols", len(self.ws_symbols))
