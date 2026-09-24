@@ -17,6 +17,7 @@ class TelegramBot:
         self.running = False
         self.session = None
         self.task = None
+        self.menu_keyboard = {'keyboard': [[{'text': '🔎 Сканировать'}, {'text': '₿ BTC'}], [{'text': '🌊 Order Flow'}, {'text': '❤️ Health'}], [{'text': '📋 Меню'}]], 'resize_keyboard': True, 'is_persistent': True}
 
     async def _api(self, method, payload=None):
         url = 'https://api.telegram.org/bot{}/{}'.format(self.token, method)
@@ -63,8 +64,11 @@ class TelegramBot:
         chat = message.get('chat') or {}
         return str(chat.get('id', '')) == str(self.chat_id)
 
-    async def _send(self, chat_id, text):
-        await self._api('sendMessage', {'chat_id': chat_id, 'text': text})
+    async def _send(self, chat_id, text, keyboard=False):
+        payload = {'chat_id': chat_id, 'text': text}
+        if keyboard:
+            payload['reply_markup'] = self.menu_keyboard
+        await self._api('sendMessage', payload)
 
     async def _handle(self, update):
         if not self._allowed(update):
@@ -72,18 +76,22 @@ class TelegramBot:
         message = update['message']
         chat_id = message['chat']['id']
         command = (message.get('text') or '').strip()
-        if command.startswith('/start') or command == 'menu':
-            await self._send(chat_id, 'HyperData Signal Terminal\\n\\nscan - live signal scan\\nbtc - BTC market\\nflow - BTC order flow\\nhealth - data health')
-        elif command == 'scan':
+        aliases = {'🔎 Сканировать': 'scan', '₿ BTC': 'btc', '🌊 Order Flow': 'flow', '❤️ Health': 'health', '📋 Меню': 'menu'}
+        command = aliases.get(command, command).lower()
+        if command.startswith('/start') or command in {'menu', '/menu'}:
+            await self._send(chat_id, 'HyperData Signal Terminal\\n\\nВыбери действие ниже. Данные берутся из live-источников.', keyboard=True)
+        elif command in {'scan', '/scan'}:
             await self._scan(chat_id)
-        elif command == 'btc':
+        elif command in {'btc', '/btc'}:
             await self._btc(chat_id)
-        elif command == 'flow':
+        elif command in {'flow', '/flow'}:
             await self._flow(chat_id)
-        elif command == 'health':
+        elif command in {'health', '/health'}:
             await self._health(chat_id)
+        elif command in {'help', '/help'}:
+            await self._send(chat_id, 'Доступно: Сканировать, BTC, Order Flow, Health.', keyboard=True)
         else:
-            await self._send(chat_id, 'Use: scan, btc, flow, health')
+            await self._send(chat_id, 'Команда не распознана. Нажми «📋 Меню».', keyboard=True)
 
     async def _scan(self, chat_id):
         await self._send(chat_id, 'Scanning live HyperData feeds...')
