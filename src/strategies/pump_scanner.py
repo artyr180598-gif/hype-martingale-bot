@@ -3,10 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from collections import deque
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import aiohttp
@@ -116,8 +115,12 @@ class PumpScanner:
         self.running = True
         self._history_seed_task = asyncio.create_task(self._seed_history(), name="pump-history-seed")
         # WebSocket is the primary ticker feed; REST remains a recovery path.
-        self.ws_tasks = [asyncio.create_task(self._ticker_ws_chunk(chunk), name=f"bybit-ticker-{i}")
-                         for i, chunk in enumerate(self._chunks(self.ws_symbols, 100))]
+        self.ws_tasks = [
+            asyncio.create_task(
+                self._ticker_ws_chunk(chunk), name=f"bybit-ticker-{i}"
+            )
+            for i, chunk in enumerate(self._chunks(self.ws_symbols, 100))
+        ]
         log.info("Pump scanner started for %d Bybit linear USDT symbols", len(self.ws_symbols))
 
     async def stop(self) -> None:
@@ -177,8 +180,7 @@ class PumpScanner:
         for x in data.get("result", {}).get("list", []):
             if x.get("symbol", "").endswith("USDT") and float(x.get("lastPrice") or 0) > 0:
                 self.ticker_cache[x["symbol"]] = x
-                rows.append(x)
-        return rows
+                rows.append(x)        return rows
 
     async def _ticker_ws_chunk(self, symbols: list[str]) -> None:
         if not symbols:
@@ -327,11 +329,16 @@ class PumpScanner:
             output.append(result)
         return output
 
-    async def _enrich(self, ticker: dict, direction: str, change: float, start: float, day_pct: float) -> PumpSignal | None:
+    async def _enrich(
+        self, ticker: dict, direction: str, change: float, start: float, day_pct: float
+    ) -> PumpSignal | None:
         symbol = ticker["symbol"]
         rsi = {}
         if self.settings.rsi_enabled:
-            values = await asyncio.gather(*(self._rsi(symbol, tf) for tf in self.settings.rsi_timeframes), return_exceptions=True)
+            values = await asyncio.gather(
+                *(self._rsi(symbol, tf) for tf in self.settings.rsi_timeframes),
+                return_exceptions=True,
+            )
             for tf, value in zip(self.settings.rsi_timeframes, values):
                 if isinstance(value, (int, float)):
                     rsi[tf] = float(value)
@@ -357,8 +364,7 @@ class PumpScanner:
 
         return PumpSignal(
             symbol=symbol,
-            direction=direction,
-            change_pct=change,
+            direction=direction,            change_pct=change,
             start_price=start,
             current_price=float(ticker["lastPrice"]),
             day_pct=day_pct,
@@ -386,7 +392,10 @@ class PumpScanner:
         score += min(3, int(abs(change) / max(self.settings.threshold_pct, 0.1)))
         if volume_spike is not None and volume_spike >= 2:
             score += 2
-        if imbalance is not None and ((direction == "PUMP" and imbalance >= 52) or (direction == "DUMP" and imbalance <= 48)):
+        if imbalance is not None and (
+            (direction == "PUMP" and imbalance >= 52)
+            or (direction == "DUMP" and imbalance <= 48)
+        ):
             score += 1
         if rsi:
             score += 1
@@ -398,7 +407,10 @@ class PumpScanner:
 
     async def _trade_guidance(self, symbol: str, direction: str, price: float, imbalance: float | None):
         try:
-            data = await self._get(BYBIT_KLINE_URL.format(symbol=symbol, interval=self.settings.confirmation_timeframe) + "&limit=30")
+            url = BYBIT_KLINE_URL.format(
+                symbol=symbol, interval=self.settings.confirmation_timeframe
+            ) + "&limit=30"
+            data = await self._get(url)
             rows = list(reversed(data.get("result", {}).get("list", [])))
             closes = [float(r[4]) for r in rows if float(r[4]) > 0]
             n = self.settings.confirmation_candles
@@ -493,9 +505,11 @@ class PumpScanner:
         name = s.symbol.removesuffix("USDT")
         lines = [
             f"{icon} {name} Bybit #{name.lower()}",
-            f"{'Pump' if s.direction == 'PUMP' else 'Dump'}: {s.change_pct:+.2f}% ({s.start_price:.8g} → {s.current_price:.8g})",
+            f"{'Pump' if s.direction == 'PUMP' else 'Dump'}: "
+            f"{s.change_pct:+.2f}% ({s.start_price:.8g} → {s.current_price:.8g})",
             "",
-            f"🧭 Сценарий: {'ЛОНГ 🟢' if s.trade_action == 'LONG' else 'ШОРТ 🔴' if s.trade_action == 'SHORT' else 'ЖДАТЬ ⏸️'}",
+            "🧭 Сценарий: "
+            f"{'ЛОНГ 🟢' if s.trade_action == 'LONG' else 'ШОРТ 🔴' if s.trade_action == 'SHORT' else 'ЖДАТЬ ⏸️'}",
             f"🧠 Для новичка: {self._beginner_explanation(s)}",
         ]
         if s.trade_action in {"LONG", "SHORT"}:
@@ -533,16 +547,29 @@ class PumpScanner:
         lines.append(f"📈 Изменение за 24ч: {s.day_pct:+.2f}%")
         lines.append(f"📡 Сила события: {s.score}/10")
         lines.append("")
-        lines.append("ℹ️ Сигнал означает сильное движение цены. ЛОНГ/ШОРТ здесь — отдельная проверка продолжения движения; Pump сам по себе не равен автоматическому ЛОНГУ.")
+        lines.append(
+            "ℹ️ Сигнал означает сильное движение цены. ЛОНГ/ШОРТ здесь — "
+            "отдельная проверка продолжения движения; Pump сам по себе не "
+            "равен автоматическому ЛОНГУ."
+        )
         return "\n".join(lines)
 
     @staticmethod
     def _beginner_explanation(s: PumpSignal) -> str:
         if s.trade_action == "LONG":
-            return "цена резко выросла и последние подтверждающие свечи всё ещё направлены вверх; ищем вход только в указанной зоне."
+            return (
+                "цена резко выросла и последние подтверждающие свечи всё ещё "
+                "направлены вверх; ищем вход только в указанной зоне."
+            )
         if s.trade_action == "SHORT":
-            return "цена резко упала и последние подтверждающие свечи всё ещё направлены вниз; ищем вход только в указанной зоне."
-        return "монета резко двинулась, но продолжение движения не подтверждено; сейчас входить по одному Pump/Dump рискованно."
+            return (
+                "цена резко упала и последние подтверждающие свечи всё ещё "
+                "направлены вниз; ищем вход только в указанной зоне."
+            )
+        return (
+            "монета резко двинулась, но продолжение движения не подтверждено; "
+            "сейчас входить по одному Pump/Dump рискованно."
+        )
 
     @staticmethod
     def _fmt_volume(value: float) -> str:
