@@ -1,4 +1,4 @@
-name: validate-hype
+name: validate-hype-signal-radar
 
 on:
   push:
@@ -15,10 +15,9 @@ jobs:
       - name: Build image
         run: docker build -t hype-validate .
       - name: Python syntax
-        run: docker run --rm --entrypoint sh hype-validate -c 'cp /freqtrade/user_data/strategies/HypeConfluenceStrategy.py /tmp/HypeConfluenceStrategy.py && python3 -m py_compile /tmp/HypeConfluenceStrategy.py'
-      - name: Strategy discovery
-        run: docker run --rm --entrypoint freqtrade hype-validate list-strategies -c /freqtrade/user_data/config.json
-      - name: Config validation
-        run: docker run --rm --entrypoint freqtrade hype-validate show-config -c /freqtrade/user_data/config.json --strategy HypeConfluenceStrategy >/tmp/hype-config.txt
-      - name: Print config summary
-        run: tail -n 40 /tmp/hype-config.txt
+        run: docker run --rm --entrypoint python hype-validate -m py_compile /app/signal_engine.py /app/telegram_ui.py
+      - name: Import engine
+        run: docker run --rm --entrypoint python hype-validate -c "import signal_engine; print('signal_engine import OK')"
+      - name: Check signal-only runtime
+        run: |
+          ! grep -R "freqtrade trade\|create_order\|adjust_trade_position" -n signal_engine.py telegram_ui.py
