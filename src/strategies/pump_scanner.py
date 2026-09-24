@@ -180,7 +180,8 @@ class PumpScanner:
         for x in data.get("result", {}).get("list", []):
             if x.get("symbol", "").endswith("USDT") and float(x.get("lastPrice") or 0) > 0:
                 self.ticker_cache[x["symbol"]] = x
-                rows.append(x)        return rows
+                rows.append(x)
+        return rows
 
     async def _ticker_ws_chunk(self, symbols: list[str]) -> None:
         if not symbols:
@@ -415,22 +416,34 @@ class PumpScanner:
             closes = [float(r[4]) for r in rows if float(r[4]) > 0]
             n = self.settings.confirmation_candles
             if len(closes) < n + 5:
-                return "WAIT", "Недостаточно данных для подтверждения. Не угадываем вход.", None, None, None, None, None
+                return (
+                "WAIT",
+                "Недостаточно данных для подтверждения. Не угадываем вход.",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
 
             recent = closes[-n:]
             move = (recent[-1] / recent[0] - 1) * 100
             if direction == "PUMP":
                 aligned = move > 0 and (imbalance is None or imbalance >= 50)
                 action = "LONG" if aligned else "WAIT"
-                reason = ("Цена продолжает двигаться вверх, поэтому сценарий LONG подтверждён."
-                          if aligned else
-                          "Цена уже резко выросла, но продолжение вверх пока не подтверждено. Лучше ждать.")
+                reason = (
+                "Цена продолжает двигаться вверх, поэтому сценарий LONG подтверждён."
+                if aligned
+                else "Цена уже резко выросла, но продолжение вверх пока не подтверждено. Лучше ждать."
+            )
             else:
                 aligned = move < 0 and (imbalance is None or imbalance <= 50)
                 action = "SHORT" if aligned else "WAIT"
-                reason = ("Цена продолжает двигаться вниз, поэтому сценарий SHORT подтверждён."
-                          if aligned else
-                          "Цена уже резко упала, но продолжение вниз пока не подтверждено. Лучше ждать.")
+                reason = (
+                "Цена продолжает двигаться вниз, поэтому сценарий SHORT подтверждён."
+                if aligned
+                else "Цена уже резко упала, но продолжение вниз пока не подтверждено. Лучше ждать."
+            )
 
             swing_low, swing_high = min(closes[-8:]), max(closes[-8:])
             if action == "LONG":
@@ -448,7 +461,16 @@ class PumpScanner:
             return action, reason, entry_low, entry_high, stop, tp1, tp2
         except Exception:
             log.warning("Trade guidance failed for %s", symbol, exc_info=True)
-            return "WAIT", "Не удалось получить подтверждение. Сигнал показываем, но вход не рекомендуем.", None, None, None, None, None
+            return (
+                "WAIT",
+                "Не удалось получить подтверждение. Сигнал показываем, "
+                "но вход не рекомендуем.",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
 
     async def _imbalance(self, symbol: str) -> float | None:
         try:
