@@ -243,8 +243,15 @@ class PumpScanner:
                         pass
 
             await asyncio.gather(*(seed(s) for s in symbols))
-            self.history_ready = bool(self.prices) and len(self.prices) >= max(1, int(len(symbols) * 0.5))
-            log.info("Seeded price history for %d/%d symbols; ready=%s", len(self.prices), len(symbols), self.history_ready)
+            self.history_ready = bool(self.prices) and len(self.prices) >= max(
+                1, int(len(symbols) * 0.5)
+            )
+            log.info(
+                "Seeded price history for %d/%d symbols; ready=%s",
+                len(self.prices),
+                len(symbols),
+                self.history_ready,
+            )
         except asyncio.CancelledError:
             return
         except Exception:
@@ -265,7 +272,12 @@ class PumpScanner:
             now = time.time()
             if now - self.last_diagnostic >= self.diagnostic_interval:
                 self.last_diagnostic = now
-                log.info("Scanner not ready: universe=%d tickers=%d history=%d", len(self.ws_symbols), len(self.ticker_cache), len(self.prices))
+                log.info(
+                    "Scanner not ready: universe=%d tickers=%d history=%d",
+                    len(self.ws_symbols),
+                    len(self.ticker_cache),
+                    len(self.prices),
+                )
             return []
 
         # WebSocket is primary. REST refresh is a safety net if a symbol has
@@ -326,7 +338,14 @@ class PumpScanner:
         if not candidates:
             if now - self.last_diagnostic >= self.diagnostic_interval:
                 self.last_diagnostic = now
-                log.info("Scanner cycle: universe=%d tickers=%d history=%d candidates=0 threshold=%.2f%%", len(self.ws_symbols), len(self.ticker_cache), len(self.prices), self.settings.threshold_pct)
+                log.info(
+                    "Scanner cycle: universe=%d tickers=%d history=%d "
+                    "candidates=0 threshold=%.2f%%",
+                    len(self.ws_symbols),
+                    len(self.ticker_cache),
+                    len(self.prices),
+                    self.settings.threshold_pct,
+                )
             return []
 
         log.info("Scanner candidates: %d (universe=%d tickers=%d)", len(candidates), len(self.ws_symbols), len(self.ticker_cache))
