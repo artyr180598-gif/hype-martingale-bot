@@ -1,0 +1,45 @@
+[project]
+name = "hyperdata-terminal"
+version = "1.0.0"
+description = "Open-source crypto market data terminal with real-time dashboards and REST API"
+requires-python = ">=3.12"
+
+# These ranges MUST contain every pin in requirements.lock —
+# tests/test_dependency_lock.py enforces it, and CI installs `pip install -e .`
+# with dependencies (no --no-deps) so pip would refuse a contradiction.
+# The lower bounds of rich and pandas are the lock pins: rich 14.3.3 and
+# pandas 3.0.1 are the only versions ever tested (H1 had widened the ranges
+# down to 13.7 / 2.2, which nothing exercises — S6).
+dependencies = [
+    "aiohttp>=3.9.0,<4.0",
+    "rich>=14.3.3,<15",
+    "pyfiglet>=1.0.2,<2.0",
+    "pandas>=3.0.1,<4",
+    "numpy>=1.26.0,<3.0",
+    "python-dotenv>=1.0.0,<2.0",
+]
+
+[project.scripts]
+hyperdata = "src.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["src*", "config*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Presentation layer: ASCII-art boot screens and Rich table markup read
+# better unwrapped; everything else must respect the line limit.
+"src/dashboards/*" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
