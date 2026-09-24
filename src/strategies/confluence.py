@@ -233,7 +233,6 @@ class ConfluenceAnalyzer:
         if not symbols:
             log.warning("Signal scan has no symbols")
             return []
-        scan_started = time.monotonic()
         log.info("Signal scan started: symbols=%d limit=%d", len(symbols), limit)
 
         # The old implementation analyzed every symbol sequentially. With 50
