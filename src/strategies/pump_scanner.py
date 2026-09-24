@@ -102,14 +102,27 @@ class PumpScanner:
     async def start(self) -> None:
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12))
         await self._load_listings()
-        await self._seed_history()
+        # Do not block Telegram startup on historical seeding. The live monitor
+        # must start immediately; history is filled in the background.
+        self.running = True
+        asyncio.create_task(self._seed_history(), name="pump-history-seed")
 
     async def _seed_history(self) -> None:
         """Seed the rolling window from Bybit 1m candles so a fresh restart can detect moves immediately."""
         try:
             tickers = await self.fetch_tickers()
-            symbols = [t["symbol"] for t in tickers]
-            sem = asyncio.Semaphore(8)
+            # Seed the most liquid symbols first, then continue through the
+            # complete Bybit USDT universe. This gets useful coverage quickly
+            # without turning startup into a long blocking operation.
+            symbols = [
+                t["symbol"]
+                for t in sorted(
+                    tickers,
+                    key=lambda x: float(x.get("turnover24h") or 0),
+                    reverse=True,
+                )
+            ]
+            sem = asyncio.Semaphore(12)
             async def seed(symbol: str) -> None:
                 async with sem:
                     try:
@@ -126,7 +139,11 @@ class PumpScanner:
                     except Exception:
                         pass
             await asyncio.gather(*(seed(s) for s in symbols))
-            log.info("Pump scanner seeded price history for %d Bybit symbols", len(self.prices))
+            log.info(
+                "Pump scanner seeded price history for %d/%d Bybit symbols",
+                len(self.prices),
+                len(symbols),
+            )
         except Exception:
             log.exception("Could not seed pump scanner history")
 
@@ -171,6 +188,8 @@ class PumpScanner:
         return q
 
     async def update(self) -> list[PumpSignal]:
+        if not self.running:
+            return []
         now = time.time()
         tickers = await self.fetch_tickers()
         candidates: list[tuple[dict, str, float, float, float]] = []
