@@ -104,7 +104,11 @@ class TelegramBot:
 
     async def _scan(self, chat_id):
         await self._send(chat_id, 'Scanning live HyperData feeds...')
-        signals = await self.analyzer.scan(limit=5)
+        try:
+            signals = await asyncio.wait_for(self.analyzer.scan(limit=5), timeout=90)
+        except asyncio.TimeoutError:
+            await self._send(chat_id, 'Сканирование не завершилось за 90 секунд. Я не выдаю выдуманный сигнал. Проверь логи Railway: причина будет указана по конкретному символу.')
+            return
         if not signals:
             await self._send(chat_id, 'No signal passed the configured filter. Weak or incomplete data is not converted into a signal.')
             return
