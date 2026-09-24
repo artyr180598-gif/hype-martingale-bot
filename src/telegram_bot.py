@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 
 class TelegramBot:
-    """Russian Telegram UI for the Bybit Pump/Dump scanner."""
+    """Telegram UI for the Bybit Pump/Dump scanner."""
 
     def __init__(self, hub=None):
         self.token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN", "")
@@ -35,8 +35,11 @@ class TelegramBot:
         if not self.session:
             raise RuntimeError("Telegram session is not started")
         url = f"https://api.telegram.org/bot{self.token}/{method}"
-        async with self.session.post(url, json=payload or {},
-                                     timeout=aiohttp.ClientTimeout(total=35)) as response:
+        async with self.session.post(
+            url,
+            json=payload or {},
+            timeout=aiohttp.ClientTimeout(total=35),
+        ) as response:
             data = await response.json()
             if not data.get("ok"):
                 raise RuntimeError(f"Telegram API: {data.get('description', 'unknown error')}")
@@ -49,19 +52,23 @@ class TelegramBot:
         await self.scanner.start()
         self.running = True
         await self._api("deleteWebhook", {"drop_pending_updates": False})
-        await self._api("setMyCommands", {"commands": [
-            {"command": "start", "description": "Открыть меню"},
-            {"command": "scan", "description": "Сканировать Bybit сейчас"},
-            {"command": "settings", "description": "Показать настройки"},
-            {"command": "health", "description": "Проверить соединение и рынок"},
-        ]})
+        await self._api(
+            "setMyCommands",
+            {
+                "commands": [
+                    {"command": "start", "description": "Открыть меню"},
+                    {"command": "scan", "description": "Сканировать Bybit сейчас"},
+                    {"command": "settings", "description": "Настройки"},
+                    {"command": "health", "description": "Состояние сканера"},
+                ]
+            },
+        )
         await self._send(
             self.chat_id,
             "🚀 Bybit Pump/Dump Scanner\n\n"
-            "Автоматический мониторинг запущен.\n"
-            "Бот сам ищет сильные движения по всему доступному USDT-фьючерсному рынку Bybit.\n\n"
-            "Важно: Pump/Dump — это обнаружение движения, а ЛОНГ/ШОРТ — отдельное подтверждение. "
-            "Если подтверждения нет, бот прямо пишет «ЖДАТЬ».",
+            "Мониторинг запущен. Бот сам ищет сильные движения по USDT-фьючерсам Bybit.\n\n"
+            "Важно: Pump/Dump — обнаружение движения. ЛОНГ/ШОРТ появляется только после отдельной проверки продолжения движения. "
+            "Если подтверждения нет, бот пишет «ЖДАТЬ».",
             keyboard=True,
         )
         self.task = asyncio.create_task(self._poll(), name="telegram-poll")
@@ -95,38 +102,35 @@ class TelegramBot:
     async def _poll(self):
         while self.running:
             try:
-                updates = await self._api("getUpdates", {
-                    "offset": self.offset,
-                    "timeout": 25,
-                    "allowed_updates": ["message"],
-                })
+                updates = await self._api(
+                    "getUpdates",
+                    {
+                        "offset": self.offset,
+                        "timeout": 25,
+                        "allowed_updates": ["message", "callback_query"],
+                    },
+                )
                 for update in updates or []:
                     self.offset = int(update["update_id"]) + 1
-                    await self._handle(update)
+                    if update.get("callback_query"):
+                        await self._handle_callback(update["callback_query"])
+                    elif update.get("message"):
+                        await self._handle_message(update["message"])
             except asyncio.CancelledError:
                 return
             except Exception:
                 log.warning("Telegram poll failed", exc_info=True)
                 await asyncio.sleep(3)
 
-    def _allowed(self, update):
-        message = update.get("message") or {}
-        chat = message.get("chat") or {}
-        return str(chat.get("id", "")) == str(self.chat_id)
+    def _allowed_chat(self, chat_id):
+        return str(chat_id) == str(self.chat_id)
 
-    async def _send(self, chat_id, text, keyboard=False):
-        payload = {"chat_id": chat_id, "text": text}
-        if keyboard:
-            payload["reply_markup"] = self.menu_keyboard
-        await self._api("sendMessage", payload)
-
-    async def _handle(self, update):
-        if not self._allowed(update):
-            return
-        message = update["message"]
+    async def _handle_message(self, message):
         chat_id = message["chat"]["id"]
-        command = (message.get("text") or "").strip()
+        if not self._allowed_chat(chat_id):
+            return
 
+        text = (message.get("text") or "").strip()
         aliases = {
             "🔎 Сканировать сейчас": "scan",
             "⚙️ Настройки": "settings",
@@ -135,25 +139,74 @@ class TelegramBot:
             "🟢🔴 Pump + Dump": "both",
             "❤️ Проверка": "health",
         }
-        command = aliases.get(command, command).lower()
+        command = aliases.get(text, text).lower()
 
         if command.startswith("/start") or command in {"menu", "/menu"}:
             await self._send(chat_id, "🚀 Меню сканера Bybit", keyboard=True)
-        elif command in {"scan", "/scan", "pump", "dump", "both"}:
-            if command == "pump":
-                self.scanner.settings.signal_types = "PUMP"
-            elif command == "dump":
-                self.scanner.settings.signal_types = "DUMP"
-            elif command == "both":
-                self.scanner.settings.signal_types = "BOTH"
-            self.scanner.settings.save()
+        elif command in {"scan", "/scan"}:
             await self._manual_scan(chat_id)
         elif command in {"settings", "/settings"}:
             await self._settings(chat_id)
+        elif command in {"pump", "dump", "both"}:
+            self.scanner.settings.signal_types = {
+                "pump": "PUMP",
+                "dump": "DUMP",
+                "both": "BOTH",
+            }[command]
+            self.scanner.settings.save()
+            await self._send(chat_id, f"Тип сигналов: {self.scanner.settings.signal_types}", keyboard=True)
         elif command in {"health", "/health"}:
             await self._health(chat_id)
         else:
             await self._send(chat_id, "Используй кнопки меню.", keyboard=True)
+
+    async def _handle_callback(self, query):
+        callback_id = query.get("id")
+        data = query.get("data", "")
+        message = query.get("message") or {}
+        chat_id = (message.get("chat") or {}).get("id")
+        if callback_id:
+            try:
+                await self._api("answerCallbackQuery", {"callback_query_id": callback_id})
+            except Exception:
+                pass
+        if not self._allowed_chat(chat_id):
+            return
+
+        if data == "settings":
+            await self._settings(chat_id)
+        elif data.startswith("interval:"):
+            self.scanner.settings.interval_seconds = int(data.split(":", 1)[1])
+            self.scanner.settings.save()
+            await self._settings(chat_id)
+        elif data.startswith("threshold:"):
+            self.scanner.settings.threshold_pct = float(data.split(":", 1)[1])
+            self.scanner.settings.save()
+            await self._settings(chat_id)
+        elif data.startswith("signals:"):
+            self.scanner.settings.signal_types = data.split(":", 1)[1]
+            self.scanner.settings.save()
+            await self._settings(chat_id)
+        elif data.startswith("rsi:"):
+            value = data.split(":", 1)[1]
+            self.scanner.settings.rsi_enabled = value == "on"
+            self.scanner.settings.save()
+            await self._settings(chat_id)
+        elif data.startswith("day:"):
+            value = data.split(":", 1)[1]
+            self.scanner.settings.day_filter_enabled = value == "on"
+            self.scanner.settings.save()
+            await self._settings(chat_id)
+        elif data == "back":
+            await self._send(chat_id, "🚀 Меню сканера Bybit", keyboard=True)
+
+    async def _send(self, chat_id, text, keyboard=False, inline=None):
+        payload = {"chat_id": chat_id, "text": text}
+        if keyboard:
+            payload["reply_markup"] = self.menu_keyboard
+        if inline:
+            payload["reply_markup"] = {"inline_keyboard": inline}
+        await self._api("sendMessage", payload)
 
     async def _manual_scan(self, chat_id):
         await self._send(chat_id, "🔎 Проверяю рынок Bybit...")
@@ -172,36 +225,60 @@ class TelegramBot:
         s = self.scanner.settings
         tfs = ", ".join(s.rsi_timeframes)
         text = (
-            "⚙️ Настройки\n\n"
-            "1. Интервал мониторинга: "
+            "⚙️ НАСТРОЙКИ\n\n"
+            "1️⃣ Интервал мониторинга: "
             f"{self._interval_label(s.interval_seconds)}\n"
-            f"2. Порог изменения цены: {s.threshold_pct:.2f}%\n"
-            f"3. RSI: {'ВКЛ' if s.rsi_enabled else 'ВЫКЛ'} "
-            f"({tfs}), уровни {s.rsi_overbought:.0f}/{s.rsi_oversold:.0f}\n"
-            f"4. Фильтр 24ч: {'ВКЛ' if s.day_filter_enabled else 'ВЫКЛ'} "
-            f"({s.day_min_pct:.1f}%)\n"
-            f"5. Типы сигналов: {s.signal_types}\n\n"
+            f"2️⃣ Порог изменения: {s.threshold_pct:.2f}%\n"
+            f"3️⃣ RSI: {'ВКЛ' if s.rsi_enabled else 'ВЫКЛ'} ({tfs}), уровни {s.rsi_overbought:.0f}/{s.rsi_oversold:.0f}\n"
+            f"4️⃣ Фильтр 24ч: {'ВКЛ' if s.day_filter_enabled else 'ВЫКЛ'} ({s.day_min_pct:.1f}%)\n"
+            f"5️⃣ Типы сигналов: {s.signal_types}\n\n"
             "Дополнительные данные:\n"
             f"• Стакан: {'ВКЛ' if s.show_imbalance else 'ВЫКЛ'}\n"
             f"• Объём 24ч: {'ВКЛ' if s.show_volume else 'ВЫКЛ'}\n"
-            f"• Всплеск объёма: {'ВКЛ' if s.show_volume_spike else 'ВЫКЛ'}\n"
+            f"• Volume Spike: {'ВКЛ' if s.show_volume_spike else 'ВЫКЛ'}\n"
             f"• Open Interest: {'ВКЛ' if s.show_oi else 'ВЫКЛ'}\n"
             f"• Funding: {'ВКЛ' if s.show_funding else 'ВЫКЛ'}\n"
-            f"• Дата листинга: {'ВКЛ' if s.show_listing else 'ВЫКЛ'}\n\n"
-            "Первые два фильтра являются базовыми и не отключаются."
+            f"• Листинг: {'ВКЛ' if s.show_listing else 'ВЫКЛ'}\n\n"
+            "Первые два фильтра — базовые и всегда активны."
         )
-        await self._send(chat_id, text, keyboard=True)
+        inline = [
+            [{"text": "⏱ Интервал", "callback_data": "noop"}, {"text": "📈 Порог", "callback_data": "noop"}],
+            [
+                {"text": "30 сек", "callback_data": "interval:30"},
+                {"text": "1 мин", "callback_data": "interval:60"},
+                {"text": "3 мин", "callback_data": "interval:180"},
+                {"text": "5 мин", "callback_data": "interval:300"},
+            ],
+            [
+                {"text": "2%", "callback_data": "threshold:2"},
+                {"text": "3%", "callback_data": "threshold:3"},
+                {"text": "5%", "callback_data": "threshold:5"},
+                {"text": "10%", "callback_data": "threshold:10"},
+            ],
+            [
+                {"text": "RSI ON", "callback_data": "rsi:on"},
+                {"text": "RSI OFF", "callback_data": "rsi:off"},
+                {"text": "24H ON", "callback_data": "day:on"},
+                {"text": "24H OFF", "callback_data": "day:off"},
+            ],
+            [
+                {"text": "🟢 Pump", "callback_data": "signals:PUMP"},
+                {"text": "🔴 Dump", "callback_data": "signals:DUMP"},
+                {"text": "🟢🔴 Оба", "callback_data": "signals:BOTH"},
+            ],
+            [{"text": "↩️ Назад", "callback_data": "back"}],
+        ]
+        await self._send(chat_id, text, inline=inline)
 
     async def _health(self, chat_id):
         try:
             tickers = await self.scanner.fetch_tickers()
-            ws = len(self.scanner.ticker_cache)
             await self._send(
                 chat_id,
                 "❤️ Состояние сканера: LIVE\n"
                 f"Инструментов Bybit: {len(self.scanner.ws_symbols)}\n"
-                f"Получено ticker-данных: {ws}\n"
-                f"REST ticker сейчас: {len(tickers)}\n"
+                f"Ticker в памяти: {len(self.scanner.ticker_cache)}\n"
+                f"REST ticker: {len(tickers)}\n"
                 f"Порог: {self.scanner.settings.threshold_pct:.2f}%\n"
                 f"Интервал: {self._interval_label(self.scanner.settings.interval_seconds)}",
             )
