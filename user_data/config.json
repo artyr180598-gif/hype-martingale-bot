@@ -9,18 +9,18 @@
   "tradable_balance_ratio": 0.95,
   "fiat_display_currency": "USD",
   "timeframe": "5m",
-  "strategy": "PrimeStrategy",
+  "strategy": "HypeConfluenceStrategy",
   "cancel_open_orders_on_exit": true,
   "process_only_new_candles": true,
   "use_exit_signal": true,
   "exit_profit_only": false,
   "ignore_roi_if_entry_signal": true,
   "minimal_roi": {
-    "0": 0.035,
+    "0": 0.03,
     "45": 0.018,
-    "150": 0
+    "120": 0
   },
-  "stoploss": -0.075,
+  "stoploss": -0.055,
   "entry_pricing": {
     "price_side": "same",
     "use_order_book": true,
@@ -48,9 +48,9 @@
   "pairlists": [
     {
       "method": "VolumePairList",
-      "number_assets": 80,
+      "number_assets": 60,
       "sort_key": "quoteVolume",
-      "min_value": 1000000,
+      "min_value": 2000000,
       "refresh_period": 900
     }
   ],
@@ -68,11 +68,37 @@
     "username": "freqtrade",
     "password": "CHANGE_ME_IN_RAILWAY"
   },
-  "bot_name": "Hype Smart Flow",
+  "bot_name": "Hype Confluence Engine",
   "db_url": "sqlite:////freqtrade/user_data/tradesv3.sqlite",
   "initial_state": "running",
   "force_entry_enable": false,
   "internals": {
     "process_throttle_secs": 5
-  }
+  },
+  "liquidation_buffer": 0.05,
+  "unfilledtimeout": {
+    "entry": 2,
+    "exit": 5,
+    "unit": "minutes"
+  },
+  "protections": [
+    {
+      "method": "CooldownPeriod",
+      "stop_duration_candles": 3
+    },
+    {
+      "method": "StoplossGuard",
+      "lookback_period_candles": 48,
+      "trade_limit": 2,
+      "stop_duration_candles": 12,
+      "only_per_pair": false
+    },
+    {
+      "method": "MaxDrawdown",
+      "lookback_period_candles": 96,
+      "trade_limit": 6,
+      "max_allowed_drawdown": 0.08,
+      "stop_duration_candles": 24
+    }
+  ]
 }
