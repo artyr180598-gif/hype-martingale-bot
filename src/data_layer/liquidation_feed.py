@@ -405,6 +405,11 @@ class HyperliquidConnection:
                             if data.get("channel") == "trades":
                                 await self._process_trades(data.get("data", []))
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            logger.warning(
+                                "[hyperliquid] WS closed (type=%s, close_code=%s), reconnecting",
+                                msg.type,
+                                ws.close_code,
+                            )
                             break
             except asyncio.CancelledError:
                 return
