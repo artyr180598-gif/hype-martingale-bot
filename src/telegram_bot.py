@@ -192,11 +192,19 @@ class TelegramBot:
             self.scanner.settings.rsi_enabled = value == "on"
             self.scanner.settings.save()
             await self._settings(chat_id)
+        elif data.startswith("daypct:"):
+            value = float(data.split(":", 1)[1])
+            self.scanner.settings.day_filter_enabled = value > 0
+            self.scanner.settings.day_min_pct = value
+            self.scanner.settings.save()
+            await self._settings(chat_id)
         elif data.startswith("day:"):
             value = data.split(":", 1)[1]
             self.scanner.settings.day_filter_enabled = value == "on"
             self.scanner.settings.save()
             await self._settings(chat_id)
+        elif data == "noop":
+            return
         elif data == "back":
             await self._send(chat_id, "🚀 Меню сканера Bybit", keyboard=True)
 
@@ -258,8 +266,12 @@ class TelegramBot:
             [
                 {"text": "RSI ON", "callback_data": "rsi:on"},
                 {"text": "RSI OFF", "callback_data": "rsi:off"},
-                {"text": "24H ON", "callback_data": "day:on"},
-                {"text": "24H OFF", "callback_data": "day:off"},
+            ],
+            [
+                {"text": "24H OFF", "callback_data": "daypct:0"},
+                {"text": "24H ≥5%", "callback_data": "daypct:5"},
+                {"text": "24H ≥10%", "callback_data": "daypct:10"},
+                {"text": "24H ≥20%", "callback_data": "daypct:20"},
             ],
             [
                 {"text": "🟢 Pump", "callback_data": "signals:PUMP"},
