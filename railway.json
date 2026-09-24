@@ -4,5 +4,11 @@
     "startCommand": "python run_telegram.py",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
+  },
+  "build": {
+    "builder": "DOCKERFILE",
+    "watchPatterns": [
+      "**"
+    ]
   }
 }
