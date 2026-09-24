@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import aiohttp
 
 from src.strategies.pump_scanner import PumpScanner
@@ -19,6 +20,9 @@ class TelegramBot:
         self.session = None
         self.task = None
         self.monitor_task = None
+        self.send_lock = asyncio.Lock()
+        self.telegram_cooldown_until = 0.0
+        self.last_telegram_cooldown_log = 0.0
         self.scanner = PumpScanner()
         self.menu_keyboard = {
             'keyboard': [
@@ -51,6 +55,11 @@ class TelegramBot:
                         return data.get('result')
                     description = str(data.get('description') or raw[:300]).replace(self.token, '<TOKEN>')
                     error = f'Telegram API {method} HTTP {response.status}: {description}'
+                    if response.status == 429:
+                        retry_after = int((data.get('parameters') or {}).get('retry_after') or 60)
+                        self.telegram_cooldown_until = max(self.telegram_cooldown_until, time.monotonic() + retry_after)
+                        log.error('Telegram flood control: %s; pausing outbound messages for %ss', error, retry_after)
+                        raise RuntimeError(error)
                     last_error = RuntimeError(error)
                     log.error('%s (attempt %s/%s)', error, attempt, retries)
                     if response.status in {400, 401, 403, 404}:
@@ -79,7 +88,7 @@ class TelegramBot:
             {'command': 'settings', 'description': 'Настройки фильтров'},
             {'command': 'health', 'description': 'Проверить данные'},
         ]})
-        await self._send(self.chat_id, 'Pump/Dump Monitor на Bybit\n\nМониторинг запущен. Выбери действие ниже.', keyboard=True)
+        # Do not send a startup message: restarting the worker must never create a Telegram flood.
         self.task = asyncio.create_task(self._poll(), name='telegram-poll')
         self.monitor_task = asyncio.create_task(self._monitor_loop(), name='pump-monitor')
 
@@ -100,8 +109,16 @@ class TelegramBot:
         while self.running:
             try:
                 signals = await self.scanner.update()
-                for signal in signals:
-                    await self._send(self.chat_id, self.scanner.format_signal(signal))
+                if signals:
+                    # Alert-only by design: send at most three strongest fresh signals per cycle.
+                    # This prevents a volatile market from flooding the Telegram chat.
+                    signals = sorted(signals, key=lambda s: abs(s.change_pct), reverse=True)[:3]
+                    for signal in signals:
+                        try:
+                            await self._send(self.chat_id, self.scanner.format_signal(signal))
+                        except Exception as exc:
+                            log.warning('Automatic signal delivery paused: %s', exc)
+                            break
             except asyncio.CancelledError:
                 return
             except Exception:
@@ -127,10 +144,31 @@ class TelegramBot:
         return str(chat.get('id', '')) == str(self.chat_id)
 
     async def _send(self, chat_id, text, keyboard=False):
-        payload = {'chat_id': chat_id, 'text': text}
-        if keyboard:
-            payload['reply_markup'] = self.menu_keyboard
-        await self._api('sendMessage', payload)
+        # Telegram allows bursts only within limits. Serialize all sends and keep
+        # a conservative 1.2s gap so automatic scanning cannot flood the chat.
+        async with self.send_lock:
+            now = time.monotonic()
+            if now < self.telegram_cooldown_until:
+                remaining = int(self.telegram_cooldown_until - now)
+                if now - self.last_telegram_cooldown_log >= 30:
+                    log.warning('Telegram outbound cooldown active: %ss remaining', remaining)
+                    self.last_telegram_cooldown_log = now
+                return False
+            if hasattr(self, '_next_send_at'):
+                wait = self._next_send_at - now
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            payload = {'chat_id': chat_id, 'text': text}
+            if keyboard:
+                payload['reply_markup'] = self.menu_keyboard
+            try:
+                await self._api('sendMessage', payload, retries=1)
+                self._next_send_at = time.monotonic() + 1.2
+                return True
+            except RuntimeError as exc:
+                if 'HTTP 429' in str(exc):
+                    return False
+                raise
 
     async def _handle(self, update):
         if not self._allowed(update):
