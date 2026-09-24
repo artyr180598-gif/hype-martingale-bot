@@ -67,7 +67,8 @@ class TelegramBot:
             self.chat_id,
             "🚀 Bybit Pump/Dump Scanner\n\n"
             "Мониторинг запущен. Бот сам ищет сильные движения по USDT-фьючерсам Bybit.\n\n"
-            "Важно: Pump/Dump — обнаружение движения. ЛОНГ/ШОРТ появляется только после отдельной проверки продолжения движения. "
+            "Важно: Pump/Dump — обнаружение движения. ЛОНГ/ШОРТ появляется "
+            "только после отдельной проверки продолжения движения. "
             "Если подтверждения нет, бот пишет «ЖДАТЬ».",
             keyboard=True,
         )
@@ -218,87 +219,3 @@ class TelegramBot:
 
     async def _manual_scan(self, chat_id):
         await self._send(chat_id, "🔎 Проверяю рынок Bybit...")
-        try:
-            signals = await asyncio.wait_for(self.scanner.scan_once(), timeout=30)
-        except asyncio.TimeoutError:
-            await self._send(chat_id, "⚠️ Проверка не завершилась за 30 секунд. Сигнал не придумываю.")
-            return
-        if not signals:
-            await self._send(chat_id, "Сейчас нет нового движения, прошедшего выбранные фильтры.")
-            return
-        for signal in signals[:10]:
-            await self._send(chat_id, self.scanner.format_signal(signal))
-
-    async def _settings(self, chat_id):
-        s = self.scanner.settings
-        tfs = ", ".join(s.rsi_timeframes)
-        text = (
-            "⚙️ НАСТРОЙКИ\n\n"
-            "1️⃣ Интервал мониторинга: "
-            f"{self._interval_label(s.interval_seconds)}\n"
-            f"2️⃣ Порог изменения: {s.threshold_pct:.2f}%\n"
-            f"3️⃣ RSI: {'ВКЛ' if s.rsi_enabled else 'ВЫКЛ'} ({tfs}), уровни {s.rsi_overbought:.0f}/{s.rsi_oversold:.0f}\n"
-            f"4️⃣ Фильтр 24ч: {'ВКЛ' if s.day_filter_enabled else 'ВЫКЛ'} ({s.day_min_pct:.1f}%)\n"
-            f"5️⃣ Типы сигналов: {s.signal_types}\n\n"
-            "Дополнительные данные:\n"
-            f"• Стакан: {'ВКЛ' if s.show_imbalance else 'ВЫКЛ'}\n"
-            f"• Объём 24ч: {'ВКЛ' if s.show_volume else 'ВЫКЛ'}\n"
-            f"• Volume Spike: {'ВКЛ' if s.show_volume_spike else 'ВЫКЛ'}\n"
-            f"• Open Interest: {'ВКЛ' if s.show_oi else 'ВЫКЛ'}\n"
-            f"• Funding: {'ВКЛ' if s.show_funding else 'ВЫКЛ'}\n"
-            f"• Листинг: {'ВКЛ' if s.show_listing else 'ВЫКЛ'}\n\n"
-            "Первые два фильтра — базовые и всегда активны."
-        )
-        inline = [
-            [{"text": "⏱ Интервал", "callback_data": "noop"}, {"text": "📈 Порог", "callback_data": "noop"}],
-            [
-                {"text": "30 сек", "callback_data": "interval:30"},
-                {"text": "1 мин", "callback_data": "interval:60"},
-                {"text": "3 мин", "callback_data": "interval:180"},
-                {"text": "5 мин", "callback_data": "interval:300"},
-            ],
-            [
-                {"text": "2%", "callback_data": "threshold:2"},
-                {"text": "3%", "callback_data": "threshold:3"},
-                {"text": "5%", "callback_data": "threshold:5"},
-                {"text": "10%", "callback_data": "threshold:10"},
-            ],
-            [
-                {"text": "RSI ON", "callback_data": "rsi:on"},
-                {"text": "RSI OFF", "callback_data": "rsi:off"},
-            ],
-            [
-                {"text": "24H OFF", "callback_data": "daypct:0"},
-                {"text": "24H ≥5%", "callback_data": "daypct:5"},
-                {"text": "24H ≥10%", "callback_data": "daypct:10"},
-                {"text": "24H ≥20%", "callback_data": "daypct:20"},
-            ],
-            [
-                {"text": "🟢 Pump", "callback_data": "signals:PUMP"},
-                {"text": "🔴 Dump", "callback_data": "signals:DUMP"},
-                {"text": "🟢🔴 Оба", "callback_data": "signals:BOTH"},
-            ],
-            [{"text": "↩️ Назад", "callback_data": "back"}],
-        ]
-        await self._send(chat_id, text, inline=inline)
-
-    async def _health(self, chat_id):
-        try:
-            tickers = await self.scanner.fetch_tickers()
-            await self._send(
-                chat_id,
-                "❤️ Состояние сканера: LIVE\n"
-                f"Инструментов Bybit: {len(self.scanner.ws_symbols)}\n"
-                f"Ticker в памяти: {len(self.scanner.ticker_cache)}\n"
-                f"REST ticker: {len(tickers)}\n"
-                f"Порог: {self.scanner.settings.threshold_pct:.2f}%\n"
-                f"Интервал: {self._interval_label(self.scanner.settings.interval_seconds)}",
-            )
-        except Exception as exc:
-            await self._send(chat_id, f"❌ Ошибка получения данных Bybit: {type(exc).__name__}")
-
-    @staticmethod
-    def _interval_label(seconds):
-        if seconds < 60:
-            return f"{seconds} сек"
-        return f"{seconds // 60} мин"
