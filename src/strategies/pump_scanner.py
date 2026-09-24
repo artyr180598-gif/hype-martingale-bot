@@ -13,10 +13,12 @@ import aiohttp
 
 log = logging.getLogger(__name__)
 
-BYBIT_TICKER_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
-BYBIT_ORDERBOOK_URL = "https://api.bybit.com/v5/market/orderbook?category=linear&symbol={symbol}&limit=25"
-BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit=100"
-BYBIT_INSTRUMENT_URL = "https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000"
+BYBIT_REST = "https://api.bybit.com"
+BYBIT_TICKER_URL = f"{BYBIT_REST}/v5/market/tickers?category=linear"
+BYBIT_ORDERBOOK_URL = f"{BYBIT_REST}/v5/market/orderbook?category=linear&symbol={{symbol}}&limit=50"
+BYBIT_KLINE_URL = f"{BYBIT_REST}/v5/market/kline?category=linear&symbol={{symbol}}&interval={{interval}}&limit=100"
+BYBIT_INSTRUMENT_URL = f"{BYBIT_REST}/v5/market/instruments-info?category=linear&limit=1000"
+BYBIT_WS = "wss://stream.bybit.com/v5/public/linear"
 
 SETTINGS_PATH = Path("data/pump_settings.json")
 
@@ -26,31 +28,31 @@ class PumpSettings:
     interval_seconds: int = 300
     threshold_pct: float = 5.0
     rsi_enabled: bool = False
-    rsi_timeframes: tuple[str, ...] = ("15", "60", "240")
+    rsi_timeframes: tuple[str, ...] = ("5", "15", "60")
     rsi_overbought: float = 80.0
     rsi_oversold: float = 20.0
     day_filter_enabled: bool = False
     day_min_pct: float = 0.0
     signal_types: str = "BOTH"
     show_imbalance: bool = True
-    show_listing: bool = False
+    show_listing: bool = True
     show_hashtag: bool = True
     show_volume: bool = True
+    show_volume_spike: bool = True
     show_funding: bool = True
-    confirm_enabled: bool = True
+    show_oi: bool = True
     confirmation_timeframe: str = "1"
     confirmation_candles: int = 3
-    risk_reward_1: float = 1.5
-    risk_reward_2: float = 2.5
+    cooldown_seconds: int = 300
 
     @classmethod
     def load(cls) -> "PumpSettings":
         try:
             raw = json.loads(SETTINGS_PATH.read_text())
-            defaults = asdict(cls())
-            defaults.update(raw)
-            defaults["rsi_timeframes"] = tuple(defaults["rsi_timeframes"])
-            return cls(**defaults)
+            values = asdict(cls())
+            values.update(raw)
+            values["rsi_timeframes"] = tuple(values["rsi_timeframes"])
+            return cls(**values)
         except Exception:
             return cls()
 
@@ -66,12 +68,16 @@ class PumpSignal:
     change_pct: float
     start_price: float
     current_price: float
+    day_pct: float
     imbalance_buy_pct: float | None
     volume_24h: float
+    volume_spike: float | None
     funding_rate: float | None
+    open_interest: float | None
+    open_interest_change_pct: float | None
     listing_ms: int | None
     rsi: dict[str, float]
-    confirmations: int
+    score: int
     trade_action: str
     trade_reason: str
     entry_low: float | None
@@ -83,75 +89,56 @@ class PumpSignal:
 
 
 class PumpScanner:
-    """Bybit-style pump/dump detector.
+    """Real-time Bybit Pump/Dump scanner.
 
-    The primary trigger is deliberately simple and transparent:
-    current price versus the rolling minimum/maximum inside the configured
-    monitoring interval. Optional RSI and 24h filters are applied only when
-    enabled. No orders are placed.
+    It does not place orders. The first two filters are always active:
+    rolling monitoring interval and price-change threshold. Optional filters
+    only remove candidates when explicitly enabled.
     """
 
     def __init__(self) -> None:
         self.settings = PumpSettings.load()
         self.session: aiohttp.ClientSession | None = None
         self.prices: dict[str, deque[tuple[float, float]]] = {}
+        self.ticker_cache: dict[str, dict] = {}
         self.last_trigger: dict[tuple[str, str], float] = {}
         self.listings: dict[str, int] = {}
+        self.prev_oi: dict[str, float] = {}
         self.running = False
+        self.ws_tasks: list[asyncio.Task] = []
+        self.ws_symbols: list[str] = []
+        self.ws_ready = False
+        self._history_seed_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12))
         await self._load_listings()
-        # Do not block Telegram startup on historical seeding. The live monitor
-        # must start immediately; history is filled in the background.
         self.running = True
-        asyncio.create_task(self._seed_history(), name="pump-history-seed")
-
-    async def _seed_history(self) -> None:
-        """Seed the rolling window from Bybit 1m candles so a fresh restart can detect moves immediately."""
-        try:
-            tickers = await self.fetch_tickers()
-            # Seed the most liquid symbols first, then continue through the
-            # complete Bybit USDT universe. This gets useful coverage quickly
-            # without turning startup into a long blocking operation.
-            symbols = [
-                t["symbol"]
-                for t in sorted(
-                    tickers,
-                    key=lambda x: float(x.get("turnover24h") or 0),
-                    reverse=True,
-                )
-            ]
-            sem = asyncio.Semaphore(12)
-            async def seed(symbol: str) -> None:
-                async with sem:
-                    try:
-                        limit = min(100, max(10, self.settings.interval_seconds // 60 + 3))
-                        data = await self._get(BYBIT_KLINE_URL.format(symbol=symbol, interval="1", limit=limit))
-                        rows = data.get("result", {}).get("list", [])
-                        q = self.prices.setdefault(symbol, deque())
-                        for row in reversed(rows):
-                            ts = float(row[0]) / 1000.0
-                            close = float(row[4])
-                            if close > 0:
-                                q.append((ts, close))
-                        self._trim(symbol, time.time())
-                    except Exception:
-                        pass
-            await asyncio.gather(*(seed(s) for s in symbols))
-            log.info(
-                "Pump scanner seeded price history for %d/%d Bybit symbols",
-                len(self.prices),
-                len(symbols),
-            )
-        except Exception:
-            log.exception("Could not seed pump scanner history")
+        self._history_seed_task = asyncio.create_task(self._seed_history(), name="pump-history-seed")
+        # REST is retained as a recovery path; WebSocket is the primary ticker feed.
+        self.ws_tasks = [asyncio.create_task(self._ticker_ws_chunk(chunk), name=f"bybit-ticker-{i}")
+                         for i, chunk in enumerate(self._chunks(self.ws_symbols, 100))] if self.ws_symbols else []
+        await self._refresh_universe()
+        self.ws_tasks = [asyncio.create_task(self._ticker_ws_chunk(chunk), name=f"bybit-ticker-{i}")
+                         for i, chunk in enumerate(self._chunks(self.ws_symbols, 100))]
+        log.info("Pump scanner started for %d Bybit linear USDT symbols", len(self.ws_symbols))
 
     async def stop(self) -> None:
         self.running = False
+        for task in self.ws_tasks:
+            task.cancel()
+        if self._history_seed_task:
+            self._history_seed_task.cancel()
+        if self.ws_tasks:
+            await asyncio.gather(*self.ws_tasks, return_exceptions=True)
         if self.session and not self.session.closed:
             await self.session.close()
         self.session = None
+
+    @staticmethod
+    def _chunks(items: list[str], size: int):
+        for i in range(0, len(items), size):
+            yield items[i:i + size]
 
     async def _get(self, url: str) -> dict:
         if not self.session:
@@ -163,22 +150,101 @@ class PumpScanner:
                 raise RuntimeError(data.get("retMsg", "Bybit API error"))
             return data
 
+    async def _refresh_universe(self) -> None:
+        cursor = ""
+        symbols: list[str] = []
+        while True:
+            url = BYBIT_INSTRUMENT_URL + (f"&cursor={cursor}" if cursor else "")
+            data = await self._get(url)
+            result = data.get("result", {})
+            for item in result.get("list", []):
+                symbol = item.get("symbol", "")
+                if item.get("status") == "Trading" and symbol.endswith("USDT"):
+                    symbols.append(symbol)
+                    self.listings[symbol] = int(item.get("launchTime") or 0)
+            cursor = result.get("nextPageCursor") or ""
+            if not cursor:
+                break
+        self.ws_symbols = sorted(set(symbols))
+        log.info("Bybit universe loaded: %d trading USDT linear symbols", len(self.ws_symbols))
+
     async def _load_listings(self) -> None:
         try:
-            data = await self._get(BYBIT_INSTRUMENT_URL)
-            for item in data.get("result", {}).get("list", []):
-                if item.get("symbol", "").endswith("USDT"):
-                    self.listings[item["symbol"]] = int(item.get("launchTime") or 0)
-            log.info("Pump scanner loaded %d Bybit linear instruments", len(self.listings))
+            await self._refresh_universe()
         except Exception:
-            log.exception("Could not load Bybit listing dates")
+            log.exception("Could not load complete Bybit instrument universe")
 
     async def fetch_tickers(self) -> list[dict]:
         data = await self._get(BYBIT_TICKER_URL)
-        return [
-            x for x in data.get("result", {}).get("list", [])
-            if x.get("symbol", "").endswith("USDT") and float(x.get("lastPrice") or 0) > 0
-        ]
+        rows = []
+        for x in data.get("result", {}).get("list", []):
+            if x.get("symbol", "").endswith("USDT") and float(x.get("lastPrice") or 0) > 0:
+                self.ticker_cache[x["symbol"]] = x
+                rows.append(x)
+        return rows
+
+    async def _ticker_ws_chunk(self, symbols: list[str]) -> None:
+        if not symbols:
+            return
+        topics = [f"tickers.{s}" for s in symbols]
+        delay = 2
+        while self.running:
+            try:
+                async with self.session.ws_connect(BYBIT_WS, heartbeat=20, autoping=True) as ws:
+                    for batch in self._chunks(topics, 100):
+                        await ws.send_json({"op": "subscribe", "args": batch})
+                    delay = 2
+                    async for msg in ws:
+                        if not self.running:
+                            return
+                        if msg.type != aiohttp.WSMsgType.TEXT:
+                            continue
+                        payload = json.loads(msg.data)
+                        data = payload.get("data")
+                        if not isinstance(data, dict):
+                            continue
+                        symbol = data.get("symbol")
+                        price = float(data.get("lastPrice") or 0)
+                        if not symbol or price <= 0:
+                            continue
+                        old = self.ticker_cache.get(symbol, {})
+                        old.update(data)
+                        self.ticker_cache[symbol] = old
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                log.warning("Bybit ticker websocket reconnect: %s", type(exc).__name__)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
+
+    async def _seed_history(self) -> None:
+        try:
+            # REST seed is only for the configured rolling window after a restart.
+            # Limit concurrency so Bybit rate limits are respected.
+            symbols = list(self.ws_symbols)
+            sem = asyncio.Semaphore(8)
+
+            async def seed(symbol: str):
+                async with sem:
+                    try:
+                        minutes = max(10, self.settings.interval_seconds // 60 + 3)
+                        limit = min(100, minutes)
+                        data = await self._get(BYBIT_KLINE_URL.format(symbol=symbol, interval="1") + f"&limit={limit}")
+                        q = self.prices.setdefault(symbol, deque())
+                        for row in reversed(data.get("result", {}).get("list", [])):
+                            ts, close = float(row[0]) / 1000, float(row[4])
+                            if close > 0:
+                                q.append((ts, close))
+                        self._trim(symbol, time.time())
+                    except Exception:
+                        pass
+
+            await asyncio.gather(*(seed(s) for s in symbols))
+            log.info("Seeded price history for %d/%d symbols", len(self.prices), len(symbols))
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("Could not seed price history")
 
     def _trim(self, symbol: str, now: float) -> deque[tuple[float, float]]:
         q = self.prices.setdefault(symbol, deque())
@@ -190,13 +256,26 @@ class PumpScanner:
     async def update(self) -> list[PumpSignal]:
         if not self.running:
             return []
-        now = time.time()
-        tickers = await self.fetch_tickers()
-        candidates: list[tuple[dict, str, float, float, float]] = []
 
-        for t in tickers:
-            symbol = t["symbol"]
-            price = float(t["lastPrice"])
+        # WebSocket is primary. REST refresh is a safety net if a symbol has
+        # not arrived yet or the websocket was reconnecting.
+        if len(self.ticker_cache) < max(10, int(len(self.ws_symbols) * 0.5)):
+            try:
+                await self.fetch_tickers()
+            except Exception:
+                log.warning("Ticker REST recovery failed", exc_info=True)
+
+        now = time.time()
+        candidates = []
+        for t in list(self.ticker_cache.values()):
+            symbol = t.get("symbol", "")
+            try:
+                price = float(t.get("lastPrice") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not symbol.endswith("USDT") or price <= 0:
+                continue
+
             q = self._trim(symbol, now)
             q.append((now, price))
             if len(q) < 2:
@@ -214,7 +293,6 @@ class PumpScanner:
                 direction, change, start = "PUMP", pump_pct, low
             elif abs(dump_pct) >= self.settings.threshold_pct:
                 direction, change, start = "DUMP", dump_pct, high
-
             if not direction:
                 continue
             if self.settings.signal_types == "PUMP" and direction != "PUMP":
@@ -229,138 +307,189 @@ class PumpScanner:
                 if direction == "DUMP" and day_pct > -self.settings.day_min_pct:
                     continue
 
-            # One alert per direction until the price leaves the trigger zone.
             key = (symbol, direction)
-            last = self.last_trigger.get(key, 0)
-            if now - last < max(30, self.settings.interval_seconds):
+            if now - self.last_trigger.get(key, 0) < self.settings.cooldown_seconds:
                 continue
-
-            candidates.append((t, direction, change, start, day_pct))
+            candidates.append((t.copy(), direction, change, start, day_pct))
 
         if not candidates:
             return []
 
-        signals = await asyncio.gather(
-            *(self._enrich(t, direction, change, start, day_pct) for t, direction, change, start, day_pct in candidates),
+        # Do not hit REST for hundreds of candidates at once.
+        candidates.sort(key=lambda x: abs(x[2]), reverse=True)
+        candidates = candidates[:20]
+        results = await asyncio.gather(
+            *(self._enrich(*c) for c in candidates),
             return_exceptions=True,
         )
-        out = []
-        for candidate, result in zip(candidates, signals):
+        output = []
+        for candidate, result in zip(candidates, results):
             if isinstance(result, Exception) or result is None:
-                log.warning("Pump enrichment failed for %s: %s", candidate[0].get("symbol"), result)
                 continue
-            out.append(result)
             self.last_trigger[(result.symbol, result.direction)] = now
-        return out
+            output.append(result)
+        return output
 
     async def _enrich(self, ticker: dict, direction: str, change: float, start: float, day_pct: float) -> PumpSignal | None:
         symbol = ticker["symbol"]
-        rsi: dict[str, float] = {}
+        rsi = {}
         if self.settings.rsi_enabled:
             values = await asyncio.gather(*(self._rsi(symbol, tf) for tf in self.settings.rsi_timeframes), return_exceptions=True)
             for tf, value in zip(self.settings.rsi_timeframes, values):
                 if isinstance(value, (int, float)):
                     rsi[tf] = float(value)
-            if rsi:
-                if direction == "PUMP" and not any(v >= self.settings.rsi_overbought for v in rsi.values()):
-                    return None
-                if direction == "DUMP" and not any(v <= self.settings.rsi_oversold for v in rsi.values()):
-                    return None
+            if direction == "PUMP" and rsi and not any(v >= self.settings.rsi_overbought for v in rsi.values()):
+                return None
+            if direction == "DUMP" and rsi and not any(v <= self.settings.rsi_oversold for v in rsi.values()):
+                return None
+            if self.settings.rsi_enabled and not rsi:
+                return None
+
         imbalance = await self._imbalance(symbol) if self.settings.show_imbalance else None
-        confirmations = 1
-        if imbalance is not None and ((direction == "PUMP" and imbalance >= 50) or (direction == "DUMP" and imbalance < 50)):
-            confirmations += 1
-        if self.settings.rsi_enabled and rsi:
-            confirmations += 1
-        if self.settings.day_filter_enabled:
-            confirmations += 1
-        action, reason, entry_low, entry_high, stop, tp1, tp2 = await self._trade_confirmation(
+        volume_spike = await self._volume_spike(symbol) if self.settings.show_volume_spike else None
+        oi = self._float_or_none(ticker.get("openInterest"))
+        old_oi = self.prev_oi.get(symbol)
+        oi_change = ((oi - old_oi) / old_oi * 100) if oi is not None and old_oi else None
+        if oi is not None:
+            self.prev_oi[symbol] = oi
+
+        score = self._score(direction, change, day_pct, imbalance, volume_spike, rsi, oi_change)
+        action, reason, entry_low, entry_high, stop, tp1, tp2 = await self._trade_guidance(
             symbol, direction, float(ticker["lastPrice"]), imbalance
         )
+
         return PumpSignal(
-            symbol=symbol, direction=direction, change_pct=change, start_price=start,
-            current_price=float(ticker["lastPrice"]), imbalance_buy_pct=imbalance,
+            symbol=symbol,
+            direction=direction,
+            change_pct=change,
+            start_price=start,
+            current_price=float(ticker["lastPrice"]),
+            day_pct=day_pct,
+            imbalance_buy_pct=imbalance,
             volume_24h=float(ticker.get("turnover24h") or 0),
-            funding_rate=float(ticker.get("fundingRate") or 0) if ticker.get("fundingRate") else None,
-            listing_ms=self.listings.get(symbol), rsi=rsi, confirmations=confirmations,
-            trade_action=action, trade_reason=reason, entry_low=entry_low, entry_high=entry_high,
-            stop_price=stop, tp1=tp1, tp2=tp2, ts=time.time(),
+            volume_spike=volume_spike,
+            funding_rate=self._float_or_none(ticker.get("fundingRate")),
+            open_interest=oi,
+            open_interest_change_pct=oi_change,
+            listing_ms=self.listings.get(symbol),
+            rsi=rsi,
+            score=score,
+            trade_action=action,
+            trade_reason=reason,
+            entry_low=entry_low,
+            entry_high=entry_high,
+            stop_price=stop,
+            tp1=tp1,
+            tp2=tp2,
+            ts=time.time(),
         )
 
-    async def _trade_confirmation(self, symbol: str, direction: str, price: float, imbalance: float | None):
-        """Classify current setup; guidance only, never places orders."""
-        if not self.settings.confirm_enabled:
-            return "WAIT", "Подтверждение выключено — сначала проверь график.", None, None, None, None, None
+    def _score(self, direction, change, day_pct, imbalance, volume_spike, rsi, oi_change) -> int:
+        score = 2
+        score += min(3, int(abs(change) / max(self.settings.threshold_pct, 0.1)))
+        if volume_spike is not None and volume_spike >= 2:
+            score += 2
+        if imbalance is not None and ((direction == "PUMP" and imbalance >= 52) or (direction == "DUMP" and imbalance <= 48)):
+            score += 1
+        if rsi:
+            score += 1
+        if oi_change is not None and oi_change > 0:
+            score += 1
+        if (direction == "PUMP" and day_pct >= 10) or (direction == "DUMP" and day_pct <= -10):
+            score += 1
+        return min(10, score)
+
+    async def _trade_guidance(self, symbol: str, direction: str, price: float, imbalance: float | None):
         try:
-            data = await self._get(BYBIT_KLINE_URL.format(symbol=symbol, interval=self.settings.confirmation_timeframe, limit=30))
+            data = await self._get(BYBIT_KLINE_URL.format(symbol=symbol, interval=self.settings.confirmation_timeframe) + "&limit=30")
             rows = list(reversed(data.get("result", {}).get("list", [])))
             closes = [float(r[4]) for r in rows if float(r[4]) > 0]
             n = self.settings.confirmation_candles
             if len(closes) < n + 5:
-                return "WAIT", "Недостаточно свечей для подтверждения.", None, None, None, None, None
+                return "WAIT", "Недостаточно данных для подтверждения. Не угадываем вход.", None, None, None, None, None
+
             recent = closes[-n:]
-            recent_return = (recent[-1] / recent[0] - 1) * 100
+            move = (recent[-1] / recent[0] - 1) * 100
             if direction == "PUMP":
-                aligned = recent_return > 0 and (imbalance is None or imbalance >= 50)
+                aligned = move > 0 and (imbalance is None or imbalance >= 50)
                 action = "LONG" if aligned else "WAIT"
-                reason = "Импульс вверх сохраняется и стакан не против." if aligned else "После Pump нет достаточного подтверждения продолжения вверх — ждём."
+                reason = ("Цена продолжает двигаться вверх, поэтому сценарий LONG подтверждён."
+                          if aligned else
+                          "Цена уже резко выросла, но продолжение вверх пока не подтверждено. Лучше ждать.")
             else:
-                aligned = recent_return < 0 and (imbalance is None or imbalance < 50)
+                aligned = move < 0 and (imbalance is None or imbalance <= 50)
                 action = "SHORT" if aligned else "WAIT"
-                reason = "Импульс вниз сохраняется и стакан не против." if aligned else "После Dump нет достаточного подтверждения продолжения вниз — ждём."
-            swing_low = min(closes[-8:])
-            swing_high = max(closes[-8:])
+                reason = ("Цена продолжает двигаться вниз, поэтому сценарий SHORT подтверждён."
+                          if aligned else
+                          "Цена уже резко упала, но продолжение вниз пока не подтверждено. Лучше ждать.")
+
+            swing_low, swing_high = min(closes[-8:]), max(closes[-8:])
             if action == "LONG":
                 stop = swing_low
                 risk = max(price - stop, price * 0.002)
-                entry_low, entry_high = price * 0.998, price * 1.002
-                tp1, tp2 = price + risk * self.settings.risk_reward_1, price + risk * self.settings.risk_reward_2
+                entry_low, entry_high = price * 0.998, price * 1.001
+                tp1, tp2 = price + risk * 1.5, price + risk * 2.5
             elif action == "SHORT":
                 stop = swing_high
                 risk = max(stop - price, price * 0.002)
-                entry_low, entry_high = price * 0.998, price * 1.002
-                tp1, tp2 = price - risk * self.settings.risk_reward_1, price - risk * self.settings.risk_reward_2
+                entry_low, entry_high = price * 0.999, price * 1.002
+                tp1, tp2 = price - risk * 1.5, price - risk * 2.5
             else:
-                stop = tp1 = tp2 = entry_low = entry_high = None
+                entry_low = entry_high = stop = tp1 = tp2 = None
             return action, reason, entry_low, entry_high, stop, tp1, tp2
-        except Exception as exc:
-            log.warning("Trade confirmation failed for %s: %s", symbol, type(exc).__name__)
-            return "WAIT", "Не удалось получить подтверждение — сделку не открываем.", None, None, None, None, None
+        except Exception:
+            log.warning("Trade guidance failed for %s", symbol, exc_info=True)
+            return "WAIT", "Не удалось получить подтверждение. Сигнал показываем, но вход не рекомендуем.", None, None, None, None, None
 
     async def _imbalance(self, symbol: str) -> float | None:
         try:
             data = await self._get(BYBIT_ORDERBOOK_URL.format(symbol=symbol))
-            levels = data.get("result", {}).get("b", []), data.get("result", {}).get("a", [])
-            bid = sum(float(x[1]) * float(x[0]) for x in levels[0])
-            ask = sum(float(x[1]) * float(x[0]) for x in levels[1])
+            bids = data.get("result", {}).get("b", [])
+            asks = data.get("result", {}).get("a", [])
+            bid = sum(float(x[1]) * float(x[0]) for x in bids)
+            ask = sum(float(x[1]) * float(x[0]) for x in asks)
             total = bid + ask
             return bid / total * 100 if total else None
         except Exception:
             return None
 
+    async def _volume_spike(self, symbol: str) -> float | None:
+        try:
+            data = await self._get(BYBIT_KLINE_URL.format(symbol=symbol, interval="1") + "&limit=21")
+            rows = list(reversed(data.get("result", {}).get("list", [])))
+            turnovers = [float(r[6]) for r in rows if float(r[6]) > 0]
+            if len(turnovers) < 10:
+                return None
+            current = turnovers[-1]
+            baseline = sum(turnovers[:-1]) / len(turnovers[:-1])
+            return current / baseline if baseline else None
+        except Exception:
+            return None
+
     async def _rsi(self, symbol: str, interval: str) -> float | None:
         try:
-            data = await self._get(BYBIT_KLINE_URL.format(symbol=symbol, interval=interval))
-            rows = data.get("result", {}).get("list", [])
-            closes = [float(row[4]) for row in reversed(rows)]
+            data = await self._get(BYBIT_KLINE_URL.format(symbol=symbol, interval=interval) + "&limit=100")
+            closes = [float(r[4]) for r in reversed(data.get("result", {}).get("list", []))]
             if len(closes) < 15:
                 return None
-            gains, losses = [], []
-            for a, b in zip(closes[-15:-1], closes[-14:]):
-                d = b - a
-                gains.append(max(d, 0))
-                losses.append(max(-d, 0))
-            avg_gain = sum(gains) / 14
-            avg_loss = sum(losses) / 14
-            if avg_loss == 0:
+            changes = [b - a for a, b in zip(closes[-15:-1], closes[-14:])]
+            gains = sum(max(x, 0) for x in changes) / 14
+            losses = sum(max(-x, 0) for x in changes) / 14
+            if losses == 0:
                 return 100.0
-            rs = avg_gain / avg_loss
-            return 100 - 100 / (1 + rs)
+            return 100 - 100 / (1 + gains / losses)
         except Exception:
             return None
 
     async def scan_once(self) -> list[PumpSignal]:
         return await self.update()
+
+    @staticmethod
+    def _float_or_none(value):
+        try:
+            return float(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
 
     def format_signal(self, s: PumpSignal) -> str:
         icon = "🟢" if s.direction == "PUMP" else "🔴"
@@ -368,32 +497,55 @@ class PumpScanner:
         lines = [
             f"{icon} {name} Bybit #{name.lower()}",
             f"{'Pump' if s.direction == 'PUMP' else 'Dump'}: {s.change_pct:+.2f}% ({s.start_price:.8g} → {s.current_price:.8g})",
+            "",
+            f"🧭 Сценарий: {'ЛОНГ 🟢' if s.trade_action == 'LONG' else 'ШОРТ 🔴' if s.trade_action == 'SHORT' else 'ЖДАТЬ ⏸️'}",
+            f"🧠 Для новичка: {self._beginner_explanation(s)}",
         ]
+        if s.trade_action in {"LONG", "SHORT"}:
+            lines += [
+                f"🎯 Примерная зона входа: {s.entry_low:.8g} – {s.entry_high:.8g}",
+                f"🛑 Уровень отмены сценария: {s.stop_price:.8g}",
+                f"✅ TP1: {s.tp1:.8g}",
+                f"✅ TP2: {s.tp2:.8g}",
+                "⚠️ Это расчётная зона по текущим данным, не гарантия и не команда открыть сделку.",
+            ]
+        else:
+            lines.append("⏸️ Вход сейчас не подтверждён. Ждём нового подтверждения, а не угадываем направление.")
+
+        lines.append("")
         if self.settings.show_imbalance and s.imbalance_buy_pct is not None:
             sell = 100 - s.imbalance_buy_pct
             book_icon = "🟢" if s.imbalance_buy_pct >= 50 else "🔴"
-            lines.append(f"📉 Дисбаланс: {book_icon} ({s.imbalance_buy_pct:.1f}% / {sell:.1f}%)")
+            lines.append(f"📉 Дисбаланс стакана: {book_icon} покупки {s.imbalance_buy_pct:.1f}% / продажи {sell:.1f}%")
         if self.settings.show_volume:
             lines.append(f"📈 Объём 24ч: {self._fmt_volume(s.volume_24h)} USDT")
+        if self.settings.show_volume_spike and s.volume_spike is not None:
+            lines.append(f"⚡ Всплеск объёма: {s.volume_spike:.1f}x к среднему")
+        if s.rsi:
+            lines.append("📊 RSI: " + " | ".join(f"{tf}м={v:.1f}" for tf, v in s.rsi.items()))
+        if self.settings.show_oi and s.open_interest is not None:
+            oi_text = f"{s.open_interest:.0f}"
+            if s.open_interest_change_pct is not None:
+                oi_text += f" ({s.open_interest_change_pct:+.1f}%)"
+            lines.append(f"📊 Open Interest: {oi_text}")
         if self.settings.show_funding and s.funding_rate is not None:
-            lines.append(f"💸 Funding: {s.funding_rate * 100:.4f}%")
+            lines.append(f"💰 Funding: {s.funding_rate * 100:.4f}%")
         if self.settings.show_listing and s.listing_ms:
             age_days = max(0, int((time.time() * 1000 - s.listing_ms) / 86_400_000))
             lines.append(f"🗓 Листинг: {age_days} дн.")
-        if s.rsi:
-            lines.append("📊 RSI: " + " | ".join(f"{tf}={v:.1f}" for tf, v in s.rsi.items()))
-        lines.append(f"📡 Сигнал: {s.confirmations}")
+        lines.append(f"📈 Изменение за 24ч: {s.day_pct:+.2f}%")
+        lines.append(f"📡 Сила события: {s.score}/10")
         lines.append("")
-        lines.append(f"🧭 Решение: {s.trade_action}")
-        lines.append(f"ℹ️ {s.trade_reason}")
-        if s.trade_action in {"LONG", "SHORT"} and s.stop_price is not None:
-            lines.append(f"🎯 Вход: {s.entry_low:.8g}–{s.entry_high:.8g}")
-            lines.append(f"🛑 Stop: {s.stop_price:.8g}")
-            lines.append(f"✅ TP1: {s.tp1:.8g}")
-            lines.append(f"✅ TP2: {s.tp2:.8g}")
-        else:
-            lines.append("⏸ Вход не подтверждён — ждём, а не угадываем.")
+        lines.append("ℹ️ Сигнал означает сильное движение цены. ЛОНГ/ШОРТ здесь — отдельная проверка продолжения движения; Pump сам по себе не равен автоматическому ЛОНГУ.")
         return "\n".join(lines)
+
+    @staticmethod
+    def _beginner_explanation(s: PumpSignal) -> str:
+        if s.trade_action == "LONG":
+            return "цена резко выросла и последние подтверждающие свечи всё ещё направлены вверх; ищем вход только в указанной зоне."
+        if s.trade_action == "SHORT":
+            return "цена резко упала и последние подтверждающие свечи всё ещё направлены вниз; ищем вход только в указанной зоне."
+        return "монета резко двинулась, но продолжение движения не подтверждено; сейчас входить по одному Pump/Dump рискованно."
 
     @staticmethod
     def _fmt_volume(value: float) -> str:
