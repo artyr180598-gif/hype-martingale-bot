@@ -24,7 +24,7 @@ SETTINGS_PATH = Path("data/pump_settings.json")
 @dataclass
 class PumpSettings:
     interval_seconds: int = 300
-    threshold_pct: float = 5.0
+    threshold_pct: float = 3.0
     rsi_enabled: bool = False
     rsi_timeframes: tuple[str, ...] = ("15", "60", "240")
     rsi_overbought: float = 80.0
@@ -42,6 +42,7 @@ class PumpSettings:
     confirmation_candles: int = 3
     risk_reward_1: float = 1.5
     risk_reward_2: float = 2.5
+    min_signal_score: int = 60
 
     @classmethod
     def load(cls) -> "PumpSettings":
@@ -80,6 +81,7 @@ class PumpSignal:
     tp1: float | None
     tp2: float | None
     ts: float
+    quality_score: int
 
 
 class PumpScanner:
@@ -268,7 +270,7 @@ class PumpScanner:
                     return None
         imbalance = await self._imbalance(symbol) if self.settings.show_imbalance else None
         confirmations = 1
-        if imbalance is not None and ((direction == "PUMP" and imbalance >= 50) or (direction == "DUMP" and imbalance < 50)):
+        if imbalance is not None and ((direction == "PUMP" and imbalance >= 55) or (direction == "DUMP" and imbalance <= 45)):
             confirmations += 1
         if self.settings.rsi_enabled and rsi:
             confirmations += 1
@@ -277,6 +279,23 @@ class PumpScanner:
         action, reason, entry_low, entry_high, stop, tp1, tp2 = await self._trade_confirmation(
             symbol, direction, float(ticker["lastPrice"]), imbalance
         )
+        score = 20
+        score += min(20, int(max(0.0, change / max(self.settings.threshold_pct, 0.1)) * 10))
+        if imbalance is not None:
+            if direction == "PUMP":
+                score += 20 if imbalance >= 60 else 15 if imbalance >= 55 else 8 if imbalance >= 50 else 0
+            else:
+                score += 20 if imbalance <= 40 else 15 if imbalance <= 45 else 8 if imbalance <= 50 else 0
+        if action in {"LONG", "SHORT"}:
+            score += 30
+        if self.settings.rsi_enabled and rsi:
+            if direction == "PUMP" and any(v >= self.settings.rsi_overbought for v in rsi.values()):
+                score += 10
+            elif direction == "DUMP" and any(v <= self.settings.rsi_oversold for v in rsi.values()):
+                score += 10
+        if (direction == "PUMP" and day_pct > 0) or (direction == "DUMP" and day_pct < 0):
+            score += 5
+        score = min(100, score)
         return PumpSignal(
             symbol=symbol, direction=direction, change_pct=change, start_price=start,
             current_price=float(ticker["lastPrice"]), imbalance_buy_pct=imbalance,
@@ -284,7 +303,7 @@ class PumpScanner:
             funding_rate=float(ticker.get("fundingRate") or 0) if ticker.get("fundingRate") else None,
             listing_ms=self.listings.get(symbol), rsi=rsi, confirmations=confirmations,
             trade_action=action, trade_reason=reason, entry_low=entry_low, entry_high=entry_high,
-            stop_price=stop, tp1=tp1, tp2=tp2, ts=time.time(),
+            stop_price=stop, tp1=tp1, tp2=tp2, ts=time.time(), quality_score=score,
         )
 
     async def _trade_confirmation(self, symbol: str, direction: str, price: float, imbalance: float | None):
@@ -298,7 +317,8 @@ class PumpScanner:
             n = self.settings.confirmation_candles
             if len(closes) < n + 5:
                 return "WAIT", "Недостаточно свечей для подтверждения.", None, None, None, None, None
-            recent = closes[-n:]
+            # REST klines are reverse-sorted and the newest candle may still be open.
+            recent = closes[-(n + 1):-1]
             recent_return = (recent[-1] / recent[0] - 1) * 100
             if direction == "PUMP":
                 aligned = recent_return > 0 and (imbalance is None or imbalance >= 50)
@@ -343,6 +363,8 @@ class PumpScanner:
             data = await self._get(BYBIT_KLINE_URL.format(symbol=symbol, interval=interval))
             rows = data.get("result", {}).get("list", [])
             closes = [float(row[4]) for row in reversed(rows)]
+            if len(closes) > 15:
+                closes = closes[:-1]
             if len(closes) < 15:
                 return None
             gains, losses = [], []
@@ -382,7 +404,8 @@ class PumpScanner:
             lines.append(f"🗓 Листинг: {age_days} дн.")
         if s.rsi:
             lines.append("📊 RSI: " + " | ".join(f"{tf}={v:.1f}" for tf, v in s.rsi.items()))
-        lines.append(f"📡 Сигнал: {s.confirmations}")
+        lines.append(f"📡 Подтверждений: {s.confirmations}")
+        lines.append(f"🧮 Качество сигнала: {s.quality_score}/100")
         lines.append("")
         lines.append(f"🧭 Решение: {s.trade_action}")
         lines.append(f"ℹ️ {s.trade_reason}")
