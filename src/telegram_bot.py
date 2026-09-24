@@ -33,6 +33,15 @@ class TelegramBot:
         self.session = aiohttp.ClientSession()
         self.running = True
         await self._api('deleteWebhook', {'drop_pending_updates': False})
+        await self._api('setMyCommands', {'commands': [
+            {'command': 'start', 'description': 'Открыть меню'},
+            {'command': 'menu', 'description': 'Показать меню'},
+            {'command': 'scan', 'description': 'Сканировать рынок'},
+            {'command': 'btc', 'description': 'BTC'},
+            {'command': 'flow', 'description': 'Order Flow'},
+            {'command': 'health', 'description': 'Проверить данные'},
+        ]})
+        await self._send(self.chat_id, 'HyperData Signal Terminal\\n\\nВыбери действие ниже.', keyboard=True)
         self.task = asyncio.create_task(self._poll(), name='telegram-poll')
 
     async def stop(self):
