@@ -348,7 +348,12 @@ class PumpScanner:
                 )
             return []
 
-        log.info("Scanner candidates: %d (universe=%d tickers=%d)", len(candidates), len(self.ws_symbols), len(self.ticker_cache))
+        log.info(
+            "Scanner candidates: %d (universe=%d tickers=%d)",
+            len(candidates),
+            len(self.ws_symbols),
+            len(self.ticker_cache),
+        )
         # Do not hit REST for hundreds of candidates at once.
         candidates.sort(key=lambda x: abs(x[2]), reverse=True)
         candidates = candidates[:20]
