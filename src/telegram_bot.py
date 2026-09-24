@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 class TelegramBot:
     def __init__(self, hub):
         self.hub = hub
-        self.token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+        self.token = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN', '')
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID', '')
         self.analyzer = ConfluenceAnalyzer(hub, int(os.getenv('SIGNAL_MIN_SCORE', '70')))
         self.offset = 0
@@ -28,7 +28,7 @@ class TelegramBot:
 
     async def start(self):
         if not self.token or not self.chat_id:
-            raise RuntimeError('TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required')
+            raise RuntimeError('TELEGRAM_BOT_TOKEN/TELEGRAM_TOKEN and TELEGRAM_CHAT_ID are required')
         self.session = aiohttp.ClientSession()
         self.running = True
         await self._api('deleteWebhook', {'drop_pending_updates': False})
