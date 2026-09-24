@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from statistics import mean
 
@@ -48,7 +49,13 @@ class ConfluenceAnalyzer:
         short_points = 0
         evidence = {}
 
-        candles = await self.hub.market.get_candles(symbol, "15m", 120)
+        started = time.monotonic()
+        log.info("Signal analysis start: %s", symbol)
+        try:
+            candles = await asyncio.wait_for(self.hub.market.get_candles(symbol, "15m", 120), timeout=8)
+        except asyncio.TimeoutError:
+            log.warning("Signal analysis timeout at 15m candles: %s", symbol)
+            return None
         if len(candles) < 30:
             warnings.append("15m candles incomplete")
         else:
@@ -70,7 +77,11 @@ class ConfluenceAnalyzer:
             else:
                 warnings.append("15m trend is mixed")
 
-            h1 = await self.hub.market.get_candles(symbol, "1h", 80)
+            try:
+                h1 = await asyncio.wait_for(self.hub.market.get_candles(symbol, "1h", 80), timeout=8)
+            except asyncio.TimeoutError:
+                log.warning("Signal analysis timeout at 1h candles: %s", symbol)
+                h1 = []
             if len(h1) >= 25:
                 hcl = [float(c["close"]) for c in h1]
                 hfast, hslow = mean(hcl[-6:]), mean(hcl[-20:])
@@ -168,7 +179,7 @@ class ConfluenceAnalyzer:
         evidence["price"] = price
         evidence["score_components"] = {"long": long_points, "short": short_points}
 
-        return AnalysisSignal(
+        signal = AnalysisSignal(
             symbol=symbol,
             direction=direction,
             score=score,
@@ -182,6 +193,8 @@ class ConfluenceAnalyzer:
             warnings=warnings,
             data=evidence,
         )
+        log.info("Signal analysis done: %s direction=%s score=%d elapsed=%.2fs", symbol, direction, score, time.monotonic() - started)
+        return signal
 
     @staticmethod
     def _atr(candles: list[dict]) -> float:
@@ -210,6 +223,8 @@ class ConfluenceAnalyzer:
         if not symbols:
             log.warning("Signal scan has no symbols")
             return []
+        scan_started = time.monotonic()
+        log.info("Signal scan started: symbols=%d limit=%d", len(symbols), limit)
 
         # The old implementation analyzed every symbol sequentially. With 50
         # symbols and several HTTP requests per symbol, one slow exchange call
@@ -251,5 +266,6 @@ class ConfluenceAnalyzer:
             len(found),
             failed,
             len(pending),
+            time.monotonic() - scan_started,
         )
         return found[:limit]
