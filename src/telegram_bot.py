@@ -7,6 +7,7 @@ import aiohttp
 from aiohttp import web
 
 from src.strategies.pump_scanner import PumpScanner
+from src.strategies.signal_confirmation import SignalConfirmation
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class TelegramBot:
         self.telegram_cooldown_until = 0.0
         self.last_telegram_cooldown_log = 0.0
         self.scanner = PumpScanner()
+        self.confirmation = SignalConfirmation()
         self.menu_keyboard = {
             'keyboard': [
                 [{'text': '🔎 Сканировать'}, {'text': '⚙️ Настройки'}],
@@ -81,6 +83,7 @@ class TelegramBot:
             raise RuntimeError('TELEGRAM_BOT_TOKEN/TELEGRAM_TOKEN and TELEGRAM_CHAT_ID are required')
         self.session = aiohttp.ClientSession()
         await self.scanner.start()
+        await self.confirmation.start()
         self.running = True
 
         # Use Telegram webhook instead of getUpdates polling. The previous logs showed
@@ -113,6 +116,7 @@ class TelegramBot:
                 except asyncio.CancelledError:
                     pass
         await self.scanner.stop()
+        await self.confirmation.stop()
         if self.web_runner:
             try:
                 await self._api('deleteWebhook', {'drop_pending_updates': False})
@@ -134,7 +138,11 @@ class TelegramBot:
                     signals = sorted(signals, key=lambda s: (s.quality_score, abs(s.change_pct)), reverse=True)[:3]
                     for signal in signals:
                         try:
-                            await self._send(self.chat_id, self.scanner.format_signal(signal))
+                            sent = await self._send(self.chat_id, self.scanner.format_signal(signal))
+                            if sent:
+                                # Independent second-pass confirmation starts immediately after the original alert.
+                                result = await self.confirmation.check(signal.symbol, signal.direction)
+                                await self._send(self.chat_id, self.confirmation.format_result(result))
                         except Exception as exc:
                             log.warning('Automatic signal delivery paused: %s', exc)
                             break
@@ -234,7 +242,10 @@ class TelegramBot:
             await self._send(chat_id, 'Сейчас нет нового Pump/Dump, прошедшего выбранные фильтры.')
             return
         for signal in signals:
-            await self._send(chat_id, self.scanner.format_signal(signal))
+            sent = await self._send(chat_id, self.scanner.format_signal(signal))
+            if sent:
+                result = await self.confirmation.check(signal.symbol, signal.direction)
+                await self._send(chat_id, self.confirmation.format_result(result))
 
     async def _settings(self, chat_id):
         s = self.scanner.settings
@@ -246,7 +257,8 @@ class TelegramBot:
             f'3. RSI: {"ON" if s.rsi_enabled else "OFF"} ({rsi_tfs}), уровни {s.rsi_overbought:.0f}/{s.rsi_oversold:.0f}\n'
             f'4. Рост/падение 24ч: {"ON" if s.day_filter_enabled else "OFF"} ({s.day_min_pct:.1f}%)\n'
             f'5. Типы сигналов: {s.signal_types}\n'
-            f'6. Минимальное качество авто-сигнала: {s.min_signal_score}/100\n\n'
+            f'6. Минимальное качество авто-сигнала: {s.min_signal_score}/100\n'
+            '7. Вторая проверка: EMA 1m + RSI 1m + ADX/DI 5m + объём + стакан + OI\n\n'
             f'Доп. данные: дисбаланс {"ON" if s.show_imbalance else "OFF"}, объём {"ON" if s.show_volume else "OFF"}, funding {"ON" if s.show_funding else "OFF"}, листинг {"ON" if s.show_listing else "OFF"}.\n\n'
             'Базовая логика: цена должна пройти порог относительно минимума/максимума внутри интервала.'
         )
