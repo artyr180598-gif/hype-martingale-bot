@@ -29,6 +29,13 @@ class TelegramBot:
         self.scanner = PumpScanner()
         self.confirmation = SignalConfirmation()
         self.confirmation_tasks: set[asyncio.Task] = set()
+        # Delivery layer: keep scanning unchanged, but aggregate/rank alerts before Telegram.
+        self.recent_alerts: dict[tuple[str, str], dict] = {}
+        self.global_alert_times: list[float] = []
+        self.alert_aggregation_seconds = 8.0
+        self.per_symbol_cooldown_seconds = 12 * 60
+        self.global_alert_window_seconds = 10 * 60
+        self.global_alert_cap = 3
         self.menu_keyboard = {
             'keyboard': [
                 [{'text': '🔎 Сканировать'}, {'text': '⚙️ Настройки'}],
@@ -134,19 +141,7 @@ class TelegramBot:
             try:
                 signals = await self.scanner.update()
                 if signals:
-                    # Alert-only by design: send at most three strongest fresh signals per cycle.
-                    # This prevents a volatile market from flooding the Telegram chat.
-                    signals = [s for s in signals if s.quality_score >= self.scanner.settings.min_signal_score]
-                    signals = sorted(signals, key=lambda s: (s.quality_score, abs(s.change_pct)), reverse=True)[:3]
-                    for signal in signals:
-                        try:
-                            sent = await self._send(self.chat_id, self.scanner.format_signal(signal))
-                            if sent:
-                                # Primary alert stays untouched. The confirmation layer is informational only.
-                                await self._run_confirmation(signal)
-                        except Exception as exc:
-                            log.warning('Automatic signal delivery paused: %s', exc)
-                            break
+                    await self._process_auto_candidates(signals)
             except asyncio.CancelledError:
                 return
             except Exception:
@@ -232,32 +227,121 @@ class TelegramBot:
         else:
             await self._send(chat_id, 'Нажми «⚙️ Настройки» или «🔎 Сканировать».', keyboard=True)
 
-    async def _run_confirmation(self, signal, chat_id=None):
-        target_chat = chat_id or self.chat_id
+    def _prune_alert_state(self, now: float) -> None:
+        cutoff = now - self.global_alert_window_seconds
+        self.global_alert_times = [t for t in self.global_alert_times if t >= cutoff]
+
+    def _already_alerted(self, signal, now: float) -> bool:
+        state = self.recent_alerts.get((signal.symbol, signal.direction))
+        if not state:
+            return False
+        age = now - state["sent_at"]
+        if age >= self.per_symbol_cooldown_seconds:
+            return False
+        # A materially stronger move may update the existing alert before cooldown expires.
+        return not (
+            abs(signal.change_pct - state["change_pct"]) >= 1.0
+            or signal.quality_score - state["quality_score"] >= 12
+        )
+
+    @staticmethod
+    def _combined_rank(signal, confirmation_result):
+        confirmation_score = confirmation_result.score if confirmation_result else 0
+        # Do not replace the primary score: confirmation is an independent second dimension.
+        # Movement gets a capped bonus so a very late/large move cannot win on size alone.
+        move_bonus = min(12.0, max(0.0, abs(signal.change_pct) - 3.0) * 2.0)
+        verdict_bonus = {
+            "СИЛЬНОЕ ПРОДОЛЖЕНИЕ": 8,
+            "ПРОДОЛЖЕНИЕ ВЕРОЯТНО": 4,
+            "СМЕШАННО / ЖДАТЬ": 0,
+            "ПРОДОЛЖЕНИЕ НЕ ПОДТВЕРЖДЕНО": -4,
+            "ПРОВЕРКА НЕ ПОЛУЧЕНА": -8,
+        }.get(getattr(confirmation_result, "verdict", ""), -8)
+        return signal.quality_score * 0.55 + confirmation_score * 0.35 + move_bonus + verdict_bonus
+
+    def _format_ranked_signal(self, signal, confirmation_result, rank: int) -> str:
+        base = self.scanner.format_signal(signal)
+        if confirmation_result is None:
+            return base + "\n\n🔎 Вторая проверка: данные не получены — ничего не выдумываем."
+        m = confirmation_result.metrics
+        lines = [
+            "",
+            "━━━━━━━━━━━━",
+            f"🔎 Независимая проверка: {confirmation_result.score}/100 · {confirmation_result.verdict}",
+        ]
+        if confirmation_result.reasons:
+            lines += ["✅ " + x for x in confirmation_result.reasons[:4]]
+        if confirmation_result.warnings:
+            lines += ["⚠️ " + x for x in confirmation_result.warnings[:3]]
+        if m:
+            lines.append(
+                f"📐 ADX 5m {m.get('adx_5m', -1):.1f} · "
+                f"Volume 1m {m.get('volume_ratio', 0):.1f}x · "
+                f"OI {m.get('oi_change_pct', -999):+.2f}%"
+            )
+        lines.append("")
+        lines.append(f"📌 Радар-рейтинг: {rank}/100")
+        lines.append("⚠️ Это фильтр качества, а не гарантия движения.")
+        return base + "\n" + "\n".join(lines)
+
+    async def _rank_and_send(self, signals, chat_id):
+        now = time.monotonic()
+        self._prune_alert_state(now)
+        eligible = []
+        for signal in signals:
+            if signal.quality_score < self.scanner.settings.min_signal_score:
+                continue
+            if self._already_alerted(signal, now):
+                log.info("Radar suppressed duplicate %s %s %.2f%%", signal.symbol, signal.direction, signal.change_pct)
+                continue
+            eligible.append(signal)
+
+        if not eligible:
+            return
+
+        # Collect independent confirmation before delivery. This replaces the old
+        # 2-3 Telegram messages per signal with one enriched alert.
+        checks = await asyncio.gather(
+            *(self.confirmation.check(s.symbol, s.direction) for s in eligible),
+            return_exceptions=True,
+        )
+        ranked = []
+        for signal, check in zip(eligible, checks):
+            result = None if isinstance(check, Exception) else check
+            ranked.append((self._combined_rank(signal, result), signal, result))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+
+        # Hard global cap is deliberately small; candidates remain in logs/Radar state
+        # instead of flooding the chat.
+        available_slots = max(0, self.global_alert_cap - len(self.global_alert_times))
+        if available_slots <= 0:
+            for _, signal, _ in ranked:
+                log.info("Radar suppressed by global cap: %s %s", signal.symbol, signal.direction)
+            return
+
+        for rank_value, signal, result in ranked[:available_slots]:
+            # A short aggregation pause lets simultaneous candidates be ranked together
+            # without delaying the monitor cycle for long.
+            await asyncio.sleep(0)
+            rank_display = max(0, min(100, round(rank_value)))
+            sent = await self._send(
+                chat_id,
+                self._format_ranked_signal(signal, result, rank_display),
+            )
+            if sent:
+                self.recent_alerts[(signal.symbol, signal.direction)] = {
+                    "sent_at": now,
+                    "change_pct": signal.change_pct,
+                    "quality_score": signal.quality_score,
+                    "radar_score": rank_display,
+                }
+                self.global_alert_times.append(now)
+
+    async def _process_auto_candidates(self, signals):
         try:
-            result = await self.confirmation.check(signal.symbol, signal.direction)
-            await self._send(target_chat, self.confirmation.format_result(result))
-
-            # One lightweight delayed recheck. It does not cancel the primary alert
-            # and is only sent if the confirmation meaningfully changes.
-            async def delayed_recheck():
-                await asyncio.sleep(20)
-                latest = await self.confirmation.check(signal.symbol, signal.direction)
-                score_delta = abs(latest.score - result.score)
-                if latest.verdict != result.verdict or score_delta >= 10:
-                    await self._send(
-                        target_chat,
-                        self.confirmation.format_result(latest, label="КОНТРОЛЬ ЧЕРЕЗ 20 СЕК"),
-                    )
-
-            task = asyncio.create_task(delayed_recheck(), name=f"confirmation-recheck-{signal.symbol}")
-            self.confirmation_tasks.add(task)
-            task.add_done_callback(self.confirmation_tasks.discard)
-        except asyncio.CancelledError:
-            raise
+            await self._rank_and_send(signals, self.chat_id)
         except Exception as exc:
-            # Confirmation is optional. Never let it break the primary scanner.
-            log.warning("Confirmation delivery failed for %s: %s", signal.symbol, type(exc).__name__)
+            log.warning("Automatic Radar delivery failed: %s", type(exc).__name__)
 
     async def _manual_scan(self, chat_id):
         await self._send(chat_id, 'Проверяю Bybit linear USDT рынок...')
@@ -269,10 +353,7 @@ class TelegramBot:
         if not signals:
             await self._send(chat_id, 'Сейчас нет нового Pump/Dump, прошедшего выбранные фильтры.')
             return
-        for signal in signals:
-            sent = await self._send(chat_id, self.scanner.format_signal(signal))
-            if sent:
-                await self._run_confirmation(signal, chat_id)
+        await self._rank_and_send(signals, chat_id)
 
     async def _settings(self, chat_id):
         s = self.scanner.settings
