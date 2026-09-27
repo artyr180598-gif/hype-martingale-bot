@@ -141,7 +141,43 @@ class TelegramBot:
             try:
                 signals = await self.scanner.update()
                 if signals:
-                    await self._process_auto_candidates(signals)
+                    # Keep the original fast path: the primary scanner decides when an
+                    # event is actionable, then one independent check follows immediately.
+                    signals = [
+                        s for s in signals
+                        if s.quality_score >= self.scanner.settings.min_signal_score
+                        and s.trade_action in {"LONG", "SHORT"}
+                    ]
+                    signals = sorted(
+                        signals,
+                        key=lambda s: (s.quality_score, abs(s.change_pct)),
+                        reverse=True,
+                    )[:3]
+
+                    for signal in signals:
+                        try:
+                            sent = await self._send(
+                                self.chat_id,
+                                self.scanner.format_signal(signal),
+                            )
+                            if sent:
+                                # One fast confirmation only. It is informational and
+                                # never blocks the primary signal or converts it to WAIT.
+                                result = await self.confirmation.check(
+                                    signal.symbol, signal.direction
+                                )
+                                await self._send(
+                                    self.chat_id,
+                                    self.confirmation.format_result(
+                                        result, label="БЫСТРАЯ ПРОВЕРКА"
+                                    ),
+                                )
+                        except Exception as exc:
+                            log.warning(
+                                'Automatic signal delivery paused: %s',
+                                type(exc).__name__,
+                            )
+                            break
             except asyncio.CancelledError:
                 return
             except Exception:
@@ -170,7 +206,10 @@ class TelegramBot:
             if now < self.telegram_cooldown_until:
                 remaining = int(self.telegram_cooldown_until - now)
                 if now - self.last_telegram_cooldown_log >= 30:
-                    log.warning('Telegram outbound cooldown active: %ss remaining', remaining)
+                    log.warning(
+                        'Telegram outbound cooldown active: %ss remaining',
+                        remaining,
+                    )
                     self.last_telegram_cooldown_log = now
                 return False
             if hasattr(self, '_next_send_at'):
@@ -208,7 +247,11 @@ class TelegramBot:
         command = aliases.get(command, command).lower()
 
         if command.startswith('/start') or command in {'menu', '/menu'}:
-            await self._send(chat_id, 'Pump/Dump Monitor на Bybit\n\nМониторинг работает автоматически.', keyboard=True)
+            await self._send(
+                chat_id,
+                'Pump/Dump Monitor на Bybit\\n\\nМониторинг работает автоматически.',
+                keyboard=True,
+            )
         elif command in {'scan', '/scan', 'pump', 'dump', 'both'}:
             if command == 'pump':
                 self.scanner.settings.signal_types = 'PUMP'
@@ -225,163 +268,64 @@ class TelegramBot:
         elif command in {'health', '/health'}:
             await self._health(chat_id)
         else:
-            await self._send(chat_id, 'Нажми «⚙️ Настройки» или «🔎 Сканировать».', keyboard=True)
-
-    def _prune_alert_state(self, now: float) -> None:
-        cutoff = now - self.global_alert_window_seconds
-        self.global_alert_times = [t for t in self.global_alert_times if t >= cutoff]
-
-    def _already_alerted(self, signal, now: float) -> bool:
-        state = self.recent_alerts.get((signal.symbol, signal.direction))
-        if not state:
-            return False
-        age = now - state["sent_at"]
-        if age >= self.per_symbol_cooldown_seconds:
-            return False
-        # A materially stronger move may update the existing alert before cooldown expires.
-        return not (
-            abs(signal.change_pct - state["change_pct"]) >= 1.0
-            or signal.quality_score - state["quality_score"] >= 12
-        )
-
-    @staticmethod
-    def _combined_rank(signal, confirmation_result):
-        confirmation_score = confirmation_result.score if confirmation_result else 0
-        # Do not replace the primary score: confirmation is an independent second dimension.
-        # Movement gets a capped bonus so a very late/large move cannot win on size alone.
-        move_bonus = min(12.0, max(0.0, abs(signal.change_pct) - 3.0) * 2.0)
-        verdict_bonus = {
-            "СИЛЬНОЕ ПРОДОЛЖЕНИЕ": 8,
-            "ПРОДОЛЖЕНИЕ ВЕРОЯТНО": 4,
-            "СМЕШАННО / ЖДАТЬ": 0,
-            "ПРОДОЛЖЕНИЕ НЕ ПОДТВЕРЖДЕНО": -4,
-            "ПРОВЕРКА НЕ ПОЛУЧЕНА": -8,
-        }.get(getattr(confirmation_result, "verdict", ""), -8)
-        return signal.quality_score * 0.55 + confirmation_score * 0.35 + move_bonus + verdict_bonus
-
-    def _format_ranked_signal(self, signal, confirmation_result, rank: int) -> str:
-        base = self.scanner.format_signal(signal)
-        if confirmation_result is None:
-            # This path should normally be filtered before delivery; keep the guard
-            # so missing data can never be presented as a usable signal.
-            return base + "\n\n⛔ Сигнал не отправляется: подтверждение не получено."
-        m = confirmation_result.metrics
-        lines = [
-            "",
-            "━━━━━━━━━━━━",
-            f"🔎 Независимая проверка: {confirmation_result.score}/100 · {confirmation_result.verdict}",
-        ]
-        if confirmation_result.reasons:
-            lines += ["✅ " + x for x in confirmation_result.reasons[:4]]
-        if confirmation_result.warnings:
-            lines += ["⚠️ " + x for x in confirmation_result.warnings[:3]]
-        if m:
-            lines.append(
-                f"📐 ADX 5m {m.get('adx_5m', -1):.1f} · "
-                f"Volume 1m {m.get('volume_ratio', 0):.1f}x · "
-                f"OI {m.get('oi_change_pct', -999):+.2f}%"
-            )
-        lines.append("")
-        lines.append(f"📌 Радар-рейтинг: {rank}/100")
-        lines.append("⚠️ Это фильтр качества, а не гарантия движения.")
-        return base + "\n" + "\n".join(lines)
-
-    async def _rank_and_send(self, signals, chat_id):
-        now = time.monotonic()
-        self._prune_alert_state(now)
-        eligible = []
-        for signal in signals:
-            if signal.quality_score < self.scanner.settings.min_signal_score:
-                continue
-            if self._already_alerted(signal, now):
-                log.info("Radar suppressed duplicate %s %s %.2f%%", signal.symbol, signal.direction, signal.change_pct)
-                continue
-            eligible.append(signal)
-
-        if not eligible:
-            return
-
-        # Collect independent confirmation before delivery. This replaces the old
-        # 2-3 Telegram messages per signal with one enriched alert.
-        checks = await asyncio.gather(
-            *(self.confirmation.check(s.symbol, s.direction) for s in eligible),
-            return_exceptions=True,
-        )
-        ranked = []
-        for signal, check in zip(eligible, checks):
-            result = None if isinstance(check, Exception) else check
-
-            # Telegram is for actionable signals only. The scanner may discover many
-            # candidates, but we do not send WAIT / "watch it" events to the user.
-            if signal.trade_action not in {"LONG", "SHORT"}:
-                log.info(
-                    "Radar suppressed non-actionable signal: %s %s action=%s primary=%s",
-                    signal.symbol, signal.direction, signal.trade_action, signal.quality_score,
-                )
-                continue
-
-            # We require the independent check to agree enough with the primary setup.
-            # 58 is deliberately moderate: this is a quality filter, not a wall that
-            # only lets through perfect-looking setups.
-            if result is None or result.verdict == "ПРОВЕРКА НЕ ПОЛУЧЕНА":
-                log.info(
-                    "Radar suppressed missing confirmation: %s %s primary=%s",
-                    signal.symbol, signal.direction, signal.quality_score,
-                )
-                continue
-            if result.score < 58:
-                log.info(
-                    "Radar suppressed weak confirmation: %s %s primary=%s confirm=%s",
-                    signal.symbol, signal.direction, signal.quality_score, result.score,
-                )
-                continue
-
-            ranked.append((self._combined_rank(signal, result), signal, result))
-        ranked.sort(key=lambda x: x[0], reverse=True)
-
-        # Hard global cap is deliberately small; candidates remain in logs/Radar state
-        # instead of flooding the chat.
-        available_slots = max(0, self.global_alert_cap - len(self.global_alert_times))
-        if available_slots <= 0:
-            for _, signal, _ in ranked:
-                log.info("Radar suppressed by global cap: %s %s", signal.symbol, signal.direction)
-            return
-
-        for rank_value, signal, result in ranked[:available_slots]:
-            # A short aggregation pause lets simultaneous candidates be ranked together
-            # without delaying the monitor cycle for long.
-            await asyncio.sleep(0)
-            rank_display = max(0, min(100, round(rank_value)))
-            sent = await self._send(
+            await self._send(
                 chat_id,
-                self._format_ranked_signal(signal, result, rank_display),
+                'Нажми «⚙️ Настройки» или «🔎 Сканировать».',
+                keyboard=True,
             )
-            if sent:
-                self.recent_alerts[(signal.symbol, signal.direction)] = {
-                    "sent_at": now,
-                    "change_pct": signal.change_pct,
-                    "quality_score": signal.quality_score,
-                    "radar_score": rank_display,
-                }
-                self.global_alert_times.append(now)
-
-    async def _process_auto_candidates(self, signals):
-        try:
-            await self._rank_and_send(signals, self.chat_id)
-        except Exception as exc:
-            log.warning("Automatic Radar delivery failed: %s", type(exc).__name__)
 
     async def _manual_scan(self, chat_id):
         await self._send(chat_id, 'Проверяю Bybit linear USDT рынок...')
         try:
-            signals = await asyncio.wait_for(self.scanner.scan_once(), timeout=25)
+            signals = await asyncio.wait_for(
+                self.scanner.scan_once(), timeout=25
+            )
         except asyncio.TimeoutError:
-            await self._send(chat_id, 'Проверка не завершилась за 25 секунд. Сигнал не придумываю.')
+            await self._send(
+                chat_id,
+                'Проверка не завершилась за 25 секунд. Сигнал не придумываю.',
+            )
             return
         if not signals:
-            await self._send(chat_id, 'Сейчас нет нового Pump/Dump, прошедшего выбранные фильтры.')
+            await self._send(
+                chat_id,
+                'Сейчас нет нового Pump/Dump, прошедшего выбранные фильтры.',
+            )
             return
-        await self._rank_and_send(signals, chat_id)
+
+        signals = [
+            s for s in signals
+            if s.quality_score >= self.scanner.settings.min_signal_score
+            and s.trade_action in {"LONG", "SHORT"}
+        ]
+        signals = sorted(
+            signals,
+            key=lambda s: (s.quality_score, abs(s.change_pct)),
+            reverse=True,
+        )[:3]
+
+        if not signals:
+            await self._send(
+                chat_id,
+                'Есть движение, но сейчас нет готового LONG/SHORT с текущим входом.',
+            )
+            return
+
+        for signal in signals:
+            sent = await self._send(
+                chat_id,
+                self.scanner.format_signal(signal),
+            )
+            if sent:
+                result = await self.confirmation.check(
+                    signal.symbol, signal.direction
+                )
+                await self._send(
+                    chat_id,
+                    self.confirmation.format_result(
+                        result, label="БЫСТРАЯ ПРОВЕРКА"
+                    ),
+                )
 
     async def _settings(self, chat_id):
         s = self.scanner.settings
