@@ -285,7 +285,7 @@ class TelegramBot:
             f'4. Рост/падение 24ч: {"ON" if s.day_filter_enabled else "OFF"} ({s.day_min_pct:.1f}%)\n'
             f'5. Типы сигналов: {s.signal_types}\n'
             f'6. Минимальное качество авто-сигнала: {s.min_signal_score}/100\n'
-            '7. Вторая проверка: EMA 1m + RSI 1m + ADX/DI 5m + объём + стакан + OI\n\n'
+            '7. Вторая проверка: структура 5m + ADX/DI + наклон ADX + EMA + объём + OI + ATR + стакан + RSI\n\n'
             f'Доп. данные: дисбаланс {"ON" if s.show_imbalance else "OFF"}, объём {"ON" if s.show_volume else "OFF"}, funding {"ON" if s.show_funding else "OFF"}, листинг {"ON" if s.show_listing else "OFF"}.\n\n'
             'Базовая логика: цена должна пройти порог относительно минимума/максимума внутри интервала.'
         )
