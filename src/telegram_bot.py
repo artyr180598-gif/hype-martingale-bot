@@ -262,7 +262,9 @@ class TelegramBot:
     def _format_ranked_signal(self, signal, confirmation_result, rank: int) -> str:
         base = self.scanner.format_signal(signal)
         if confirmation_result is None:
-            return base + "\n\n🔎 Вторая проверка: данные не получены — ничего не выдумываем."
+            # This path should normally be filtered before delivery; keep the guard
+            # so missing data can never be presented as a usable signal.
+            return base + "\n\n⛔ Сигнал не отправляется: подтверждение не получено."
         m = confirmation_result.metrics
         lines = [
             "",
@@ -308,16 +310,32 @@ class TelegramBot:
         ranked = []
         for signal, check in zip(eligible, checks):
             result = None if isinstance(check, Exception) else check
-            if result is None or result.verdict == "ПРОВЕРКА НЕ ПОЛУЧЕНА":
-                # If independent data is unavailable, only an exceptionally strong primary
-                # event may pass. We never pretend missing confirmation is confirmation.
-                if signal.quality_score < 80:
-                    log.info("Radar suppressed without confirmation: %s %s primary=%s", signal.symbol, signal.direction, signal.quality_score)
-                    continue
-            elif result.score < 42 and signal.quality_score < 80:
-                # Keep the radar open, but do not turn a weakly-confirmed impulse into a Telegram alert.
-                log.info("Radar suppressed weak confluence: %s %s primary=%s confirm=%s", signal.symbol, signal.direction, signal.quality_score, result.score)
+
+            # Telegram is for actionable signals only. The scanner may discover many
+            # candidates, but we do not send WAIT / "watch it" events to the user.
+            if signal.trade_action not in {"LONG", "SHORT"}:
+                log.info(
+                    "Radar suppressed non-actionable signal: %s %s action=%s primary=%s",
+                    signal.symbol, signal.direction, signal.trade_action, signal.quality_score,
+                )
                 continue
+
+            # We require the independent check to agree enough with the primary setup.
+            # 58 is deliberately moderate: this is a quality filter, not a wall that
+            # only lets through perfect-looking setups.
+            if result is None or result.verdict == "ПРОВЕРКА НЕ ПОЛУЧЕНА":
+                log.info(
+                    "Radar suppressed missing confirmation: %s %s primary=%s",
+                    signal.symbol, signal.direction, signal.quality_score,
+                )
+                continue
+            if result.score < 58:
+                log.info(
+                    "Radar suppressed weak confirmation: %s %s primary=%s confirm=%s",
+                    signal.symbol, signal.direction, signal.quality_score, result.score,
+                )
+                continue
+
             ranked.append((self._combined_rank(signal, result), signal, result))
         ranked.sort(key=lambda x: x[0], reverse=True)
 
