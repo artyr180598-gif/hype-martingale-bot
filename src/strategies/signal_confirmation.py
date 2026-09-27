@@ -118,7 +118,7 @@ class SignalConfirmation:
             adx_values.append((adx_values[-1] * (period - 1) + value) / period)
         if len(adx_values) < 2:
             return None
-        return adx_values[-1], adx_values[-2], pdis[-1], mdis[-1], pdis[-2] - mdis[-2]
+        return adx_values[-1], adx_values[-2], pdis[-1], mdis[-1], 0.0
 
     @staticmethod
     def _atr_stats(
@@ -260,7 +260,7 @@ class SignalConfirmation:
 
             # 20 points: ADX + DI direction + ADX slope.
             if adx_data is not None:
-                adx, adx_prev, pdi, mdi, previous_di_spread = adx_data
+                adx, adx_prev, pdi, mdi, _ = adx_data
                 directional_ok = pdi > mdi if bullish else mdi > pdi
                 adx_rising = adx > adx_prev
                 if directional_ok:
