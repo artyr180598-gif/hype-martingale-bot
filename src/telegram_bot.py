@@ -308,6 +308,16 @@ class TelegramBot:
         ranked = []
         for signal, check in zip(eligible, checks):
             result = None if isinstance(check, Exception) else check
+            if result is None or result.verdict == "ПРОВЕРКА НЕ ПОЛУЧЕНА":
+                # If independent data is unavailable, only an exceptionally strong primary
+                # event may pass. We never pretend missing confirmation is confirmation.
+                if signal.quality_score < 80:
+                    log.info("Radar suppressed without confirmation: %s %s primary=%s", signal.symbol, signal.direction, signal.quality_score)
+                    continue
+            elif result.score < 42 and signal.quality_score < 80:
+                # Keep the radar open, but do not turn a weakly-confirmed impulse into a Telegram alert.
+                log.info("Radar suppressed weak confluence: %s %s primary=%s confirm=%s", signal.symbol, signal.direction, signal.quality_score, result.score)
+                continue
             ranked.append((self._combined_rank(signal, result), signal, result))
         ranked.sort(key=lambda x: x[0], reverse=True)
 
