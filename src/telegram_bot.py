@@ -28,6 +28,7 @@ class TelegramBot:
         self.last_telegram_cooldown_log = 0.0
         self.scanner = PumpScanner()
         self.confirmation = SignalConfirmation()
+        self.confirmation_tasks: set[asyncio.Task] = set()
         self.menu_keyboard = {
             'keyboard': [
                 [{'text': '🔎 Сканировать'}, {'text': '⚙️ Настройки'}],
@@ -108,7 +109,7 @@ class TelegramBot:
 
     async def stop(self):
         self.running = False
-        for task in (self.task, self.monitor_task):
+        for task in (self.task, self.monitor_task, *self.confirmation_tasks):
             if task:
                 task.cancel()
                 try:
@@ -117,6 +118,7 @@ class TelegramBot:
                     pass
         await self.scanner.stop()
         await self.confirmation.stop()
+        self.confirmation_tasks.clear()
         if self.web_runner:
             try:
                 await self._api('deleteWebhook', {'drop_pending_updates': False})
@@ -140,9 +142,8 @@ class TelegramBot:
                         try:
                             sent = await self._send(self.chat_id, self.scanner.format_signal(signal))
                             if sent:
-                                # Independent second-pass confirmation starts immediately after the original alert.
-                                result = await self.confirmation.check(signal.symbol, signal.direction)
-                                await self._send(self.chat_id, self.confirmation.format_result(result))
+                                # Primary alert stays untouched. The confirmation layer is informational only.
+                                await self._run_confirmation(signal)
                         except Exception as exc:
                             log.warning('Automatic signal delivery paused: %s', exc)
                             break
@@ -231,6 +232,33 @@ class TelegramBot:
         else:
             await self._send(chat_id, 'Нажми «⚙️ Настройки» или «🔎 Сканировать».', keyboard=True)
 
+    async def _run_confirmation(self, signal, chat_id=None):
+        target_chat = chat_id or self.chat_id
+        try:
+            result = await self.confirmation.check(signal.symbol, signal.direction)
+            await self._send(target_chat, self.confirmation.format_result(result))
+
+            # One lightweight delayed recheck. It does not cancel the primary alert
+            # and is only sent if the confirmation meaningfully changes.
+            async def delayed_recheck():
+                await asyncio.sleep(20)
+                latest = await self.confirmation.check(signal.symbol, signal.direction)
+                score_delta = abs(latest.score - result.score)
+                if latest.verdict != result.verdict or score_delta >= 10:
+                    await self._send(
+                        target_chat,
+                        self.confirmation.format_result(latest, label="КОНТРОЛЬ ЧЕРЕЗ 20 СЕК"),
+                    )
+
+            task = asyncio.create_task(delayed_recheck(), name=f"confirmation-recheck-{signal.symbol}")
+            self.confirmation_tasks.add(task)
+            task.add_done_callback(self.confirmation_tasks.discard)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Confirmation is optional. Never let it break the primary scanner.
+            log.warning("Confirmation delivery failed for %s: %s", signal.symbol, type(exc).__name__)
+
     async def _manual_scan(self, chat_id):
         await self._send(chat_id, 'Проверяю Bybit linear USDT рынок...')
         try:
@@ -244,8 +272,7 @@ class TelegramBot:
         for signal in signals:
             sent = await self._send(chat_id, self.scanner.format_signal(signal))
             if sent:
-                result = await self.confirmation.check(signal.symbol, signal.direction)
-                await self._send(chat_id, self.confirmation.format_result(result))
+                await self._run_confirmation(signal, chat_id)
 
     async def _settings(self, chat_id):
         s = self.scanner.settings
