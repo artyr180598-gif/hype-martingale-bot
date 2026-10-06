@@ -114,6 +114,67 @@ class SignalConfirmation:
             return None, None
         return sum(values) / len(values), max(values) - min(values) if len(values) > 1 else 0.0
 
+    async def _microstructure(self, symbol: str) -> dict:
+        """Short REST microstructure sample for the candidate only.
+
+        This is deliberately NOT called true OFI: true event-level OFI requires
+        the WebSocket snapshot/delta stream. Here we measure repeated depth,
+        micro-price, and a depth-change proxy without overstating the data.
+        """
+        snaps: list[dict] = []
+        for i in range(4):
+            try:
+                data = await self._get(BYBIT_ORDERBOOK_URL.format(symbol=symbol))
+                result = data.get("result", {})
+                bids = [(float(p), float(q)) for p, q in result.get("b", []) if float(q) > 0]
+                asks = [(float(p), float(q)) for p, q in result.get("a", []) if float(q) > 0]
+                if bids and asks:
+                    bid_value = sum(p * q for p, q in bids)
+                    ask_value = sum(p * q for p, q in asks)
+                    total = bid_value + ask_value
+                    best_bid, best_ask = bids[0][0], asks[0][0]
+                    mid = (best_bid + best_ask) / 2.0
+                    micro = ((best_ask * bid_value) + (best_bid * ask_value)) / total
+                    snaps.append({
+                        "bid_pct": bid_value / total * 100.0,
+                        "mid": mid,
+                        "micro": micro,
+                        "bids": bids,
+                        "asks": asks,
+                    })
+            except Exception:
+                pass
+            if i < 3:
+                await asyncio.sleep(0.25)
+
+        if not snaps:
+            return {}
+
+        avg_bid = sum(x["bid_pct"] for x in snaps) / len(snaps)
+        bid_range = max(x["bid_pct"] for x in snaps) - min(x["bid_pct"] for x in snaps)
+        micro_offsets = [
+            (x["micro"] - x["mid"]) / x["mid"] * 100.0
+            for x in snaps if x["mid"]
+        ]
+        micro_offset = sum(micro_offsets) / len(micro_offsets) if micro_offsets else 0.0
+
+        depth_flow_proxy = None
+        if len(snaps) >= 2:
+            first, last = snaps[0], snaps[-1]
+            bid_change = sum(p * q for p, q in last["bids"]) - sum(p * q for p, q in first["bids"])
+            ask_change = sum(p * q for p, q in last["asks"]) - sum(p * q for p, q in first["asks"])
+            scale = abs(bid_change) + abs(ask_change)
+            if scale > 0:
+                depth_flow_proxy = (bid_change - ask_change) / scale * 100.0
+
+        return {
+            "bid_pct": avg_bid,
+            "bid_range": bid_range,
+            "micro_offset": micro_offset,
+            "depth_flow_proxy": depth_flow_proxy if depth_flow_proxy is not None else 0.0,
+            "snapshots": float(len(snaps)),
+        }
+
     async def _oi_change(self, symbol: str) -> float | None:
         try:
             data = await self._get(BYBIT_OI_URL.format(symbol=symbol))
@@ -254,29 +315,81 @@ class SignalConfirmation:
             else:
                 warnings.append("OI не получен")
 
-            # Persistent book support, not a one-off snapshot.
-            book_avg, book_spread = await self._orderbook_persistence(symbol)
-            book_value = float(book_avg) if book_avg is not None else None
+            # Dynamic microstructure: repeated depth + micro-price + depth-flow proxy.
+            micro = await self._microstructure(symbol)
+            book_value = float(micro["bid_pct"]) if micro else None
+            book_spread = float(micro["bid_range"]) if micro else -1.0
             book_aligned = False
             book_against = False
-            if book_value is not None:
+            depth_proxy = float(micro.get("depth_flow_proxy", 0.0)) if micro else 0.0
+            if micro:
                 book_aligned = book_value >= 52.0 if bullish else book_value <= 48.0
                 book_against = book_value <= 47.0 if bullish else book_value >= 53.0
                 stable = book_spread <= 4.0
                 if book_aligned and stable:
-                    score += 15
+                    score += 12
                     reasons.append(f"Стакан устойчиво поддерживает направление ({book_value:.1f}% bid)")
                 elif book_aligned:
-                    score += 7
-                    warnings.append(f"Стакан поддерживает направление, но меняется ({book_spread:.1f} п.п.)")
+                    score += 5
+                    warnings.append(f"Стакан поддерживает, но меняется ({book_spread:.1f} п.п.)")
                 elif book_against:
-                    warnings.append(f"Стакан заметно против направления ({book_value:.1f}% bid)")
+                    warnings.append(f"Стакан против направления ({book_value:.1f}% bid)")
                 else:
                     warnings.append(f"Стакан нейтрален ({book_value:.1f}% bid)")
+
+                micro_aligned = micro["micro_offset"] >= 0.002 if bullish else micro["micro_offset"] <= -0.002
+                if micro_aligned:
+                    score += 3
+                    reasons.append(f"Micro-price смещён в сторону {'LONG' if bullish else 'SHORT'}")
+
+                proxy_aligned = depth_proxy >= 10.0 if bullish else depth_proxy <= -10.0
+                proxy_against = depth_proxy <= -10.0 if bullish else depth_proxy >= 10.0
+                if proxy_aligned:
+                    score += 5
+                    reasons.append(f"Поток ликвидности стакана поддерживает направление ({depth_proxy:+.1f}%)")
+                elif proxy_against:
+                    warnings.append(f"Поток ликвидности стакана против направления ({depth_proxy:+.1f}%)")
             else:
                 warnings.append("Стакан не получен")
 
-            # Verdict is based on evidence roles, not just arithmetic score.
+            # Absorption proxy: strong executed flow with unusually small price response.
+            # It is explicitly a proxy, not a claim about hidden orders.
+            one_return = (one_m[-1]["close"] / one_m[-2]["close"] - 1.0) * 100.0
+            absorption = (
+                flow_delta is not None
+                and abs(flow_delta) >= 20.0
+                and abs(one_return) <= 0.12
+                and volume_ratio >= 1.15
+            )
+            if absorption:
+                warnings.append("Есть признаки поглощения: сильный поток, но цена почти не продвинулась")
+                score = max(0, score - 8)
+
+            # Exhaustion proxy: price is still moving, but fresh flow/volume are fading.
+            exhaustion = (
+                abs(one_return) >= 0.20
+                and volume_ratio < 1.0
+                and (flow_delta is None or abs(flow_delta) < 8.0)
+            )
+            if exhaustion:
+                warnings.append("Импульс может выдыхаться: цена движется, но свежие поток/объём слабеют")
+                score = max(0, score - 8)
+
+            direct_against = flow_against or book_against or (
+                depth_proxy <= -10.0 if bullish else depth_proxy >= 10.0
+            )
+            continuation_evidence = (
+                (latest["close"] >= local_high * 0.999 if bullish else latest["close"] <= local_low * 1.001)
+                or early_aligned
+            )
+            fresh_flow = flow_aligned or (
+                book_aligned and not book_against
+            ) or (
+                (depth_proxy >= 10.0 if bullish else depth_proxy <= -10.0)
+            )
+            strong = score >= 78 and continuation_evidence and fresh_flow and not direct_against and not absorption and not exhaustion
+            confirmed = score >= 60 and continuation_evidence and fresh_flow and not direct_against and not absorption
+
             # A high sum cannot rescue a clear direct contradiction in flow/book.
             direct_against = flow_against or book_against
             primary_confirmed = score >= 60 and (flow_aligned or book_aligned) and not direct_against
@@ -306,7 +419,11 @@ class SignalConfirmation:
                     "sell_value": sell_value,
                     "oi_change_pct": oi_value if oi_value is not None else -999.0,
                     "orderbook_bid_pct": book_value if book_value is not None else -1.0,
-                    "orderbook_spread_pp": book_spread if book_spread is not None else -1.0,
+                    "orderbook_spread_pp": book_spread,
+                    "depth_flow_proxy_pct": depth_proxy,
+                    "microprice_offset_pct": micro.get("micro_offset", 0.0) if micro else 0.0,
+                    "absorption_proxy": 1.0 if absorption else 0.0,
+                    "exhaustion_proxy": 1.0 if exhaustion else 0.0,
                     "last_5m_body_pct": body,
                     "context_15m_body_pct": context_body,
                     "price_5m": closes[-1] if closes else -1.0,
