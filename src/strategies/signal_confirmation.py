@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 import aiohttp
 
 log = logging.getLogger(__name__)
 
+BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
-BYBIT_TRADES_URL = "https://api.bybit.com/v5/market/recent-trade?category=linear&symbol={symbol}&limit=100"
-BYBIT_ORDERBOOK_URL = "https://api.bybit.com/v5/market/orderbook?category=linear&symbol={symbol}&limit=25"
 BYBIT_OI_URL = "https://api.bybit.com/v5/market/open-interest?category=linear&symbol={symbol}&intervalTime=5min&limit=4"
 
 
@@ -22,21 +23,28 @@ class ConfirmationResult:
     score: int
     reasons: list[str]
     warnings: list[str]
-    metrics: dict[str, float]
+    metrics: dict[str, float] = field(default_factory=dict)
 
 
 class SignalConfirmation:
-    """Fast independent impulse check.
+    """Realtime confirmation for one already-detected Pump/Dump candidate.
 
-    The primary Pump/Dump scanner remains the trigger. This layer only asks
-    whether the fresh market structure and flow support continuation.
+    The primary scanner remains the trigger. As soon as a candidate arrives,
+    this layer opens a short-lived Bybit public WebSocket session for ONLY that
+    symbol and observes real orderbook deltas and executed trades. REST is used
+    only for closed-candle/context data and OI.
+
+    This is real event-stream monitoring, not a simulated OFI calculation.
     """
 
     def __init__(self) -> None:
         self.session: aiohttp.ClientSession | None = None
+        self.observe_seconds = 10.0
 
     async def start(self) -> None:
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8))
+        self.session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10)
+        )
 
     async def stop(self) -> None:
         if self.session and not self.session.closed:
@@ -54,126 +62,23 @@ class SignalConfirmation:
             return data
 
     async def _klines(self, symbol: str, interval: str, limit: int = 60) -> list[dict]:
-        data = await self._get(BYBIT_KLINE_URL.format(symbol=symbol, interval=interval, limit=limit))
+        data = await self._get(
+            BYBIT_KLINE_URL.format(symbol=symbol, interval=interval, limit=limit)
+        )
         rows = list(reversed(data.get("result", {}).get("list", [])))
         if rows:
-            rows = rows[:-1]
+            rows = rows[:-1]  # closed candles only
         return [
-            {"open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[5])}
-            for r in rows if float(r[4]) > 0
+            {
+                "open": float(r[1]),
+                "high": float(r[2]),
+                "low": float(r[3]),
+                "close": float(r[4]),
+                "volume": float(r[5]),
+            }
+            for r in rows
+            if float(r[4]) > 0
         ]
-
-    async def _trades(self, symbol: str) -> tuple[float, float, float, int] | None:
-        try:
-            data = await self._get(BYBIT_TRADES_URL.format(symbol=symbol))
-            rows = data.get("result", {}).get("list", [])
-            buy = sell = 0.0
-            count = 0
-            for row in rows:
-                price = float(row.get("price", 0))
-                size = float(row.get("size", 0))
-                if price <= 0 or size <= 0:
-                    continue
-                value = price * size
-                side = str(row.get("side", "")).lower()
-                if side == "buy":
-                    buy += value
-                    count += 1
-                elif side == "sell":
-                    sell += value
-                    count += 1
-            total = buy + sell
-            if total <= 0:
-                return None
-            return buy, sell, (buy - sell) / total * 100.0, count
-        except Exception:
-            return None
-
-    async def _orderbook_once(self, symbol: str) -> float | None:
-        try:
-            data = await self._get(BYBIT_ORDERBOOK_URL.format(symbol=symbol))
-            bids = data.get("result", {}).get("b", [])
-            asks = data.get("result", {}).get("a", [])
-            bid = sum(float(p) * float(q) for p, q in bids)
-            ask = sum(float(p) * float(q) for p, q in asks)
-            return bid / (bid + ask) * 100.0 if bid + ask else None
-        except Exception:
-            return None
-
-    async def _orderbook_persistence(self, symbol: str) -> tuple[float | None, float | None]:
-        # Four short snapshots are more informative than one snapshot while
-        # keeping the confirmation fast. We measure persistence, not prediction.
-        values: list[float] = []
-        for i in range(4):
-            value = await self._orderbook_once(symbol)
-            if value is not None:
-                values.append(value)
-            if i < 3:
-                await asyncio.sleep(0.25)
-        if not values:
-            return None, None
-        return sum(values) / len(values), max(values) - min(values) if len(values) > 1 else 0.0
-
-    async def _microstructure(self, symbol: str) -> dict:
-        """Short REST microstructure sample for the candidate only.
-
-        This is deliberately NOT called true OFI: true event-level OFI requires
-        the WebSocket snapshot/delta stream. Here we measure repeated depth,
-        micro-price, and a depth-change proxy without overstating the data.
-        """
-        snaps: list[dict] = []
-        for i in range(4):
-            try:
-                data = await self._get(BYBIT_ORDERBOOK_URL.format(symbol=symbol))
-                result = data.get("result", {})
-                bids = [(float(p), float(q)) for p, q in result.get("b", []) if float(q) > 0]
-                asks = [(float(p), float(q)) for p, q in result.get("a", []) if float(q) > 0]
-                if bids and asks:
-                    bid_value = sum(p * q for p, q in bids)
-                    ask_value = sum(p * q for p, q in asks)
-                    total = bid_value + ask_value
-                    best_bid, best_ask = bids[0][0], asks[0][0]
-                    mid = (best_bid + best_ask) / 2.0
-                    micro = ((best_ask * bid_value) + (best_bid * ask_value)) / total
-                    snaps.append({
-                        "bid_pct": bid_value / total * 100.0,
-                        "mid": mid,
-                        "micro": micro,
-                        "bids": bids,
-                        "asks": asks,
-                    })
-            except Exception:
-                pass
-            if i < 3:
-                await asyncio.sleep(0.25)
-
-        if not snaps:
-            return {}
-
-        avg_bid = sum(x["bid_pct"] for x in snaps) / len(snaps)
-        bid_range = max(x["bid_pct"] for x in snaps) - min(x["bid_pct"] for x in snaps)
-        micro_offsets = [
-            (x["micro"] - x["mid"]) / x["mid"] * 100.0
-            for x in snaps if x["mid"]
-        ]
-        micro_offset = sum(micro_offsets) / len(micro_offsets) if micro_offsets else 0.0
-
-        depth_flow_proxy = None
-        if len(snaps) >= 2:
-            first, last = snaps[0], snaps[-1]
-            bid_change = sum(p * q for p, q in last["bids"]) - sum(p * q for p, q in first["bids"])
-            ask_change = sum(p * q for p, q in last["asks"]) - sum(p * q for p, q in first["asks"])
-            scale = abs(bid_change) + abs(ask_change)
-            if scale > 0:
-                depth_flow_proxy = (bid_change - ask_change) / scale * 100.0
-
-        return {
-            "bid_pct": avg_bid,
-            "bid_range": bid_range,
-            "micro_offset": micro_offset,
-            "depth_flow_proxy": depth_flow_proxy if depth_flow_proxy is not None else 0.0,
-            "snapshots": float(len(snaps)),
-        }
 
     async def _oi_change(self, symbol: str) -> float | None:
         try:
@@ -181,20 +86,255 @@ class SignalConfirmation:
             rows = data.get("result", {}).get("list", [])
             if len(rows) < 2:
                 return None
-            newest_row, oldest_row = rows[0], rows[-1]
-            newest = float(newest_row.get("singleOpenInterest") or newest_row.get("openInterest") or 0)
-            oldest = float(oldest_row.get("singleOpenInterest") or oldest_row.get("openInterest") or 0)
+            newest = float(
+                rows[0].get("singleOpenInterest")
+                or rows[0].get("openInterest")
+                or 0
+            )
+            oldest = float(
+                rows[-1].get("singleOpenInterest")
+                or rows[-1].get("openInterest")
+                or 0
+            )
             return (newest / oldest - 1.0) * 100.0 if oldest else None
         except Exception:
             return None
 
+    async def _realtime_sample(self, symbol: str, direction: str) -> dict:
+        """Observe Bybit orderbook deltas + public trades for a short window.
+
+        Level-50 orderbook starts with a snapshot and then receives deltas.
+        We maintain the local book and calculate true event-level order-flow
+        imbalance from successive bid/ask size changes. Executed trade delta is
+        calculated from the taker side of each public trade.
+        """
+        if not self.session:
+            raise RuntimeError("SignalConfirmation is not started")
+
+        bids: dict[float, float] = {}
+        asks: dict[float, float] = {}
+        prev_bids: dict[float, float] | None = None
+        prev_asks: dict[float, float] | None = None
+        ofi_buy = 0.0
+        ofi_sell = 0.0
+        buy_value = 0.0
+        sell_value = 0.0
+        trade_count = 0
+        book_events = 0
+        sequence_gap = False
+        snapshot_ready = False
+        last_u: int | None = None
+        first_mid: float | None = None
+        last_mid: float | None = None
+        micro_offsets: list[float] = []
+
+        async def apply_book(data: dict, msg_type: str) -> None:
+            nonlocal bids, asks, prev_bids, prev_asks, snapshot_ready
+            nonlocal book_events, sequence_gap, last_u, first_mid, last_mid
+
+            u = data.get("u")
+            if isinstance(u, int):
+                if msg_type == "snapshot" or u == 1:
+                    bids = {float(p): float(q) for p, q in data.get("b", []) if float(q) > 0}
+                    asks = {float(p): float(q) for p, q in data.get("a", []) if float(q) > 0}
+                    last_u = u
+                    snapshot_ready = True
+                elif snapshot_ready:
+                    if last_u is not None and u > last_u + 1:
+                        sequence_gap = True
+                    for p, q in data.get("b", []):
+                        price, qty = float(p), float(q)
+                        if qty == 0:
+                            bids.pop(price, None)
+                        else:
+                            bids[price] = qty
+                    for p, q in data.get("a", []):
+                        price, qty = float(p), float(q)
+                        if qty == 0:
+                            asks.pop(price, None)
+                        else:
+                            asks[price] = qty
+                    last_u = u
+
+            if not bids or not asks:
+                return
+
+            best_bid = max(bids)
+            best_ask = min(asks)
+            mid = (best_bid + best_ask) / 2.0
+            last_mid = mid
+            if first_mid is None:
+                first_mid = mid
+
+            if prev_bids is not None and prev_asks is not None:
+                # Event-level OFI using price-level queue changes.
+                bid_flow = 0.0
+                ask_flow = 0.0
+                for price in set(prev_bids) | set(bids):
+                    old = prev_bids.get(price, 0.0)
+                    new = bids.get(price, 0.0)
+                    if price >= best_bid:
+                        bid_flow += new - old
+                for price in set(prev_asks) | set(asks):
+                    old = prev_asks.get(price, 0.0)
+                    new = asks.get(price, 0.0)
+                    if price <= best_ask:
+                        ask_flow += new - old
+                # Positive OFI = bid-side strengthening / ask-side weakening.
+                signed = bid_flow - ask_flow
+                if signed >= 0:
+                    ofi_buy += signed
+                else:
+                    ofi_sell += -signed
+
+            prev_bids = dict(bids)
+            prev_asks = dict(asks)
+            bid_value = sum(p * q for p, q in list(bids.items())[:50])
+            ask_value = sum(p * q for p, q in list(asks.items())[:50])
+            total = bid_value + ask_value
+            if total:
+                micro = (best_ask * bid_value + best_bid * ask_value) / total
+                micro_offsets.append((micro - mid) / mid * 100.0)
+            book_events += 1
+
+        async def consume(ws: aiohttp.ClientWebSocketResponse) -> None:
+            while True:
+                msg = await ws.receive(timeout=2.5)
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    payload = json.loads(msg.data)
+                    topic = payload.get("topic", "")
+                    if topic.startswith("orderbook.50."):
+                        await apply_book(
+                            payload.get("data", {}),
+                            str(payload.get("type", "delta")),
+                        )
+                    elif topic.startswith("publicTrade."):
+                        for row in payload.get("data", []):
+                            try:
+                                side = str(row.get("S", "")).lower()
+                                price = float(row.get("p", 0))
+                                size = float(row.get("v", 0))
+                                if price <= 0 or size <= 0:
+                                    continue
+                                value = price * size
+                                if side == "buy":
+                                    buy_value += value
+                                elif side == "sell":
+                                    sell_value += value
+                                else:
+                                    continue
+                                trade_count += 1
+                            except (TypeError, ValueError):
+                                continue
+                elif msg.type in {
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.ERROR,
+                }:
+                    break
+
+        try:
+            async with self.session.ws_connect(
+                BYBIT_WS_URL,
+                heartbeat=20,
+                receive_timeout=3.0,
+                timeout=5.0,
+            ) as ws:
+                await ws.send_json(
+                    {
+                        "op": "subscribe",
+                        "args": [
+                            f"orderbook.50.{symbol}",
+                            f"publicTrade.{symbol}",
+                        ],
+                    }
+                )
+                deadline = time.monotonic() + self.observe_seconds
+                while time.monotonic() < deadline:
+                    remaining = max(0.2, deadline - time.monotonic())
+                    try:
+                        msg = await ws.receive(timeout=min(2.5, remaining))
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        payload = json.loads(msg.data)
+                        topic = payload.get("topic", "")
+                        if topic.startswith("orderbook.50."):
+                            await apply_book(
+                                payload.get("data", {}),
+                                str(payload.get("type", "delta")),
+                            )
+                        elif topic.startswith("publicTrade."):
+                            for row in payload.get("data", []):
+                                try:
+                                    side = str(row.get("S", "")).lower()
+                                    price = float(row.get("p", 0))
+                                    size = float(row.get("v", 0))
+                                    if price <= 0 or size <= 0:
+                                        continue
+                                    value = price * size
+                                    if side == "buy":
+                                        buy_value += value
+                                    elif side == "sell":
+                                        sell_value += value
+                                    else:
+                                        continue
+                                    trade_count += 1
+                                except (TypeError, ValueError):
+                                    continue
+                        elif msg.type in {
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.CLOSING,
+                            aiohttp.WSMsgType.ERROR,
+                        }:
+                            break
+        except Exception as exc:
+            log.warning("Realtime confirmation WS failed for %s: %s", symbol, type(exc).__name__)
+
+        total_trade = buy_value + sell_value
+        trade_delta = (
+            (buy_value - sell_value) / total_trade * 100.0
+            if total_trade > 0
+            else None
+        )
+        total_ofi = ofi_buy + ofi_sell
+        ofi_delta = (
+            (ofi_buy - ofi_sell) / total_ofi * 100.0
+            if total_ofi > 0
+            else None
+        )
+        if bids and asks:
+            bid_value = sum(p * q for p, q in sorted(bids.items(), reverse=True)[:50])
+            ask_value = sum(p * q for p, q in sorted(asks.items())[:50])
+            book_bid_pct = bid_value / (bid_value + ask_value) * 100.0 if bid_value + ask_value else None
+        else:
+            book_bid_pct = None
+        price_change = (
+            (last_mid / first_mid - 1.0) * 100.0
+            if first_mid and last_mid
+            else None
+        )
+
+        return {
+            "trade_delta_pct": trade_delta,
+            "ofi_delta_pct": ofi_delta,
+            "trade_count": float(trade_count),
+            "book_bid_pct": book_bid_pct,
+            "book_events": float(book_events),
+            "sequence_gap": 1.0 if sequence_gap else 0.0,
+            "price_change_pct": price_change,
+            "microprice_offset_pct": (
+                sum(micro_offsets) / len(micro_offsets)
+                if micro_offsets else 0.0
+            ),
+        }
+
     async def check(self, symbol: str, direction: str) -> ConfirmationResult:
         try:
-            one_m, five_m, fifteen_m, trades, oi = await asyncio.gather(
+            one_m, five_m, fifteen_m, oi = await asyncio.gather(
                 self._klines(symbol, "1", 70),
                 self._klines(symbol, "5", 70),
                 self._klines(symbol, "15", 35),
-                self._trades(symbol),
                 self._oi_change(symbol),
                 return_exceptions=True,
             )
@@ -203,21 +343,23 @@ class SignalConfirmation:
             if len(one_m) < 30 or len(five_m) < 25 or len(fifteen_m) < 15:
                 raise RuntimeError("not enough closed candles")
 
+            realtime = await self._realtime_sample(symbol, direction)
             bullish = direction == "PUMP"
             score = 0
             reasons: list[str] = []
             warnings: list[str] = []
 
-            # 35 points: immediate 5m structure.
             window = five_m[-13:-1]
             latest = five_m[-1]
             previous = five_m[-2]
             local_high = max(x["high"] for x in window)
             local_low = min(x["low"] for x in window)
             body = (latest["close"] - latest["open"]) / latest["open"] * 100.0
+
             if bullish:
                 breakout = latest["close"] >= local_high * 0.999
                 continuation = latest["high"] > previous["high"] and latest["low"] >= previous["low"]
+                structure_aligned = breakout or continuation
                 if breakout:
                     score += 25
                     reasons.append("5m цена удерживает локальный breakout")
@@ -234,6 +376,7 @@ class SignalConfirmation:
             else:
                 breakdown = latest["close"] <= local_low * 1.001
                 continuation = latest["low"] < previous["low"] and latest["high"] <= previous["high"]
+                structure_aligned = breakdown or continuation
                 if breakdown:
                     score += 25
                     reasons.append("5m цена удерживает локальный breakdown")
@@ -248,8 +391,6 @@ class SignalConfirmation:
                 elif body > 0.15:
                     warnings.append(f"Последняя 5m свеча закрылась против импульса ({body:+.2f}%)")
 
-            # 15m is context only. It can warn against a mature counter-trend move,
-            # but it cannot veto a fresh early impulse by itself.
             context = fifteen_m[-1]
             context_body = (context["close"] - context["open"]) / context["open"] * 100.0
             context_aligned = context_body > 0 if bullish else context_body < 0
@@ -259,147 +400,115 @@ class SignalConfirmation:
             elif abs(context_body) >= 0.35:
                 warnings.append(f"15m контекст пока против направления ({context_body:+.2f}%)")
 
-            # 30 points: executed trade flow + volume expansion.
-            closes = [x["close"] for x in one_m]
-            volumes = [x["volume"] for x in one_m]
-            avg_volume = sum(volumes[-21:-1]) / 20.0
-            volume_ratio = volumes[-1] / avg_volume if avg_volume else 1.0
-            flow_delta = None
-            buy_value = sell_value = 0.0
-            trade_count = 0
-            flow_aligned = False
-            flow_against = False
-            if not isinstance(trades, Exception) and trades is not None:
-                buy_value, sell_value, flow_delta, trade_count = trades
-                flow_aligned = flow_delta > 8.0 if bullish else flow_delta < -8.0
-                flow_against = flow_delta < -8.0 if bullish else flow_delta > 8.0
-                if flow_aligned:
-                    score += 20
-                    side = "покупателей" if bullish else "продавцов"
-                    reasons.append(f"Поток сделок в сторону импульса: delta {flow_delta:+.1f}% ({side})")
-                elif flow_against:
-                    warnings.append(f"Поток сделок идёт против направления: delta {flow_delta:+.1f}%")
-                else:
-                    score += 8
-                    reasons.append(f"Поток сделок без сильного перекоса: delta {flow_delta:+.1f}%")
-            else:
-                warnings.append("Свежий поток сделок не получен")
+            flow = realtime.get("trade_delta_pct")
+            ofi = realtime.get("ofi_delta_pct")
+            book = realtime.get("book_bid_pct")
+            price_change = realtime.get("price_change_pct")
 
-            if volume_ratio >= 1.35:
-                score += 10
-                reasons.append(f"1m объём расширен до {volume_ratio:.1f}x среднего")
-            elif volume_ratio >= 0.95:
+            flow_aligned = flow is not None and (flow >= 8.0 if bullish else flow <= -8.0)
+            flow_against = flow is not None and (flow <= -8.0 if bullish else flow >= 8.0)
+            ofi_aligned = ofi is not None and (ofi >= 10.0 if bullish else ofi <= -10.0)
+            ofi_against = ofi is not None and (ofi <= -10.0 if bullish else ofi >= 10.0)
+            book_aligned = book is not None and (book >= 52.0 if bullish else book <= 48.0)
+            book_against = book is not None and (book <= 47.0 if bullish else book >= 53.0)
+
+            if flow_aligned:
+                score += 20
+                reasons.append(f"Realtime taker-flow подтверждает: delta {flow:+.1f}%")
+            elif flow_against:
+                warnings.append(f"Realtime taker-flow против направления: delta {flow:+.1f}%")
+            elif flow is not None:
                 score += 5
-                reasons.append(f"1m объём нормальный ({volume_ratio:.1f}x)")
+                reasons.append(f"Realtime taker-flow нейтрален: delta {flow:+.1f}%")
             else:
-                warnings.append(f"1m объём слабый ({volume_ratio:.1f}x)")
+                warnings.append("Realtime сделки не получены")
 
-            # OI confirms participation, not direction.
+            if ofi_aligned:
+                score += 20
+                reasons.append(f"Настоящий event-level OFI подтверждает направление: {ofi:+.1f}%")
+            elif ofi_against:
+                warnings.append(f"Event-level OFI против направления: {ofi:+.1f}%")
+            elif ofi is None:
+                warnings.append("Event-level OFI не получен")
+
+            if book_aligned:
+                score += 12
+                reasons.append(f"Realtime стакан поддерживает направление: {book:.1f}% bid")
+            elif book_against:
+                warnings.append(f"Realtime стакан против направления: {book:.1f}% bid")
+            elif book is not None:
+                reasons.append(f"Realtime стакан нейтрален: {book:.1f}% bid")
+            else:
+                warnings.append("Realtime стакан не получен")
+
             oi_value = float(oi) if isinstance(oi, (int, float)) else None
-            oi_support = False
-            oi_against = False
-            if oi_value is not None:
-                if oi_value >= 0.8:
-                    score += 20
-                    oi_support = True
-                    reasons.append(f"OI растёт вместе с движением ({oi_value:+.2f}%)")
-                elif oi_value >= 0.2:
-                    score += 10
-                    oi_support = True
-                    reasons.append(f"OI слегка растёт ({oi_value:+.2f}%)")
-                elif oi_value <= -1.0:
-                    oi_against = True
-                    warnings.append(f"OI снижается ({oi_value:+.2f}%) — участие ослабевает")
-                else:
-                    warnings.append(f"OI почти не меняется ({oi_value:+.2f}%)")
+            oi_support = oi_value is not None and oi_value >= 0.8
+            oi_against = oi_value is not None and oi_value <= -1.0
+            if oi_support:
+                score += 12
+                reasons.append(f"OI растёт вместе с движением ({oi_value:+.2f}%)")
+            elif oi_against:
+                warnings.append(f"OI снижается ({oi_value:+.2f}%)")
+            elif oi_value is not None:
+                score += 4
+                reasons.append(f"OI без сильного изменения ({oi_value:+.2f}%)")
             else:
                 warnings.append("OI не получен")
 
-            # Dynamic microstructure: repeated depth + micro-price + depth-flow proxy.
-            micro = await self._microstructure(symbol)
-            book_value = float(micro["bid_pct"]) if micro else None
-            book_spread = float(micro["bid_range"]) if micro else -1.0
-            book_aligned = False
-            book_against = False
-            depth_proxy = float(micro.get("depth_flow_proxy", 0.0)) if micro else 0.0
-            if micro:
-                book_aligned = book_value >= 52.0 if bullish else book_value <= 48.0
-                book_against = book_value <= 47.0 if bullish else book_value >= 53.0
-                stable = book_spread <= 4.0
-                if book_aligned and stable:
-                    score += 12
-                    reasons.append(f"Стакан устойчиво поддерживает направление ({book_value:.1f}% bid)")
-                elif book_aligned:
-                    score += 5
-                    warnings.append(f"Стакан поддерживает, но меняется ({book_spread:.1f} п.п.)")
-                elif book_against:
-                    warnings.append(f"Стакан против направления ({book_value:.1f}% bid)")
-                else:
-                    warnings.append(f"Стакан нейтрален ({book_value:.1f}% bid)")
+            volumes = [x["volume"] for x in one_m]
+            avg_volume = sum(volumes[-21:-1]) / 20.0
+            volume_ratio = volumes[-1] / avg_volume if avg_volume else 1.0
+            if volume_ratio >= 1.35:
+                score += 8
+                reasons.append(f"1m объём расширен до {volume_ratio:.1f}x среднего")
+            elif volume_ratio < 0.85:
+                warnings.append(f"1m объём слабый ({volume_ratio:.1f}x)")
 
-                micro_aligned = micro["micro_offset"] >= 0.002 if bullish else micro["micro_offset"] <= -0.002
-                if micro_aligned:
-                    score += 3
-                    reasons.append(f"Micro-price смещён в сторону {'LONG' if bullish else 'SHORT'}")
-
-                proxy_aligned = depth_proxy >= 10.0 if bullish else depth_proxy <= -10.0
-                proxy_against = depth_proxy <= -10.0 if bullish else depth_proxy >= 10.0
-                if proxy_aligned:
-                    score += 5
-                    reasons.append(f"Поток ликвидности стакана поддерживает направление ({depth_proxy:+.1f}%)")
-                elif proxy_against:
-                    warnings.append(f"Поток ликвидности стакана против направления ({depth_proxy:+.1f}%)")
-            else:
-                warnings.append("Стакан не получен")
-
-            # Absorption proxy: strong executed flow with unusually small price response.
-            # It is explicitly a proxy, not a claim about hidden orders.
-            one_return = (one_m[-1]["close"] / one_m[-2]["close"] - 1.0) * 100.0
             absorption = (
-                flow_delta is not None
-                and abs(flow_delta) >= 20.0
-                and abs(one_return) <= 0.12
+                flow is not None
+                and abs(flow) >= 20.0
+                and price_change is not None
+                and abs(price_change) <= 0.08
                 and volume_ratio >= 1.15
             )
-            if absorption:
-                warnings.append("Есть признаки поглощения: сильный поток, но цена почти не продвинулась")
-                score = max(0, score - 8)
-
-            # Exhaustion proxy: price is still moving, but fresh flow/volume are fading.
             exhaustion = (
-                abs(one_return) >= 0.20
+                price_change is not None
+                and abs(price_change) >= 0.12
                 and volume_ratio < 1.0
-                and (flow_delta is None or abs(flow_delta) < 8.0)
+                and (flow is None or abs(flow) < 8.0)
             )
+            if absorption:
+                warnings.append("Поглощение-прокси: сильные сделки, но цена почти не продвинулась")
+                score -= 8
             if exhaustion:
-                warnings.append("Импульс может выдыхаться: цена движется, но свежие поток/объём слабеют")
-                score = max(0, score - 8)
+                warnings.append("Признаки истощения: цена движется, но свежий поток/объём слабеют")
+                score -= 8
 
-            direct_against = flow_against or book_against or (
-                depth_proxy <= -10.0 if bullish else depth_proxy >= 10.0
+            # A confirmation cannot be strong when the live flow directly contradicts it.
+            direct_against = flow_against or ofi_against or book_against
+            fresh_flow = flow_aligned or ofi_aligned or book_aligned
+            primary_confirmed = (
+                score >= 60
+                and structure_aligned
+                and fresh_flow
+                and not direct_against
+                and not absorption
             )
-            continuation_evidence = (
-                (latest["close"] >= local_high * 0.999 if bullish else latest["close"] <= local_low * 1.001)
-                or early_aligned
+            strong = (
+                score >= 78
+                and structure_aligned
+                and flow_aligned
+                and ofi_aligned
+                and not direct_against
+                and not absorption
+                and not exhaustion
             )
-            fresh_flow = flow_aligned or (
-                book_aligned and not book_against
-            ) or (
-                (depth_proxy >= 10.0 if bullish else depth_proxy <= -10.0)
-            )
-            strong = score >= 78 and continuation_evidence and fresh_flow and not direct_against and not absorption and not exhaustion
-            confirmed = score >= 60 and continuation_evidence and fresh_flow and not direct_against and not absorption
-
-            # A high sum cannot rescue a clear direct contradiction in flow/book.
-            direct_against = flow_against or book_against
-            primary_confirmed = score >= 60 and (flow_aligned or book_aligned) and not direct_against
-            strong = primary_confirmed and score >= 78 and (flow_aligned and (book_aligned or oi_support))
 
             if strong:
                 verdict = "СИЛЬНЫЙ ИМПУЛЬС"
             elif primary_confirmed:
                 verdict = "ИМПУЛЬС ПОДТВЕРЖДЁН"
-            elif score >= 48 and not direct_against and not oi_against:
+            elif score >= 48 and structure_aligned and not direct_against and not oi_against:
                 verdict = "ИМПУЛЬС ЕСТЬ, НО ПОДТВЕРЖДЕНИЕ СРЕДНЕЕ"
             else:
                 verdict = "НЕ ПОДТВЕРЖДЕНО"
@@ -408,41 +517,42 @@ class SignalConfirmation:
                 symbol=symbol,
                 direction=direction,
                 verdict=verdict,
-                score=min(score, 100),
+                score=max(0, min(score, 100)),
                 reasons=reasons,
                 warnings=warnings,
                 metrics={
-                    "volume_ratio": volume_ratio,
-                    "trade_delta_pct": flow_delta if flow_delta is not None else -999.0,
-                    "trade_count": float(trade_count),
-                    "buy_value": buy_value,
-                    "sell_value": sell_value,
+                    "observe_seconds": self.observe_seconds,
+                    "trade_delta_pct": flow if flow is not None else -999.0,
+                    "ofi_delta_pct": ofi if ofi is not None else -999.0,
+                    "trade_count": realtime.get("trade_count", 0.0),
+                    "orderbook_events": realtime.get("book_events", 0.0),
+                    "orderbook_bid_pct": book if book is not None else -1.0,
+                    "price_change_pct": price_change if price_change is not None else -999.0,
                     "oi_change_pct": oi_value if oi_value is not None else -999.0,
-                    "orderbook_bid_pct": book_value if book_value is not None else -1.0,
-                    "orderbook_spread_pp": book_spread,
-                    "depth_flow_proxy_pct": depth_proxy,
-                    "microprice_offset_pct": micro.get("micro_offset", 0.0) if micro else 0.0,
+                    "volume_ratio": volume_ratio,
+                    "sequence_gap": realtime.get("sequence_gap", 0.0),
+                    "microprice_offset_pct": realtime.get("microprice_offset_pct", 0.0),
+                    "structure_aligned": 1.0 if structure_aligned else 0.0,
                     "absorption_proxy": 1.0 if absorption else 0.0,
                     "exhaustion_proxy": 1.0 if exhaustion else 0.0,
-                    "last_5m_body_pct": body,
-                    "context_15m_body_pct": context_body,
-                    "price_5m": closes[-1] if closes else -1.0,
                 },
             )
         except Exception as exc:
-            log.warning("Independent confirmation failed for %s: %s", symbol, type(exc).__name__)
+            log.warning("Realtime confirmation failed for %s: %s", symbol, type(exc).__name__)
             return ConfirmationResult(
                 symbol=symbol,
                 direction=direction,
                 verdict="ПРОВЕРКА НЕ ПОЛУЧЕНА",
                 score=0,
                 reasons=[],
-                warnings=["Свежие подтверждающие данные не получены; основной сигнал не изменён."],
+                warnings=[
+                    "Realtime подтверждение не получено; основной Pump/Dump сигнал не изменён."
+                ],
                 metrics={},
             )
 
     @staticmethod
-    def format_result(result: ConfirmationResult, label: str = "БЫСТРАЯ ПРОВЕРКА") -> str:
+    def format_result(result: ConfirmationResult, label: str = "REALTIME ПРОВЕРКА") -> str:
         icon = "🟢" if result.direction == "PUMP" else "🔴"
         lines = [
             f"{icon} ⚡ {label} · {result.symbol.removesuffix('USDT')}",
@@ -451,25 +561,28 @@ class SignalConfirmation:
             f"Статус: {result.verdict}",
         ]
         if result.reasons:
-            lines += ["", "✅ Поддерживает:"] + [f"• {x}" for x in result.reasons[:5]]
+            lines += ["", "✅ Поддерживает:"] + [f"• {x}" for x in result.reasons[:6]]
         if result.warnings:
-            lines += ["", "⚠️ Слабые места:"] + [f"• {x}" for x in result.warnings[:4]]
+            lines += ["", "⚠️ Слабые места:"] + [f"• {x}" for x in result.warnings[:5]]
         m = result.metrics
         if m:
             lines += [
                 "",
-                f"Flow delta: {m.get('trade_delta_pct', -999):+.1f}% · Volume: {m.get('volume_ratio', 0):.1f}x · OI: {m.get('oi_change_pct', -999):+.2f}%",
+                f"Realtime: {m.get('observe_seconds', 0):.0f}с · trades {m.get('trade_count', 0):.0f} · OB events {m.get('orderbook_events', 0):.0f}",
+                f"Taker delta: {m.get('trade_delta_pct', -999):+.1f}% · OFI: {m.get('ofi_delta_pct', -999):+.1f}%",
+                f"Стакан: {m.get('orderbook_bid_pct', -1):.1f}% bid · Price: {m.get('price_change_pct', -999):+.3f}%",
+                f"Volume: {m.get('volume_ratio', 0):.1f}x · OI: {m.get('oi_change_pct', -999):+.2f}%",
             ]
-            if m.get("orderbook_bid_pct", -1) >= 0:
-                lines.append(f"Стакан: {m['orderbook_bid_pct']:.1f}% bid · разброс {m.get('orderbook_spread_pp', 0):.1f} п.п.")
+            if m.get("sequence_gap", 0) > 0:
+                lines.append("⚠️ В realtime orderbook обнаружен разрыв последовательности — OFI может быть неполным.")
         if result.verdict == "СИЛЬНЫЙ ИМПУЛЬС":
-            lines.append("➡️ Быстрая проверка сильно поддерживает основной сигнал. Это не гарантия движения.")
+            lines.append("➡️ Realtime-поток сильно подтверждает основной сигнал. Это не гарантия движения.")
         elif result.verdict == "ИМПУЛЬС ПОДТВЕРЖДЁН":
-            lines.append("➡️ Быстрая проверка поддерживает основной сигнал. Это не гарантия движения.")
+            lines.append("➡️ Realtime-поток подтверждает основной сигнал. Это не гарантия движения.")
         elif result.verdict == "ИМПУЛЬС ЕСТЬ, НО ПОДТВЕРЖДЕНИЕ СРЕДНЕЕ":
-            lines.append("➡️ Импульс есть, но подтверждение недостаточно сильное для уверенного входа.")
+            lines.append("➡️ Импульс есть, но realtime-подтверждение пока недостаточно сильное.")
         elif result.verdict == "НЕ ПОДТВЕРЖДЕНО":
             lines.append("➡️ Продолжение сейчас не подтверждено. Ничего не выдумываем.")
         else:
-            lines.append("➡️ Дополнительные данные не получены. Основной сигнал не изменён.")
+            lines.append("➡️ Дополнительные realtime-данные не получены. Основной сигнал не изменён.")
         return "\n".join(lines)
