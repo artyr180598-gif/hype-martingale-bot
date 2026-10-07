@@ -331,6 +331,48 @@ class SignalConfirmation:
             ),
         }
 
+    @staticmethod
+    def _ema(values: list[float], period: int) -> float | None:
+        if len(values) < period: return None
+        alpha = 2.0 / (period + 1.0); value = values[0]
+        for x in values[1:]: value = alpha * x + (1.0 - alpha) * value
+        return value
+
+    @staticmethod
+    def _rsi(values: list[float], period: int = 14) -> float | None:
+        if len(values) < period + 1: return None
+        gains=[]; losses=[]
+        for a,b in zip(values[-(period+1):-1], values[-period:]):
+            d=b-a; gains.append(max(d,0.0)); losses.append(max(-d,0.0))
+        ag=sum(gains)/period; al=sum(losses)/period
+        return 100.0 if al == 0 else 100.0 - 100.0/(1.0 + ag/al)
+
+    @staticmethod
+    def _atr(candles: list[dict], period: int = 14) -> float | None:
+        if len(candles) < period + 1: return None
+        trs=[]
+        for prev,cur in zip(candles[-(period+1):-1], candles[-period:]):
+            trs.append(max(cur["high"]-cur["low"], abs(cur["high"]-prev["close"]), abs(cur["low"]-prev["close"])))
+        return sum(trs)/period if trs else None
+
+    @staticmethod
+    def _adx(candles: list[dict], period: int = 14) -> tuple[float|None,float|None,float|None]:
+        if len(candles) < period*2+1: return None,None,None
+        trs=[]; plus=[]; minus=[]
+        for prev,cur in zip(candles[1:],candles[2:]):
+            up=cur["high"]-prev["high"]; down=prev["low"]-cur["low"]
+            trs.append(max(cur["high"]-cur["low"],abs(cur["high"]-prev["close"]),abs(cur["low"]-prev["close"])))
+            plus.append(up if up>down and up>0 else 0.0); minus.append(down if down>up and down>0 else 0.0)
+        tr=sum(trs[:period]); p=sum(plus[:period]); m=sum(minus[:period]); dx=[]; dp=dm=0.0
+        for i in range(period,len(trs)):
+            tr=tr-tr/period+trs[i]; p=p-p/period+plus[i]; m=m-m/period+minus[i]
+            dp=100*p/tr if tr else 0.0; dm=100*m/tr if tr else 0.0; den=dp+dm
+            dx.append(100*abs(dp-dm)/den if den else 0.0)
+        if len(dx)<period: return None,None,None
+        adx=sum(dx[:period])/period
+        for x in dx[period:]: adx=((adx*(period-1))+x)/period
+        return adx,dp,dm
+
     async def check(self, symbol: str, direction: str) -> ConfirmationResult:
         try:
             one_m, five_m, fifteen_m, oi = await asyncio.gather(
@@ -401,6 +443,30 @@ class SignalConfirmation:
                 reasons.append(f"15m контекст совпадает с направлением ({context_body:+.2f}%)")
             elif abs(context_body) >= 0.35:
                 warnings.append(f"15m контекст пока против направления ({context_body:+.2f}%)")
+
+            # Quick check: ADX/DI + ADX slope + EMA + RSI + ATR.
+            closes_5m = [x["close"] for x in five_m]
+            ema9 = self._ema(closes_5m, 9); ema21 = self._ema(closes_5m, 21)
+            rsi5 = self._rsi(closes_5m, 14); atr5 = self._atr(five_m, 14)
+            adx, di_plus, di_minus = self._adx(five_m, 14)
+            adx_prev, _, _ = self._adx(five_m[:-1], 14)
+            ema_aligned = ema9 is not None and ema21 is not None and ((latest["close"] > ema9 > ema21) if bullish else (latest["close"] < ema9 < ema21))
+            di_aligned = di_plus is not None and di_minus is not None and ((di_plus > di_minus) if bullish else (di_minus > di_plus))
+            adx_rising = adx is not None and adx_prev is not None and adx > adx_prev
+            rsi_aligned = rsi5 is not None and ((52 <= rsi5 < 78) if bullish else (22 < rsi5 <= 48))
+            if ema_aligned: score += 7; reasons.append(f"EMA 9/21 поддерживает направление ({ema9:.8g}/{ema21:.8g})")
+            else: warnings.append("EMA 9/21 не подтверждает направление")
+            if di_aligned: score += 7; reasons.append(f"DI подтверждает направление (+DI {di_plus:.1f} / -DI {di_minus:.1f})")
+            elif di_plus is not None: warnings.append(f"DI не подтверждает (+DI {di_plus:.1f} / -DI {di_minus:.1f})")
+            if adx is not None and adx >= 18: score += 5; reasons.append(f"ADX {adx:.1f}" + (" растёт" if adx_rising else " показывает силу, но не растёт"))
+            elif adx is not None: warnings.append(f"ADX слабый ({adx:.1f})")
+            if adx is not None and adx_prev is not None and not adx_rising: warnings.append(f"Наклон ADX не растёт ({adx_prev:.1f} → {adx:.1f})")
+            if rsi_aligned: score += 5; reasons.append(f"RSI 5m в рабочей зоне ({rsi5:.1f})")
+            elif rsi5 is not None: warnings.append(f"RSI 5m вне рабочей зоны ({rsi5:.1f})")
+            if atr5 is not None and latest["close"]:
+                atr_pct = atr5 / latest["close"] * 100
+                if atr_pct >= 0.25: score += 3; reasons.append(f"ATR 5m достаточный ({atr_pct:.2f}%)")
+                else: warnings.append(f"ATR 5m низкий ({atr_pct:.2f}%)")
 
             flow = realtime.get("trade_delta_pct")
             ofi = realtime.get("ofi_delta_pct")
@@ -537,6 +603,14 @@ class SignalConfirmation:
                     "structure_aligned": 1.0 if structure_aligned else 0.0,
                     "absorption_proxy": 1.0 if absorption else 0.0,
                     "exhaustion_proxy": 1.0 if exhaustion else 0.0,
+                    "adx": adx if adx is not None else -1.0,
+                    "adx_prev": adx_prev if adx_prev is not None else -1.0,
+                    "di_plus": di_plus if di_plus is not None else -1.0,
+                    "di_minus": di_minus if di_minus is not None else -1.0,
+                    "ema9": ema9 if ema9 is not None else -1.0,
+                    "ema21": ema21 if ema21 is not None else -1.0,
+                    "rsi5": rsi5 if rsi5 is not None else -1.0,
+                    "atr5_pct": (atr5 / latest["close"] * 100.0) if atr5 is not None and latest["close"] else -1.0,
                 },
             )
         except Exception as exc:
@@ -574,6 +648,8 @@ class SignalConfirmation:
                 f"Taker delta: {m.get('trade_delta_pct', -999):+.1f}% · OFI: {m.get('ofi_delta_pct', -999):+.1f}%",
                 f"Стакан: {m.get('orderbook_bid_pct', -1):.1f}% bid · Price: {m.get('price_change_pct', -999):+.3f}%",
                 f"Volume: {m.get('volume_ratio', 0):.1f}x · OI: {m.get('oi_change_pct', -999):+.2f}%",
+                f"ADX: {m.get('adx', -1):.1f} · +DI/-DI: {m.get('di_plus', -1):.1f}/{m.get('di_minus', -1):.1f} · EMA 9/21: {m.get('ema9', -1):.8g}/{m.get('ema21', -1):.8g}",
+                f"RSI 5m: {m.get('rsi5', -1):.1f} · ATR 5m: {m.get('atr5_pct', -1):.2f}% · ADX slope: {m.get('adx_prev', -1):.1f}→{m.get('adx', -1):.1f}",
             ]
             if m.get("sequence_gap", 0) > 0:
                 lines.append("⚠️ В realtime orderbook обнаружен разрыв последовательности — OFI может быть неполным.")
