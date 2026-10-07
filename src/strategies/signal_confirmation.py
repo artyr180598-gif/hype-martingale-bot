@@ -198,6 +198,7 @@ class SignalConfirmation:
             book_events += 1
 
         async def consume(ws: aiohttp.ClientWebSocketResponse) -> None:
+            nonlocal buy_value, sell_value, trade_count
             while True:
                 msg = await ws.receive(timeout=2.5)
                 if msg.type == aiohttp.WSMsgType.TEXT:
