@@ -130,7 +130,7 @@ class SignalConfirmation:
 
         async def apply_book(data: dict, msg_type: str) -> None:
             nonlocal bids, asks, prev_bids, prev_asks, snapshot_ready
-            nonlocal book_events, sequence_gap, last_u, first_mid, last_mid
+            nonlocal book_events, sequence_gap, last_u, first_mid, last_mid\n            nonlocal ofi_buy, ofi_sell
 
             u = data.get("u")
             if isinstance(u, int):
