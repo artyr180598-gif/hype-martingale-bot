@@ -444,30 +444,6 @@ class SignalConfirmation:
             elif abs(context_body) >= 0.35:
                 warnings.append(f"15m контекст пока против направления ({context_body:+.2f}%)")
 
-            # Quick check: ADX/DI + ADX slope + EMA + RSI + ATR.
-            closes_5m = [x["close"] for x in five_m]
-            ema9 = self._ema(closes_5m, 9); ema21 = self._ema(closes_5m, 21)
-            rsi5 = self._rsi(closes_5m, 14); atr5 = self._atr(five_m, 14)
-            adx, di_plus, di_minus = self._adx(five_m, 14)
-            adx_prev, _, _ = self._adx(five_m[:-1], 14)
-            ema_aligned = ema9 is not None and ema21 is not None and ((latest["close"] > ema9 > ema21) if bullish else (latest["close"] < ema9 < ema21))
-            di_aligned = di_plus is not None and di_minus is not None and ((di_plus > di_minus) if bullish else (di_minus > di_plus))
-            adx_rising = adx is not None and adx_prev is not None and adx > adx_prev
-            rsi_aligned = rsi5 is not None and ((52 <= rsi5 < 78) if bullish else (22 < rsi5 <= 48))
-            if ema_aligned: score += 7; reasons.append(f"EMA 9/21 поддерживает направление ({ema9:.8g}/{ema21:.8g})")
-            else: warnings.append("EMA 9/21 не подтверждает направление")
-            if di_aligned: score += 7; reasons.append(f"DI подтверждает направление (+DI {di_plus:.1f} / -DI {di_minus:.1f})")
-            elif di_plus is not None: warnings.append(f"DI не подтверждает (+DI {di_plus:.1f} / -DI {di_minus:.1f})")
-            if adx is not None and adx >= 18: score += 5; reasons.append(f"ADX {adx:.1f}" + (" растёт" if adx_rising else " показывает силу, но не растёт"))
-            elif adx is not None: warnings.append(f"ADX слабый ({adx:.1f})")
-            if adx is not None and adx_prev is not None and not adx_rising: warnings.append(f"Наклон ADX не растёт ({adx_prev:.1f} → {adx:.1f})")
-            if rsi_aligned: score += 5; reasons.append(f"RSI 5m в рабочей зоне ({rsi5:.1f})")
-            elif rsi5 is not None: warnings.append(f"RSI 5m вне рабочей зоны ({rsi5:.1f})")
-            if atr5 is not None and latest["close"]:
-                atr_pct = atr5 / latest["close"] * 100
-                if atr_pct >= 0.25: score += 3; reasons.append(f"ATR 5m достаточный ({atr_pct:.2f}%)")
-                else: warnings.append(f"ATR 5m низкий ({atr_pct:.2f}%)")
-
             flow = realtime.get("trade_delta_pct")
             ofi = realtime.get("ofi_delta_pct")
             book = realtime.get("book_bid_pct")
@@ -603,14 +579,6 @@ class SignalConfirmation:
                     "structure_aligned": 1.0 if structure_aligned else 0.0,
                     "absorption_proxy": 1.0 if absorption else 0.0,
                     "exhaustion_proxy": 1.0 if exhaustion else 0.0,
-                    "adx": adx if adx is not None else -1.0,
-                    "adx_prev": adx_prev if adx_prev is not None else -1.0,
-                    "di_plus": di_plus if di_plus is not None else -1.0,
-                    "di_minus": di_minus if di_minus is not None else -1.0,
-                    "ema9": ema9 if ema9 is not None else -1.0,
-                    "ema21": ema21 if ema21 is not None else -1.0,
-                    "rsi5": rsi5 if rsi5 is not None else -1.0,
-                    "atr5_pct": (atr5 / latest["close"] * 100.0) if atr5 is not None and latest["close"] else -1.0,
                 },
             )
         except Exception as exc:
@@ -648,8 +616,6 @@ class SignalConfirmation:
                 f"Taker delta: {m.get('trade_delta_pct', -999):+.1f}% · OFI: {m.get('ofi_delta_pct', -999):+.1f}%",
                 f"Стакан: {m.get('orderbook_bid_pct', -1):.1f}% bid · Price: {m.get('price_change_pct', -999):+.3f}%",
                 f"Volume: {m.get('volume_ratio', 0):.1f}x · OI: {m.get('oi_change_pct', -999):+.2f}%",
-                f"ADX: {m.get('adx', -1):.1f} · +DI/-DI: {m.get('di_plus', -1):.1f}/{m.get('di_minus', -1):.1f} · EMA 9/21: {m.get('ema9', -1):.8g}/{m.get('ema21', -1):.8g}",
-                f"RSI 5m: {m.get('rsi5', -1):.1f} · ATR 5m: {m.get('atr5_pct', -1):.2f}% · ADX slope: {m.get('adx_prev', -1):.1f}→{m.get('adx', -1):.1f}",
             ]
             if m.get("sequence_gap", 0) > 0:
                 lines.append("⚠️ В realtime orderbook обнаружен разрыв последовательности — OFI может быть неполным.")
