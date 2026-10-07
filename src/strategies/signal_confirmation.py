@@ -290,7 +290,7 @@ class SignalConfirmation:
                         }:
                             break
         except Exception as exc:
-            log.warning("Realtime confirmation WS failed for %s: %s", symbol, type(exc).__name__)
+            log.exception("Realtime confirmation WS failed for %s: %s", symbol, type(exc).__name__)
 
         total_trade = buy_value + sell_value
         trade_delta = (
