@@ -96,7 +96,7 @@ class TelegramBot:
 
         # Use Telegram webhook instead of getUpdates polling. The previous logs showed
         # HTTP 409 from another getUpdates consumer, so polling is unsafe here.
-        domain = (os.getenv('RAILWAY_PUBLIC_DOMAIN') or 'worker-production-29abc.up.railway.app').strip()
+        domain = (os.getenv('RENDER_EXTERNAL_HOSTNAME') or os.getenv('RAILWAY_PUBLIC_DOMAIN') or 'worker-production-29abc.up.railway.app').strip()
         app = web.Application()
         app.router.add_post('/telegram/webhook', self._webhook)
         self.web_runner = web.AppRunner(app)
