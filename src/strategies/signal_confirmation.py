@@ -400,6 +400,58 @@ class SignalConfirmation:
             local_low = min(x["low"] for x in window)
             body = (latest["close"] - latest["open"]) / latest["open"] * 100.0
 
+            # Small early-impulse radar: acceleration + pre-break compression + clean room.
+            recent_2 = one_m[-2:]
+            prior_3 = one_m[-5:-2]
+            recent_2_return = ((recent_2[-1]["close"] / recent_2[0]["open"]) - 1.0) * 100.0
+            prior_3_return = ((prior_3[-1]["close"] / prior_3[0]["open"]) - 1.0) * 100.0
+            directional_acceleration = (
+                recent_2_return - prior_3_return if bullish
+                else prior_3_return - recent_2_return
+            )
+            compression_ranges = [
+                (x["high"] - x["low"]) / x["close"] * 100.0
+                for x in five_m[-13:-3] if x["close"] > 0
+            ]
+            pre_break_ranges = [
+                (x["high"] - x["low"]) / x["close"] * 100.0
+                for x in five_m[-4:-1] if x["close"] > 0
+            ]
+            median_range = sorted(compression_ranges)[len(compression_ranges) // 2] if compression_ranges else 0.0
+            pre_break_range = sum(pre_break_ranges) / len(pre_break_ranges) if pre_break_ranges else 0.0
+            compressed_before_break = median_range > 0 and pre_break_range <= median_range * 0.78
+
+            level_window = five_m[-25:-1]
+            if bullish:
+                overhead = [x["high"] for x in level_window if x["high"] > latest["close"]]
+                room_pct = ((min(overhead) - latest["close"]) / latest["close"] * 100.0) if overhead else 5.0
+            else:
+                underfoot = [x["low"] for x in level_window if x["low"] < latest["close"]]
+                room_pct = ((latest["close"] - max(underfoot)) / latest["close"] * 100.0) if underfoot else 5.0
+
+            if directional_acceleration >= 0.20:
+                score += 10
+                reasons.append(
+                    f"1m импульс ускоряется ({directional_acceleration:+.2f} п.п.)"
+                )
+            elif directional_acceleration <= -0.20:
+                warnings.append(
+                    f"1m импульс теряет скорость ({directional_acceleration:+.2f} п.п.)"
+                )
+
+            if compressed_before_break:
+                score += 6
+                reasons.append(
+                    f"Перед движением была сжатая 5m база ({pre_break_range:.2f}% vs {median_range:.2f}%)"
+                )
+
+            if room_pct < 0.35:
+                score -= 8
+                warnings.append(f"Мало пространства до ближайшего уровня ({room_pct:.2f}%)")
+            elif room_pct >= 1.0:
+                score += 4
+                reasons.append(f"Есть пространство до уровня: {room_pct:.2f}%")
+
             if bullish:
                 breakout = latest["close"] >= local_high * 0.999
                 continuation = latest["high"] > previous["high"] and latest["low"] >= previous["low"]
@@ -574,6 +626,9 @@ class SignalConfirmation:
                     "price_change_pct": price_change if price_change is not None else -999.0,
                     "oi_change_pct": oi_value if oi_value is not None else -999.0,
                     "volume_ratio": volume_ratio,
+                    "directional_acceleration_pct": directional_acceleration,
+                    "compressed_before_break": 1.0 if compressed_before_break else 0.0,
+                    "room_to_level_pct": room_pct,
                     "sequence_gap": realtime.get("sequence_gap", 0.0),
                     "microprice_offset_pct": realtime.get("microprice_offset_pct", 0.0),
                     "structure_aligned": 1.0 if structure_aligned else 0.0,
@@ -616,6 +671,7 @@ class SignalConfirmation:
                 f"Taker delta: {m.get('trade_delta_pct', -999):+.1f}% · OFI: {m.get('ofi_delta_pct', -999):+.1f}%",
                 f"Стакан: {m.get('orderbook_bid_pct', -1):.1f}% bid · Price: {m.get('price_change_pct', -999):+.3f}%",
                 f"Volume: {m.get('volume_ratio', 0):.1f}x · OI: {m.get('oi_change_pct', -999):+.2f}%",
+                f"Acceleration: {m.get('directional_acceleration_pct', 0):+.2f} п.п. · Room: {m.get('room_to_level_pct', 0):.2f}% · Compression: {'YES' if m.get('compressed_before_break', 0) > 0 else 'NO'}",
             ]
             if m.get("sequence_gap", 0) > 0:
                 lines.append("⚠️ В realtime orderbook обнаружен разрыв последовательности — OFI может быть неполным.")
