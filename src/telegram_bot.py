@@ -99,11 +99,24 @@ class TelegramBot:
         domain = (os.getenv('RENDER_EXTERNAL_HOSTNAME') or os.getenv('RAILWAY_PUBLIC_DOMAIN') or 'worker-production-29abc.up.railway.app').strip()
         app = web.Application()
         app.router.add_post('/telegram/webhook', self._webhook)
+        app.router.add_get('/telegram/webhook', lambda request: web.Response(text='telegram webhook ok'))
         self.web_runner = web.AppRunner(app)
         await self.web_runner.setup()
         await web.TCPSite(self.web_runner, '0.0.0.0', int(os.getenv('PORT', '8080'))).start()
         await self._api('deleteWebhook', {'drop_pending_updates': False})
-        await self._api('setWebhook', {'url': 'https://' + domain + '/telegram/webhook', 'drop_pending_updates': False})
+        webhook_url = 'https://' + domain + '/telegram/webhook'
+        webhook_result = await self._api('setWebhook', {'url': webhook_url, 'drop_pending_updates': False})
+        log.info('Telegram webhook configured: %s; result=%s', webhook_url, bool(webhook_result))
+        try:
+            info = await self._api('getWebhookInfo')
+            log.info(
+                'Telegram webhook info: url=%s pending=%s last_error=%s',
+                (info or {}).get('url', ''),
+                (info or {}).get('pending_update_count', 0),
+                (info or {}).get('last_error_message', ''),
+            )
+        except Exception:
+            log.exception('Failed to read Telegram webhook info')
         await self._api('setMyCommands', {'commands': [
             {'command': 'start', 'description': 'Открыть меню'},
             {'command': 'scan', 'description': 'Проверить Pump/Dump'},
@@ -187,6 +200,8 @@ class TelegramBot:
     async def _webhook(self, request):
         try:
             update = await request.json()
+            message = update.get('message') or {}
+            log.info('Telegram webhook update received: type=%s text=%r', update.get('update_id'), message.get('text'))
             await self._handle(update)
             return web.Response(text='ok')
         except Exception:
@@ -331,7 +346,7 @@ class TelegramBot:
                 )
 
     async def _quick_check(self, chat_id):
-        await self._send(chat_id, '⚡ Быстрая проверка: ищу свежие Pump/Dump и проверяю лучшие кандидаты по 5m/15m + ADX/DI + EMA + RSI + ATR + объём + OI + realtime flow/OFi + стакан...')
+        await self._send(chat_id, '⚡ Быстрая проверка: ищу свежий импульс и проверяю только главное — 5m структура, объём, OI и realtime поток/стакан...')
         try:
             signals = await asyncio.wait_for(self.scanner.scan_once(), timeout=25)
         except asyncio.TimeoutError:
