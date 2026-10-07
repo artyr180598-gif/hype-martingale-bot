@@ -38,9 +38,9 @@ class TelegramBot:
         self.global_alert_cap = 3
         self.menu_keyboard = {
             'keyboard': [
-                [{'text': '🔎 Сканировать'}, {'text': '⚙️ Настройки'}],
-                [{'text': '🟢 Pump'}, {'text': '🔴 Dump'}],
-                [{'text': '🔄 Оба'}, {'text': '❤️ Health'}],
+                [{'text': '🔎 Сканировать'}, {'text': '⚡ Быстрая проверка'}],
+                [{'text': '🟢 Pump'}, {'text': '🔴 Dump'}, {'text': '🔄 Оба'}],
+                [{'text': '⚙️ Настройки'}, {'text': '❤️ Health'}],
             ],
             'resize_keyboard': True,
             'is_persistent': True,
@@ -238,6 +238,7 @@ class TelegramBot:
         command = (message.get('text') or '').strip()
         aliases = {
             '🔎 Сканировать': 'scan',
+            '⚡ Быстрая проверка': 'quick',
             '⚙️ Настройки': 'settings',
             '🟢 Pump': 'pump',
             '🔴 Dump': 'dump',
@@ -252,6 +253,8 @@ class TelegramBot:
                 'Pump/Dump Monitor на Bybit\\n\\nМониторинг работает автоматически.',
                 keyboard=True,
             )
+        elif command in {'quick', '/quick'}:
+            await self._quick_check(chat_id)
         elif command in {'scan', '/scan', 'pump', 'dump', 'both'}:
             if command == 'pump':
                 self.scanner.settings.signal_types = 'PUMP'
@@ -326,6 +329,29 @@ class TelegramBot:
                         result, label="БЫСТРАЯ ПРОВЕРКА"
                     ),
                 )
+
+    async def _quick_check(self, chat_id):
+        await self._send(chat_id, '⚡ Быстрая проверка: ищу свежие Pump/Dump и проверяю лучшие кандидаты по 5m/15m + ADX/DI + EMA + RSI + ATR + объём + OI + realtime flow/OFi + стакан...')
+        try:
+            signals = await asyncio.wait_for(self.scanner.scan_once(), timeout=25)
+        except asyncio.TimeoutError:
+            await self._send(chat_id, 'Быстрая проверка не завершилась за 25 секунд. Сигнал не придумываю.')
+            return
+        signals = [
+            s for s in signals
+            if s.trade_action in {'LONG', 'SHORT'}
+        ]
+        signals = sorted(signals, key=lambda s: (s.quality_score, abs(s.change_pct)), reverse=True)[:3]
+        if not signals:
+            await self._send(chat_id, '⚡ Быстрая проверка: сейчас нет свежего кандидата с готовым LONG/SHORT после первичных фильтров.')
+            return
+        for signal in signals:
+            result = await self.confirmation.check(signal.symbol, signal.direction)
+            await self._send(
+                chat_id,
+                self.scanner.format_signal(signal) + '\n\n' +
+                self.confirmation.format_result(result, label='⚡ БЫСТРАЯ ПРОВЕРКА'),
+            )
 
     async def _settings(self, chat_id):
         s = self.scanner.settings
