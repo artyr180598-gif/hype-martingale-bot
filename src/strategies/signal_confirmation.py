@@ -127,6 +127,9 @@ class SignalConfirmation:
         first_mid: float | None = None
         last_mid: float | None = None
         micro_offsets: list[float] = []
+        slice_buy = [0.0, 0.0, 0.0]
+        slice_sell = [0.0, 0.0, 0.0]
+        sample_started = time.monotonic()
 
         async def apply_book(data: dict, msg_type: str) -> None:
             nonlocal bids, asks, prev_bids, prev_asks, snapshot_ready
@@ -219,10 +222,14 @@ class SignalConfirmation:
                                 if price <= 0 or size <= 0:
                                     continue
                                 value = price * size
+                                elapsed = max(0.0, time.monotonic() - sample_started)
+                                idx = min(2, int(elapsed / max(self.observe_seconds / 3.0, 0.1)))
                                 if side == "buy":
                                     buy_value += value
+                                    slice_buy[idx] += value
                                 elif side == "sell":
                                     sell_value += value
+                                    slice_sell[idx] += value
                                 else:
                                     continue
                                 trade_count += 1
@@ -316,6 +323,11 @@ class SignalConfirmation:
             if first_mid and last_mid
             else None
         )
+        slice_deltas = []
+        for b, s in zip(slice_buy, slice_sell):
+            total = b + s
+            if total:
+                slice_deltas.append((b - s) / total * 100.0)
 
         return {
             "trade_delta_pct": trade_delta,
@@ -328,6 +340,11 @@ class SignalConfirmation:
             "microprice_offset_pct": (
                 sum(micro_offsets) / len(micro_offsets)
                 if micro_offsets else 0.0
+            ),
+            "flow_slice_deltas": slice_deltas,
+            "flow_persistence_pct": (
+                sum(1 for x in slice_deltas if x >= 8.0) / len(slice_deltas) * 100.0
+                if slice_deltas else 0.0
             ),
         }
 
@@ -373,6 +390,31 @@ class SignalConfirmation:
         for x in dx[period:]: adx=((adx*(period-1))+x)/period
         return adx,dp,dm
 
+    async def _btc_context(self, symbol: str, direction: str) -> dict:
+        """Small BTC context filter for an existing altcoin candidate."""
+        if symbol == "BTCUSDT":
+            return {"return_pct": 0.0, "structure": 0.0, "strong_opposite": 0.0}
+        try:
+            btc = await self._klines("BTCUSDT", "1", 12)
+            if len(btc) < 8:
+                return {}
+            start = btc[-6]["open"]
+            end = btc[-1]["close"]
+            ret = (end / start - 1.0) * 100.0 if start else 0.0
+            recent_high = max(x["high"] for x in btc[-6:-1])
+            recent_low = min(x["low"] for x in btc[-6:-1])
+            if direction == "PUMP":
+                aligned = ret >= 0.18 and end >= recent_high * 0.999
+                opposite = ret <= -0.18 and end <= recent_low * 1.001
+            else:
+                aligned = ret <= -0.18 and end <= recent_low * 1.001
+                opposite = ret >= 0.18 and end >= recent_high * 0.999
+            return {"return_pct": ret, "structure": 1.0 if aligned else (-1.0 if opposite else 0.0),
+                    "strong_opposite": 1.0 if opposite else 0.0}
+        except Exception as exc:
+            log.debug("BTC context unavailable for %s: %s", symbol, type(exc).__name__)
+            return {}
+
     async def check(self, symbol: str, direction: str) -> ConfirmationResult:
         try:
             one_m, five_m, fifteen_m, oi = await asyncio.gather(
@@ -387,7 +429,10 @@ class SignalConfirmation:
             if len(one_m) < 30 or len(five_m) < 25 or len(fifteen_m) < 15:
                 raise RuntimeError("not enough closed candles")
 
-            realtime = await self._realtime_sample(symbol, direction)
+            realtime, btc_context = await asyncio.gather(
+                self._realtime_sample(symbol, direction),
+                self._btc_context(symbol, direction),
+            )
             bullish = direction == "PUMP"
             score = 0
             reasons: list[str] = []
@@ -503,6 +548,11 @@ class SignalConfirmation:
 
             flow_aligned = flow is not None and (flow >= 8.0 if bullish else flow <= -8.0)
             flow_against = flow is not None and (flow <= -8.0 if bullish else flow >= 8.0)
+            flow_slices = realtime.get("flow_slice_deltas", [])
+            aligned_slice_count = sum(1 for x in flow_slices if (x >= 8.0 if bullish else x <= -8.0))
+            against_slice_count = sum(1 for x in flow_slices if (x <= -8.0 if bullish else x >= 8.0))
+            persistent_flow = len(flow_slices) >= 2 and aligned_slice_count >= (len(flow_slices) + 1) // 2
+            persistent_against = len(flow_slices) >= 2 and against_slice_count >= (len(flow_slices) + 1) // 2
             ofi_aligned = ofi is not None and (ofi >= 10.0 if bullish else ofi <= -10.0)
             ofi_against = ofi is not None and (ofi <= -10.0 if bullish else ofi >= 10.0)
             book_aligned = book is not None and (book >= 52.0 if bullish else book <= 48.0)
@@ -518,6 +568,15 @@ class SignalConfirmation:
                 reasons.append(f"Realtime taker-flow нейтрален: delta {flow:+.1f}%")
             else:
                 warnings.append("Realtime сделки не получены")
+
+            if persistent_flow:
+                score += 8
+                reasons.append(f"Taker-flow устойчив: {aligned_slice_count}/{len(flow_slices)} срезов за направлением")
+            elif persistent_against:
+                score -= 10
+                warnings.append(f"Taker-flow устойчиво против направления: {against_slice_count}/{len(flow_slices)} срезов")
+            elif flow_slices:
+                warnings.append("Taker-flow неустойчив между короткими срезами")
 
             if ofi_aligned:
                 score += 20
@@ -536,6 +595,17 @@ class SignalConfirmation:
                 reasons.append(f"Realtime стакан нейтрален: {book:.1f}% bid")
             else:
                 warnings.append("Realtime стакан не получен")
+
+            btc_return = btc_context.get("return_pct") if btc_context else None
+            btc_opposite = bool(btc_context.get("strong_opposite", 0.0)) if btc_context else False
+            if btc_context.get("structure", 0.0) > 0:
+                score += 6
+                reasons.append(f"BTC-контекст совпадает ({btc_return:+.2f}%)")
+            elif btc_opposite:
+                score -= 10
+                warnings.append(f"BTC резко против альт-сигнала ({btc_return:+.2f}%)")
+            elif btc_return is not None:
+                reasons.append(f"BTC-контекст нейтрален ({btc_return:+.2f}%)")
 
             oi_value = float(oi) if isinstance(oi, (int, float)) else None
             oi_support = oi_value is not None and oi_value >= 0.8
@@ -581,7 +651,7 @@ class SignalConfirmation:
                 score -= 8
 
             # A confirmation cannot be strong when the live flow directly contradicts it.
-            direct_against = flow_against or ofi_against or book_against
+            direct_against = flow_against or ofi_against or book_against or persistent_against
             fresh_flow = flow_aligned or ofi_aligned or book_aligned
             primary_confirmed = (
                 score >= 60
@@ -589,6 +659,7 @@ class SignalConfirmation:
                 and fresh_flow
                 and not direct_against
                 and not absorption
+                and not btc_opposite
             )
             strong = (
                 score >= 78
@@ -598,6 +669,8 @@ class SignalConfirmation:
                 and not direct_against
                 and not absorption
                 and not exhaustion
+                and not btc_opposite
+                and persistent_flow
             )
 
             if strong:
@@ -631,6 +704,9 @@ class SignalConfirmation:
                     "room_to_level_pct": room_pct,
                     "sequence_gap": realtime.get("sequence_gap", 0.0),
                     "microprice_offset_pct": realtime.get("microprice_offset_pct", 0.0),
+                    "flow_persistence_pct": realtime.get("flow_persistence_pct", 0.0),
+                    "btc_return_pct": btc_return if btc_return is not None else -999.0,
+                    "btc_opposite": 1.0 if btc_opposite else 0.0,
                     "structure_aligned": 1.0 if structure_aligned else 0.0,
                     "absorption_proxy": 1.0 if absorption else 0.0,
                     "exhaustion_proxy": 1.0 if exhaustion else 0.0,
