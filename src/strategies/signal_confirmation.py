@@ -39,7 +39,8 @@ class SignalConfirmation:
 
     def __init__(self) -> None:
         self.session: aiohttp.ClientSession | None = None
-        self.observe_seconds = 10.0
+        # Three short windows help distinguish persistent flow from one burst.
+        self.observe_seconds = 18.0
 
     async def start(self) -> None:
         self.session = aiohttp.ClientSession(
@@ -282,10 +283,14 @@ class SignalConfirmation:
                                     if price <= 0 or size <= 0:
                                         continue
                                     value = price * size
+                                    elapsed = max(0.0, time.monotonic() - sample_started)
+                                    idx = min(2, int(elapsed / max(self.observe_seconds / 3.0, 0.1)))
                                     if side == "buy":
                                         buy_value += value
+                                        slice_buy[idx] += value
                                     elif side == "sell":
                                         sell_value += value
+                                        slice_sell[idx] += value
                                     else:
                                         continue
                                     trade_count += 1
@@ -337,6 +342,9 @@ class SignalConfirmation:
             "book_events": float(book_events),
             "sequence_gap": 1.0 if sequence_gap else 0.0,
             "price_change_pct": price_change,
+            "first_mid": first_mid,
+            "last_mid": last_mid,
+            "flow_slice_count": float(len(slice_deltas)),
             "microprice_offset_pct": (
                 sum(micro_offsets) / len(micro_offsets)
                 if micro_offsets else 0.0
@@ -545,6 +553,8 @@ class SignalConfirmation:
             ofi = realtime.get("ofi_delta_pct")
             book = realtime.get("book_bid_pct")
             price_change = realtime.get("price_change_pct")
+            live_price = realtime.get("last_mid")
+            live_price_start = realtime.get("first_mid")
 
             flow_aligned = flow is not None and (flow >= 8.0 if bullish else flow <= -8.0)
             flow_against = flow is not None and (flow <= -8.0 if bullish else flow >= 8.0)
@@ -630,6 +640,30 @@ class SignalConfirmation:
             elif volume_ratio < 0.85:
                 warnings.append(f"1m объём слабый ({volume_ratio:.1f}x)")
 
+            # Validate that a candle breakout has not immediately fallen back through its level.
+            # If realtime price is unavailable, do not pretend this check passed or failed.
+            failed_breakout = False
+            if live_price is not None and live_price > 0:
+                if bullish and breakout and live_price < local_high * 0.998:
+                    failed_breakout = True
+                    score -= 18
+                    warnings.append("Ложный breakout: realtime цена вернулась ниже пробитого уровня более чем на 0.2%")
+                elif not bullish and breakdown and live_price > local_low * 1.002:
+                    failed_breakout = True
+                    score -= 18
+                    warnings.append("Ложный breakdown: realtime цена вернулась выше пробитого уровня более чем на 0.2%")
+
+            live_reversal = False
+            if price_change is not None:
+                if bullish and price_change <= -0.12:
+                    live_reversal = True
+                    score -= 10
+                    warnings.append(f"Realtime цена движется против LONG-направления ({price_change:+.3f}%)")
+                elif not bullish and price_change >= 0.12:
+                    live_reversal = True
+                    score -= 10
+                    warnings.append(f"Realtime цена движется против SHORT-направления ({price_change:+.3f}%)")
+
             absorption = (
                 flow is not None
                 and abs(flow) >= 20.0
@@ -660,6 +694,8 @@ class SignalConfirmation:
                 and not direct_against
                 and not absorption
                 and not btc_opposite
+                and not failed_breakout
+                and not live_reversal
             )
             strong = (
                 score >= 78
@@ -671,9 +707,15 @@ class SignalConfirmation:
                 and not exhaustion
                 and not btc_opposite
                 and persistent_flow
+                and not failed_breakout
+                and not live_reversal
             )
 
-            if strong:
+            if failed_breakout:
+                verdict = "ЛОЖНЫЙ ПРОБОЙ — НЕ ВХОДИТЬ"
+            elif live_reversal:
+                verdict = "REALTIME ДВИЖЕНИЕ ПРОТИВ СИГНАЛА"
+            elif strong:
                 verdict = "СИЛЬНЫЙ ИМПУЛЬС"
             elif primary_confirmed:
                 verdict = "ИМПУЛЬС ПОДТВЕРЖДЁН"
@@ -697,6 +739,11 @@ class SignalConfirmation:
                     "orderbook_events": realtime.get("book_events", 0.0),
                     "orderbook_bid_pct": book if book is not None else -1.0,
                     "price_change_pct": price_change if price_change is not None else -999.0,
+                    "live_price": live_price if live_price is not None else -999.0,
+                    "live_price_start": live_price_start if live_price_start is not None else -999.0,
+                    "flow_slice_count": realtime.get("flow_slice_count", 0.0),
+                    "failed_breakout": 1.0 if failed_breakout else 0.0,
+                    "live_reversal": 1.0 if live_reversal else 0.0,
                     "oi_change_pct": oi_value if oi_value is not None else -999.0,
                     "volume_ratio": volume_ratio,
                     "directional_acceleration_pct": directional_acceleration,
@@ -751,7 +798,11 @@ class SignalConfirmation:
             ]
             if m.get("sequence_gap", 0) > 0:
                 lines.append("⚠️ В realtime orderbook обнаружен разрыв последовательности — OFI может быть неполным.")
-        if result.verdict == "СИЛЬНЫЙ ИМПУЛЬС":
+        if result.verdict == "ЛОЖНЫЙ ПРОБОЙ — НЕ ВХОДИТЬ":
+            lines.append("➡️ Цена не удержала пробитый уровень в realtime. Не открывать сделку по этому подтверждению.")
+        elif result.verdict == "REALTIME ДВИЖЕНИЕ ПРОТИВ СИГНАЛА":
+            lines.append("➡️ За время наблюдения цена пошла против направления. Подтверждение отклонено.")
+        elif result.verdict == "СИЛЬНЫЙ ИМПУЛЬС":
             lines.append("➡️ Realtime-поток сильно подтверждает основной сигнал. Это не гарантия движения.")
         elif result.verdict == "ИМПУЛЬС ПОДТВЕРЖДЁН":
             lines.append("➡️ Realtime-поток подтверждает основной сигнал. Это не гарантия движения.")
