@@ -169,20 +169,33 @@ class TelegramBot:
 
                     for signal in signals:
                         try:
-                            sent = await self._send(
-                                self.chat_id,
-                                self.scanner.format_signal(signal),
+                            # Run the independent live check BEFORE sending an entry-style alert.
+                            # The scanner itself is unchanged; weak/reversing setups are reported
+                            # as candidates, not presented to the user as LONG/SHORT entries.
+                            result = await self.confirmation.check(
+                                signal.symbol, signal.direction
                             )
-                            if sent:
-                                # One fast confirmation only. It is informational and
-                                # never blocks the primary signal or converts it to WAIT.
-                                result = await self.confirmation.check(
-                                    signal.symbol, signal.direction
+                            confirmed = result.verdict in {
+                                "СИЛЬНЫЙ ИМПУЛЬС",
+                                "ИМПУЛЬС ПОДТВЕРЖДЁН",
+                            }
+                            if confirmed:
+                                sent = await self._send(
+                                    self.chat_id,
+                                    self.scanner.format_signal(signal),
                                 )
+                                if sent:
+                                    await self._send(
+                                        self.chat_id,
+                                        self.confirmation.format_result(
+                                            result, label="БЫСТРАЯ ПРОВЕРКА"
+                                        ),
+                                    )
+                            else:
                                 await self._send(
                                     self.chat_id,
                                     self.confirmation.format_result(
-                                        result, label="БЫСТРАЯ ПРОВЕРКА"
+                                        result, label="КАНДИДАТ НЕ ПОДТВЕРЖДЁН"
                                     ),
                                 )
                         except Exception as exc:
