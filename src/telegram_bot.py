@@ -126,6 +126,8 @@ class TelegramBot:
             {'command': 'scan', 'description': 'Проверить Pump/Dump'},
             {'command': 'settings', 'description': 'Настройки фильтров'},
             {'command': 'health', 'description': 'Проверить данные'},
+            {'command': 'journal', 'description': 'Итоги отправленных сигналов'},
+            {'command': 'journal_dump', 'description': 'Выгрузить историю сигналов'},
         ]})
         # Do not send a startup message: restarting the worker must never create a Telegram flood.
         self.task = None
