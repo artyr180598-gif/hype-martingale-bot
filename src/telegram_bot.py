@@ -8,6 +8,7 @@ from aiohttp import web
 
 from src.strategies.pump_scanner import PumpScanner
 from src.strategies.signal_confirmation import SignalConfirmation
+from src.strategies.signal_journal import SignalJournal
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,8 @@ class TelegramBot:
         self.last_telegram_cooldown_log = 0.0
         self.scanner = PumpScanner()
         self.confirmation = SignalConfirmation()
+        self.journal = SignalJournal()
+        self.journal_task = None
         self.confirmation_tasks: set[asyncio.Task] = set()
         # Delivery layer: keep scanning unchanged, but aggregate/rank alerts before Telegram.
         self.recent_alerts: dict[tuple[str, str], dict] = {}
@@ -92,6 +95,7 @@ class TelegramBot:
         self.session = aiohttp.ClientSession()
         await self.scanner.start()
         await self.confirmation.start()
+        await self.journal.start()
         self.running = True
 
         # Use Telegram webhook instead of getUpdates polling. The previous logs showed
@@ -126,10 +130,11 @@ class TelegramBot:
         # Do not send a startup message: restarting the worker must never create a Telegram flood.
         self.task = None
         self.monitor_task = asyncio.create_task(self._monitor_loop(), name='pump-monitor')
+        self.journal_task = asyncio.create_task(self._journal_loop(), name='signal-journal')
 
     async def stop(self):
         self.running = False
-        for task in (self.task, self.monitor_task, *self.confirmation_tasks):
+        for task in (self.task, self.monitor_task, self.journal_task, *self.confirmation_tasks):
             if task:
                 task.cancel()
                 try:
@@ -138,6 +143,7 @@ class TelegramBot:
                     pass
         await self.scanner.stop()
         await self.confirmation.stop()
+        await self.journal.stop()
         self.confirmation_tasks.clear()
         if self.web_runner:
             try:
@@ -148,6 +154,22 @@ class TelegramBot:
             self.web_runner = None
         if self.session and not self.session.closed:
             await self.session.close()
+
+    def _record_recommendation(self, signal, result, source):
+        try:
+            self.journal.record_recommendation(signal, result, source)
+        except Exception:
+            log.exception('Could not persist delivered signal to private journal')
+
+    async def _journal_loop(self):
+        while self.running:
+            try:
+                await self.journal.evaluate_due()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception('Signal journal evaluation cycle failed')
+            await asyncio.sleep(60)
 
     async def _monitor_loop(self):
         while self.running:
@@ -185,6 +207,7 @@ class TelegramBot:
                                     self.scanner.format_signal(signal),
                                 )
                                 if sent:
+                                    self._record_recommendation(signal, result, 'automatic')
                                     await self._send(
                                         self.chat_id,
                                         self.confirmation.format_result(
@@ -298,6 +321,12 @@ class TelegramBot:
             await self._settings(chat_id)
         elif command in {'health', '/health'}:
             await self._health(chat_id)
+        elif command in {'journal', '/journal'}:
+            await self._send(chat_id, self.journal.summary())
+        elif command in {'journal_dump', '/journal_dump', '/journal-export'}:
+            payload = self.journal.export_recent_json(20)
+            for offset in range(0, len(payload), 3500):
+                await self._send(chat_id, 'SIGNAL JOURNAL JSON\n' + payload[offset:offset + 3500])
         else:
             await self._send(
                 chat_id,
@@ -355,6 +384,7 @@ class TelegramBot:
                     chat_id, self.scanner.format_signal(signal)
                 )
                 if sent:
+                    self._record_recommendation(signal, result, 'manual_scan')
                     await self._send(
                         chat_id,
                         self.confirmation.format_result(
@@ -411,13 +441,15 @@ class TelegramBot:
                 "ИМПУЛЬС ПОДТВЕРЖДЁН",
             }
             if confirmed:
-                await self._send(
+                sent = await self._send(
                     chat_id,
                     self.scanner.format_signal(signal) + '\n\n' +
                     self.confirmation.format_result(
                         result, label='⚡ БЫСТРАЯ ПРОВЕРКА'
                     ),
                 )
+                if sent:
+                    self._record_recommendation(signal, result, 'quick_check')
             else:
                 await self._send(
                     chat_id,
