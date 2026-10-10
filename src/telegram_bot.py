@@ -413,7 +413,7 @@ class TelegramBot:
             if confirmed:
                 await self._send(
                     chat_id,
-                    self.scanner.format_signal(signal) + '\\n\\n' +
+                    self.scanner.format_signal(signal) + '\n\n' +
                     self.confirmation.format_result(
                         result, label='⚡ БЫСТРАЯ ПРОВЕРКА'
                     ),
