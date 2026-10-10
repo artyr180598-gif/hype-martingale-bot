@@ -152,6 +152,17 @@ class SignalJournal:
             "Signal journal recorded id=%s symbol=%s direction=%s source=%s entry=%.10g",
             row_id, signal.symbol, signal.direction, source, entry,
         )
+        log.info(
+            "SIGNAL_JOURNAL_RECORD id=%s recommended_at=%.3f snapshot=%s confirmation=%s",
+            row_id, now, json.dumps(signal_snapshot, ensure_ascii=False, separators=(",", ":"), default=str),
+            json.dumps({
+                "verdict": confirmation.verdict,
+                "score": confirmation.score,
+                "metrics": metrics,
+                "reasons": confirmation.reasons,
+                "warnings": confirmation.warnings,
+            }, ensure_ascii=False, separators=(",", ":"), default=str),
+        )
         return row_id
 
     async def evaluate_due(self) -> None:
@@ -172,6 +183,11 @@ class SignalJournal:
                         outcome = await self._historical_outcome(row, seconds)
                         if outcome is not None:
                             outcomes[label] = outcome
+                            log.info(
+                                "SIGNAL_JOURNAL_OUTCOME id=%s symbol=%s direction=%s horizon=%s result=%s",
+                                row["id"], row["symbol"], row["direction"], label,
+                                json.dumps(outcome, ensure_ascii=False, separators=(",", ":")),
+                            )
                             self.db.execute(
                                 "UPDATE recommendations SET outcomes=?, last_price=?, last_checked_at=? WHERE id=?",
                                 (
