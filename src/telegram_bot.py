@@ -343,43 +343,88 @@ class TelegramBot:
             return
 
         for signal in signals:
-            sent = await self._send(
-                chat_id,
-                self.scanner.format_signal(signal),
+            result = await self.confirmation.check(
+                signal.symbol, signal.direction
             )
-            if sent:
-                result = await self.confirmation.check(
-                    signal.symbol, signal.direction
+            confirmed = result.verdict in {
+                "СИЛЬНЫЙ ИМПУЛЬС",
+                "ИМПУЛЬС ПОДТВЕРЖДЁН",
+            }
+            if confirmed:
+                sent = await self._send(
+                    chat_id, self.scanner.format_signal(signal)
                 )
+                if sent:
+                    await self._send(
+                        chat_id,
+                        self.confirmation.format_result(
+                            result, label="БЫСТРАЯ ПРОВЕРКА"
+                        ),
+                    )
+            else:
                 await self._send(
                     chat_id,
                     self.confirmation.format_result(
-                        result, label="БЫСТРАЯ ПРОВЕРКА"
+                        result, label="КАНДИДАТ НЕ ПОДТВЕРЖДЁН"
                     ),
                 )
 
     async def _quick_check(self, chat_id):
-        await self._send(chat_id, '⚡ Быстрая проверка: ищу свежий импульс и проверяю только главное — 5m структура, объём, OI и realtime поток/стакан...')
+        await self._send(
+            chat_id,
+            '⚡ Быстрая проверка: ищу свежий импульс и проверяю структуру 5m, объём, OI, realtime-поток и риск запоздалого входа...',
+        )
         try:
-            signals = await asyncio.wait_for(self.scanner.scan_once(), timeout=25)
+            signals = await asyncio.wait_for(
+                self.scanner.scan_once(), timeout=25
+            )
         except asyncio.TimeoutError:
-            await self._send(chat_id, 'Быстрая проверка не завершилась за 25 секунд. Сигнал не придумываю.')
-            return
-        signals = [
-            s for s in signals
-            if s.trade_action in {'LONG', 'SHORT'}
-        ]
-        signals = sorted(signals, key=lambda s: (s.quality_score, abs(s.change_pct)), reverse=True)[:3]
-        if not signals:
-            await self._send(chat_id, '⚡ Быстрая проверка: сейчас нет свежего кандидата с готовым LONG/SHORT после первичных фильтров.')
-            return
-        for signal in signals:
-            result = await self.confirmation.check(signal.symbol, signal.direction)
             await self._send(
                 chat_id,
-                self.scanner.format_signal(signal) + '\n\n' +
-                self.confirmation.format_result(result, label='⚡ БЫСТРАЯ ПРОВЕРКА'),
+                'Быстрая проверка не завершилась за 25 секунд. Сигнал не придумываю.',
             )
+            return
+
+        signals = [
+            s for s in signals
+            if s.quality_score >= self.scanner.settings.min_signal_score
+            and s.trade_action in {"LONG", "SHORT"}
+        ]
+        signals = sorted(
+            signals,
+            key=lambda s: (s.quality_score, abs(s.change_pct)),
+            reverse=True,
+        )[:3]
+        if not signals:
+            await self._send(
+                chat_id,
+                '⚡ Сейчас нет свежего кандидата с готовым LONG/SHORT после первичных фильтров.',
+            )
+            return
+
+        for signal in signals:
+            result = await self.confirmation.check(
+                signal.symbol, signal.direction
+            )
+            confirmed = result.verdict in {
+                "СИЛЬНЫЙ ИМПУЛЬС",
+                "ИМПУЛЬС ПОДТВЕРЖДЁН",
+            }
+            if confirmed:
+                await self._send(
+                    chat_id,
+                    self.scanner.format_signal(signal) + '\\n\\n' +
+                    self.confirmation.format_result(
+                        result, label='⚡ БЫСТРАЯ ПРОВЕРКА'
+                    ),
+                )
+            else:
+                await self._send(
+                    chat_id,
+                    self.confirmation.format_result(
+                        result, label='⚡ КАНДИДАТ НЕ ПОДТВЕРЖДЁН'
+                    ),
+                )
 
     async def _settings(self, chat_id):
         s = self.scanner.settings
