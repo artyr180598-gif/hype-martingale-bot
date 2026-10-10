@@ -556,6 +556,26 @@ class SignalConfirmation:
             live_price = realtime.get("last_mid")
             live_price_start = realtime.get("first_mid")
 
+            # Avoid chasing a move that is already stretched from its short-term fair value.
+            # ATR makes this adaptive to each symbol's volatility; use closed 1m candles
+            # and the observed live mid-price, never a guessed price.
+            closes_1m = [x["close"] for x in one_m]
+            ema20_1m = self._ema(closes_1m, 20)
+            atr14_1m = self._atr(one_m, 14)
+            directional_extension_atr = 0.0
+            late_entry = False
+            if live_price is not None and ema20_1m and atr14_1m and atr14_1m > 0:
+                directional_extension_atr = (
+                    (live_price - ema20_1m) / atr14_1m
+                    if bullish else (ema20_1m - live_price) / atr14_1m
+                )
+                late_entry = directional_extension_atr >= 1.8
+                if late_entry:
+                    score -= 12
+                    warnings.append(
+                        f"Вход запоздалый: цена уже на {directional_extension_atr:.1f} ATR дальше EMA20 1m — не догонять импульс"
+                    )
+
             flow_aligned = flow is not None and (flow >= 8.0 if bullish else flow <= -8.0)
             flow_against = flow is not None and (flow <= -8.0 if bullish else flow >= 8.0)
             flow_slices = realtime.get("flow_slice_deltas", [])
@@ -696,6 +716,7 @@ class SignalConfirmation:
                 and not btc_opposite
                 and not failed_breakout
                 and not live_reversal
+                and not late_entry
             )
             strong = (
                 score >= 78
@@ -709,10 +730,13 @@ class SignalConfirmation:
                 and persistent_flow
                 and not failed_breakout
                 and not live_reversal
+                and not late_entry
             )
 
             if failed_breakout:
                 verdict = "ЛОЖНЫЙ ПРОБОЙ — НЕ ВХОДИТЬ"
+            elif late_entry:
+                verdict = "ПОЗДНИЙ ВХОД — НЕ ДОГОНЯТЬ"
             elif live_reversal:
                 verdict = "REALTIME ДВИЖЕНИЕ ПРОТИВ СИГНАЛА"
             elif strong:
@@ -744,6 +768,8 @@ class SignalConfirmation:
                     "flow_slice_count": realtime.get("flow_slice_count", 0.0),
                     "failed_breakout": 1.0 if failed_breakout else 0.0,
                     "live_reversal": 1.0 if live_reversal else 0.0,
+                    "late_entry": 1.0 if late_entry else 0.0,
+                    "directional_extension_atr": directional_extension_atr,
                     "oi_change_pct": oi_value if oi_value is not None else -999.0,
                     "volume_ratio": volume_ratio,
                     "directional_acceleration_pct": directional_acceleration,
@@ -802,6 +828,8 @@ class SignalConfirmation:
             lines.append("➡️ Цена не удержала пробитый уровень в realtime. Не открывать сделку по этому подтверждению.")
         elif result.verdict == "REALTIME ДВИЖЕНИЕ ПРОТИВ СИГНАЛА":
             lines.append("➡️ За время наблюдения цена пошла против направления. Подтверждение отклонено.")
+        elif result.verdict == "ПОЗДНИЙ ВХОД — НЕ ДОГОНЯТЬ":
+            lines.append("➡️ Цена уже слишком растянута относительно EMA20/ATR на 1m. Не входить вслед за свечой; ждать откат и новое подтверждение.")
         elif result.verdict == "СИЛЬНЫЙ ИМПУЛЬС":
             lines.append("➡️ Realtime-поток сильно подтверждает основной сигнал. Это не гарантия движения.")
         elif result.verdict == "ИМПУЛЬС ПОДТВЕРЖДЁН":
