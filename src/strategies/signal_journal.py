@@ -240,8 +240,8 @@ class SignalJournal:
         low = min(x["low"] for x in candles)
         end_price = candles[-1]["close"]
         is_long = row["direction"] in {"PUMP", "LONG"}
-        favorable = ((high - entry) / entry * 100) if is_long else ((entry - low) / entry * 100)
-        adverse = ((entry - low) / entry * 100) if is_long else ((high - entry) / entry * 100)
+        favorable = max(0.0, ((high - entry) / entry * 100) if is_long else ((entry - low) / entry * 100))
+        adverse = max(0.0, ((entry - low) / entry * 100) if is_long else ((high - entry) / entry * 100))
         return {
             "horizon_seconds": horizon_seconds,
             "candles": len(candles),
