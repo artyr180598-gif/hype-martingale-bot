@@ -821,6 +821,7 @@ class SignalConfirmation:
                 f"Стакан: {m.get('orderbook_bid_pct', -1):.1f}% bid · Price: {m.get('price_change_pct', -999):+.3f}%",
                 f"Volume: {m.get('volume_ratio', 0):.1f}x · OI: {m.get('oi_change_pct', -999):+.2f}%",
                 f"Acceleration: {m.get('directional_acceleration_pct', 0):+.2f} п.п. · Room: {m.get('room_to_level_pct', 0):.2f}% · Compression: {'YES' if m.get('compressed_before_break', 0) > 0 else 'NO'}",
+                f"Late-entry filter: {m.get('directional_extension_atr', 0):.1f} ATR от EMA20 1m",
             ]
             if m.get("sequence_gap", 0) > 0:
                 lines.append("⚠️ В realtime orderbook обнаружен разрыв последовательности — OFI может быть неполным.")
